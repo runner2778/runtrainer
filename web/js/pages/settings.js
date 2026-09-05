@@ -30,27 +30,50 @@ const HTML = `
     </div>
 
     <div class="card">
-      <h2>DeepSeek AI 教练</h2>
+      <h2>AI 教练</h2>
       <div class="form-row">
-        <label>API Key（存于 Windows 凭据管理器，不落盘）</label>
-        <div class="flex">
-          <input type="password" placeholder="sk-..." x-model="deepseekKey" style="flex:1">
-          <button class="btn small" @click="pasteInto('deepseekKey')">📋 粘贴</button>
-        </div>
-      </div>
-      <div class="form-row">
-        <label>模型</label>
-        <select x-model="aiModel" @change="saveAiModel()">
-          <option value="deepseek-v4-pro">deepseek-v4-pro（推理强，推荐）</option>
-          <option value="deepseek-v4-flash">deepseek-v4-flash（便宜快速）</option>
+        <label>服务商</label>
+        <select x-model="aiProvider" @change="saveAiProvider()">
+          <template x-for="p in aiProviders" :key="p.key">
+            <option :value="p.key" x-text="p.label"></option>
+          </template>
         </select>
       </div>
-      <div class="flex">
-        <button class="btn primary" @click="saveDeepseekKey()" :disabled="!deepseekKey">保存 Key</button>
-        <button class="btn" x-show="hasDeepseekKey" @click="clearDeepseekKey()">清除</button>
-        <span class="badge soft" x-show="hasDeepseekKey">已配置</span>
-      </div>
-      <p class="muted mt8">Key 在 platform.deepseek.com 注册后获取。AI 每天最多自动调用一次，其余按需手动触发。</p>
+      <p class="muted mt8" x-text="aiHint()"></p>
+      <template x-if="provFreeText()">
+        <div class="form-row">
+          <label>模型（输入本地已拉取的模型名）</label>
+          <input x-model="aiModel" list="ai-model-suggest" @change="saveAiModel()">
+          <datalist id="ai-model-suggest">
+            <template x-for="m in modelOptions()" :key="m"><option :value="m"></option></template>
+          </datalist>
+        </div>
+      </template>
+      <template x-if="!provFreeText()">
+        <div class="form-row">
+          <label>模型</label>
+          <select x-model="aiModel" @change="saveAiModel()">
+            <template x-for="m in modelOptions()" :key="m">
+              <option :value="m" x-text="modelLabel(m)"></option>
+            </template>
+          </select>
+        </div>
+      </template>
+      <template x-if="provNeedsKey()">
+        <div class="form-row">
+          <label>API Key（存于 Windows 凭据管理器，不落盘）</label>
+          <div class="flex">
+            <input type="password" :placeholder="keyPlaceholder()" x-model="aiKey" style="flex:1">
+            <button class="btn small" @click="pasteInto('aiKey')">📋 粘贴</button>
+          </div>
+        </div>
+        <div class="flex">
+          <button class="btn primary" @click="saveAiKey()" :disabled="!aiKey">保存 Key</button>
+          <button class="btn" x-show="hasAiKey()" @click="clearAiKey()">清除</button>
+          <span class="badge soft" x-show="hasAiKey()">已配置</span>
+        </div>
+      </template>
+      <p class="muted mt8">教练 AI 每天最多自动调用一次。Mock 模式下完全由本地样例模拟，不消耗任何服务商额度。</p>
     </div>
   </div>
 
@@ -145,8 +168,10 @@ export function initSettings() {
     garminPassword: '',
     hasGarminPassword: false,
     garminCn: true,
-    deepseekKey: '',
-    hasDeepseekKey: false,
+    aiProvider: 'deepseek',
+    aiProviders: [],
+    aiKeys: {},
+    aiKey: '',
     aiModel: 'deepseek-v4-pro',
     theme: 'system',
     mockMode: true,
@@ -160,7 +185,9 @@ export function initSettings() {
       this.garminUsername = data.garmin_username || '';
       this.hasGarminPassword = data.has_garmin_password;
       this.garminCn = data.garmin_cn;
-      this.hasDeepseekKey = data.has_deepseek_key;
+      this.aiProvider = data.ai_provider || 'deepseek';
+      this.aiProviders = data.ai_providers || [];
+      this.aiKeys = data.ai_keys || {};
       this.aiModel = data.ai_model;
       this.theme = data.theme;
       this.mockMode = data.mock_mode;
@@ -240,16 +267,47 @@ export function initSettings() {
       this.syncing = false;
       this.$dispatch('toast', { text: '同步超时（仍在进行），请稍后查看同步状态表' });
     },
-    async saveDeepseekKey() {
-      const { ok, error } = await tryCall('save_deepseek_key', this.deepseekKey);
+    // ---- AI 服务商 ----
+    provInfo() { return (this.aiProviders || []).find((p) => p.key === this.aiProvider) || null; },
+    provNeedsKey() { const p = this.provInfo(); return !!(p && p.needs_key); },
+    provFreeText() { const p = this.provInfo(); return !!(p && p.free_text); },
+    modelOptions() { const p = this.provInfo(); return (p && p.models) || []; },
+    modelLabel(m) {
+      const d = {
+        'deepseek-v4-pro': 'deepseek-v4-pro（推理更强，推荐）',
+        'deepseek-v4-flash': 'deepseek-v4-flash（便宜快速）',
+        'glm-4-flash': 'glm-4-flash（永久免费）',
+      };
+      return d[m] || m;
+    },
+    aiHint() { const p = this.provInfo(); return p ? p.hint : ''; },
+    keyPlaceholder() {
+      return this.aiProvider === 'deepseek' ? 'sk-...（platform.deepseek.com 获取）' : 'API Key（服务商控制台获取）';
+    },
+    hasAiKey() { return !!(this.aiKeys || {})[this.aiProvider]; },
+    async saveAiProvider() {
+      const { ok, error } = await tryCall('set_setting', 'ai_provider', this.aiProvider);
+      if (!ok) { this.$dispatch('toast', { text: '切换失败: ' + error }); await this.init(); return; }
+      // 模型名不在新服务商候选列表时，落到其默认模型并保存（与后端回落逻辑一致）
+      const info = this.provInfo();
+      if (info && info.models && info.models.length && !info.models.includes(this.aiModel)) {
+        this.aiModel = info.models[0];
+        await tryCall('set_setting', 'ai_model', this.aiModel);
+      }
+      this.aiKey = '';
+      this.$dispatch('toast', { text: '已切换到「' + (info ? info.label : this.aiProvider) + '」' });
+    },
+    async saveAiKey() {
+      const { ok, error } = await tryCall('save_ai_key', this.aiProvider, this.aiKey);
       if (!ok) { this.$dispatch('toast', { text: '保存失败: ' + error }); return; }
-      this.hasDeepseekKey = true;
-      this.deepseekKey = '';
+      this.aiKeys = { ...this.aiKeys, [this.aiProvider]: true };
+      this.aiKey = '';
       this.$dispatch('toast', { text: 'API Key 已保存' });
     },
-    async clearDeepseekKey() {
-      await tryCall('clear_deepseek_key');
-      this.hasDeepseekKey = false;
+    async clearAiKey() {
+      const { ok, error } = await tryCall('clear_ai_key', this.aiProvider);
+      if (!ok) { this.$dispatch('toast', { text: '清除失败: ' + error }); return; }
+      this.aiKeys = { ...this.aiKeys, [this.aiProvider]: false };
       this.$dispatch('toast', { text: 'Key 已清除' });
     },
     async saveAiModel() { await tryCall('set_setting', 'ai_model', this.aiModel); },

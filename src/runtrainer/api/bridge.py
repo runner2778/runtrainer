@@ -60,13 +60,18 @@ class Api:
     # ---- 设置 ----
     @envelope
     def get_settings(self):
+        from ..ai.deepseek_client import PROVIDERS
         profile = profile_repo.get_profile() or {}
         garmin_user, garmin_pass = settings_service.get_garmin_credentials()
+        provider = settings_service.get_ai_provider()
         return {
             "profile": profile,
             "garmin_username": garmin_user or "",
             "has_garmin_password": bool(garmin_pass),
-            "has_deepseek_key": bool(settings_service.get_deepseek_key()),
+            "has_deepseek_key": bool(settings_service.get_ai_key("deepseek")),
+            "ai_provider": provider,
+            "ai_providers": [{"key": k, **v} for k, v in PROVIDERS.items()],
+            "ai_keys": {k: bool(settings_service.get_ai_key(k)) for k in PROVIDERS},
             "ai_model": settings_service.get_ai_model(),
             "theme": settings_service.get_theme(),
             "mock_mode": settings_service.is_mock_mode(),
@@ -92,21 +97,35 @@ class Api:
         return {"cleared": True}
 
     @envelope
-    def save_deepseek_key(self, api_key: str):
+    def save_ai_key(self, provider: str, api_key: str):
+        if provider not in settings_service.PROVIDERS:
+            raise ValueError(f"未知 AI 服务商 {provider}")
         if not api_key:
             raise ValueError("API Key 不能为空")
-        settings_service.set_deepseek_key(api_key)
+        settings_service.set_ai_key(provider, api_key)
         return {"saved": True}
 
     @envelope
-    def clear_deepseek_key(self):
-        settings_service.clear_deepseek_key()
+    def clear_ai_key(self, provider: str):
+        if provider not in settings_service.PROVIDERS:
+            raise ValueError(f"未知 AI 服务商 {provider}")
+        settings_service.clear_ai_key(provider)
         return {"cleared": True}
+
+    @envelope
+    def save_deepseek_key(self, api_key: str):
+        return self.save_ai_key("deepseek", api_key)
+
+    @envelope
+    def clear_deepseek_key(self):
+        return self.clear_ai_key("deepseek")
 
     @envelope
     def set_setting(self, key: str, value: str):
         if key == "ai_model":
             settings_service.set_ai_model(value)
+        elif key == "ai_provider":
+            settings_service.set_ai_provider(value)
         elif key == "theme":
             settings_service.set_theme(value)
         elif key == "mock_mode":

@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from pydantic import ValidationError
 
 from ..ai.contracts import ChatOutput, CoachOutput
-from ..ai.deepseek_client import DeepSeekClient, MockClient
+from ..ai.deepseek_client import PROVIDERS, DeepSeekClient, MockClient
 from ..ai import guardrails, prompt_builder
 from ..db.repos import (adjustment_repo, activity_repo, chat_repo, goal_repo, health_repo,
                         kv_repo, plan_repo, profile_repo)
@@ -26,12 +26,21 @@ ADJUSTED_STATUS = {"rest": "skipped", "skip": "skipped"}
 
 
 def _make_client(extra_requested: bool):
+    """按设置的服务商构造 AI 客户端：DeepSeek（付费）/ 智谱 GLM-4-Flash（免费）/ Ollama（本地免费）。"""
     from . import settings_service
     if not settings_service.is_mock_mode():
-        key = settings_service.get_deepseek_key()
-        if not key:
-            raise RuntimeError("未配置 DeepSeek API Key，请在设置页配置后重试")
-        return DeepSeekClient(key, settings_service.get_ai_model())
+        provider = settings_service.get_ai_provider()
+        info = PROVIDERS[provider]
+        key = settings_service.get_ai_key(provider)
+        if info.get("needs_key") and not key:
+            raise RuntimeError(
+                f"未配置 {info['label']} 的 API Key，请在设置页配置；"
+                "或改选「智谱 GLM-4-Flash（免费）」/「Ollama 本地」不消耗 DeepSeek 费用")
+        model = settings_service.get_ai_model()
+        # 模型不在该服务商候选且服务商非自由输入 → 回落默认模型
+        if not info.get("free_text") and model not in info["models"]:
+            model = info["models"][0]
+        return DeepSeekClient(key or "", model, base_url=info["base_url"])
     if extra_requested:
         return MockClient("add_extra")
     return MockClient(["normal", "low_hrv", "overload"][dates.today().toordinal() % 3])

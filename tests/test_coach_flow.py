@@ -162,9 +162,34 @@ def test_no_plan_raises(monkeypatch):
 def test_no_key_real_mode_raises(monkeypatch, plan):
     from runtrainer.services import settings_service
     monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
-    monkeypatch.setattr(settings_service, "get_deepseek_key", lambda: None)
+    monkeypatch.setattr(settings_service, "get_ai_provider", lambda: "deepseek")
+    monkeypatch.setattr(settings_service, "get_ai_key", lambda provider: None)
     with pytest.raises(RuntimeError, match="API Key"):
         coach_service.request_advice()
+
+
+def test_provider_ollama_no_key_allowed(monkeypatch, plan):
+    """Ollama 本地服务商无需 Key：不 raise 且 client 指向本地端点。"""
+    from runtrainer.services import settings_service
+    monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(settings_service, "get_ai_provider", lambda: "ollama")
+    monkeypatch.setattr(settings_service, "get_ai_key", lambda provider: None)
+    monkeypatch.setattr(settings_service, "get_ai_model", lambda: "qwen2.5:7b")
+    client = coach_service._make_client(False)
+    assert client.model == "qwen2.5:7b"
+    assert "11434" in str(client._client.base_url)
+
+
+def test_provider_zhipu_fallback_model(monkeypatch, plan):
+    """切换服务商后旧模型名不在候选列表 → 回落该服务商默认模型。"""
+    from runtrainer.services import settings_service
+    monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(settings_service, "get_ai_provider", lambda: "zhipu")
+    monkeypatch.setattr(settings_service, "get_ai_key", lambda provider: "fake-key")
+    monkeypatch.setattr(settings_service, "get_ai_model", lambda: "deepseek-v4-pro")
+    client = coach_service._make_client(False)
+    assert client.model == "glm-4-flash"
+    assert "bigmodel.cn" in str(client._client.base_url)
 
 
 # ---------------- 教练聊天 ----------------
