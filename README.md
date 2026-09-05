@@ -34,11 +34,38 @@ tests/                       # pytest（VDOT 锚点、引擎不变量、护栏�
 tools/                       # 开发/验证脚本（重建计划、UI 验证、数据回填等）
 ```
 
-## 开发
+## 下载运行（源码方式，Windows 10/11）
+
+需要：**Python 3.12+**（python.org 安装时勾选 Add to PATH）与 Git（可选，下载 zip 亦可）。
 
 ```powershell
-.venv\Scripts\python.exe -m pytest -q      # 测试（数据目录自动隔离）
-.venv\Scripts\pythonw.exe -m runtrainer    # 运行
+git clone https://github.com/runner2778/runtrainer.git
+cd runtrainer
+
+python -m venv .venv
+.venv\Scripts\pip install -e .          # editable 安装（界面目录按仓库根定位）
+.venv\Scripts\pythonw.exe -m runtrainer # 启动（python -m runtrainer 亦可，勿用 pythonw 跑命令行）
+```
+
+> 注意：**必须用 editable 安装并在仓库根运行**——界面文件 `web/` 按仓库根定位，普通
+> `pip install .` 会把包复制走导致打不开界面。用 uv 则 `uv sync && uv run python -m runtrainer`。
+
+首次启动后：
+
+1. **设置页**填入 Garmin Connect 账号（建议中国大陆账号勾选「中国区」）→ 点同步拉取跑步/睡眠/HRV 数据（健康数据量大时多点几次同步会自动分批回拉）
+2. **设置页**填入 DeepSeek API key（platform.deepseek.com）→ AI 教练才可用；不填则一切核心功能（导入/课表/日历/图表）照常工作
+3. **目标页**创建训练目标（距离 + 比赛日 + 目标成绩）→ 自动生成课表；可选「职业双练模式」等高级选项
+
+凭据只存 Windows 凭据管理器，数据在 `%APPDATA%\RunTrainer`（删除即完全卸载）。
+
+无 Garmin 设备也可用：**活动页**可导入 Garmin Connect 网页导出的 .fit 文件或按模板填写的 CSV；健康数据会缺项但课表/教练仍可用。
+
+## 开发测试
+
+```powershell
+.venv\Scripts\python -m pytest -q      # 197 测试（数据目录自动隔离，不碰真实数据）
+python -m PyInstaller runtrainer.spec --noconfirm   # 打包 onedir
+dist\RunTrainer\RunTrainer.exe --selfcheck           # 打包自检
 ```
 
 ## 安全
