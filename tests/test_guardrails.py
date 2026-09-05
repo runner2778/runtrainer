@@ -216,6 +216,89 @@ def test_taper_shift_dropped():
     assert any("不可挪课" in x for x in log)
 
 
+# ---- 强制模式（用户坚持要求改课：不拒绝，降级落地） ----
+
+def test_force_taper_modify_to_hard_lands_as_easy():
+    ctx = _ctx(race_date=TODAY + timedelta(days=7), force=True)
+    items, log = _run([{"date": "2026-09-07", "planned_workout_id": 1,
+                        "action": "modify", "changes": {"kind": "I", "distance_km": 6.0}}],
+                      ctx=ctx)
+    assert len(items) == 1
+    assert items[0]["changes"]["kind"] == "E"
+    assert any("强制模式" in x for x in log)
+
+
+def test_force_adjacent_conflict_lands_as_easy():
+    # 周四 E→I 与周三 T 相邻：非强制被丢弃（见 test_modify_creating_adjacent_hard_dropped），
+    # 强制时降 E 落地而不是拒绝
+    items, log = _run([{"date": "2026-09-10", "planned_workout_id": 4,
+                        "action": "modify", "changes": {"kind": "I", "distance_km": 6.0}}],
+                      ctx=_ctx(force=True))
+    assert len(items) == 1
+    assert items[0]["changes"]["kind"] == "E"
+    assert any("相邻" in x for x in log)
+
+
+def test_force_week_gain_over_10pct_lands():
+    items, log = _run([
+        {"date": "2026-09-07", "planned_workout_id": 1, "action": "modify",
+         "changes": {"distance_km": 13.0}},   # 8→10.4 (+2.4)
+        {"date": "2026-09-08", "planned_workout_id": 2, "action": "modify",
+         "changes": {"distance_km": 8.0}},    # 5→6.5 (+1.5)
+        {"date": "2026-09-10", "planned_workout_id": 4, "action": "modify",
+         "changes": {"distance_km": 13.0}},   # 8→10.4 (+2.4)，累计 +6.3 > +4 上限
+    ], ctx=_ctx(force=True))
+    assert len(items) == 3
+    assert any("豁免" in x for x in log)
+
+
+def test_force_taper_shift_allowed():
+    ctx = _ctx(race_date=TODAY + timedelta(days=7), force=True)
+    items, log = _run([{"date": "2026-09-07", "planned_workout_id": 1,
+                        "action": "shift", "changes": {"date": "2026-09-11"}}], ctx=ctx)
+    assert len(items) == 1 and items[0]["action"] == "shift"
+
+
+def test_force_shift_into_hard_gap_lands_as_easy():
+    # 周六 I7 是强度日，把强度课挪到周五会与周六相邻 → 强制时降 E 挪入
+    items, log = _run([{"date": "2026-09-09", "planned_workout_id": 3,
+                        "action": "shift", "changes": {"date": "2026-09-11"}}], ctx=_ctx(force=True))
+    assert len(items) == 1 and items[0]["action"] == "shift"
+    assert any("降为 E" in x for x in log)
+
+
+def test_force_add_easy_taper_lands_as_recovery():
+    ctx = _ctx(race_date=TODAY + timedelta(days=10), force=True)   # 14 天窗口内、非最后 3 天
+    items, log = _run([{"date": "2026-09-11", "planned_workout_id": None,
+                        "action": "add_easy"}], ctx=ctx, extra=_extra(kind="E"))
+    assert len(items) == 1
+    assert items[0]["changes"]["kind"] == "RECOVERY"
+    assert items[0]["changes"]["duration_min"] <= 30.0
+
+
+def test_force_add_easy_last_3_days_lands_short_recovery():
+    ctx = _ctx(race_date=TODAY + timedelta(days=2), force=True)   # race 09-09
+    items, log = _run([{"date": "2026-09-11", "planned_workout_id": None,
+                        "action": "add_easy"}], ctx=ctx, extra=_extra())
+    assert len(items) == 1
+    assert items[0]["changes"]["kind"] == "RECOVERY"
+    assert items[0]["changes"]["duration_min"] == 20.0
+
+
+def test_force_still_enforces_data_validity():
+    # 强制模式只豁免训练学规则，不豁免数据合法性
+    items, log = _run([{"date": "2026-09-07", "planned_workout_id": 999,
+                        "action": "modify", "changes": {"kind": "E"}}], ctx=_ctx(force=True))
+    assert items == []
+    assert any("不存在" in x for x in log)
+    ctx = _ctx(workouts=[dict(w, status="completed") if w["id"] == 1 else w
+                         for w in WORKOUTS], force=True)
+    items2, log2 = _run([{"date": "2026-09-07", "planned_workout_id": 1,
+                          "action": "rest"}], ctx=ctx)
+    assert items2 == []
+    assert any("已完成" in x for x in log2)
+
+
 # ---- 规则 8：容量上限 ----
 
 def test_modify_to_I_distance_capped():

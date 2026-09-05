@@ -478,10 +478,12 @@ def chat(message: str) -> dict:
     output = _validated(client, prompt, ChatOutput)
     log.info("教练聊天调用返回，耗时 %.1fs", time.monotonic() - t0)
 
-    # 调整建议走与日常建议相同的护栏
+    # 调整建议走与日常建议相同的护栏；用户明确要求改课（user_requested）时
+    # 进入强制模式：不丢弃，降强度/调课表落地（见 guardrails.force）
     fake = CoachOutput(summary="chat", readiness="ok", key_signals=[],
                        adjustments=output.adjustments, add_extra_advice=None, weekly_notes="")
-    items, guard_log = guardrails.validate(fake, guardrails.GuardContext(**ctx["guard"]))
+    items, guard_log = guardrails.validate(
+        fake, guardrails.GuardContext(**ctx["guard"], force=bool(output.user_requested)))
     model = getattr(client, "model", "mock")
     ids = _persist_chat_items(ctx, items, guard_log, model, prompt, output)
 

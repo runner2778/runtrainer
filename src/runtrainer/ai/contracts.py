@@ -67,6 +67,11 @@ PROFILE_UPDATE_RANGES = {
 class ChatOutput(BaseModel):
     """教练聊天输出：直接回复 + 可选的课表调整建议 + 可选的档案更新。"""
     reply: str = Field(min_length=1, description="对用户消息的直接回复（中文）")
+    user_requested: bool = Field(
+        default=False,
+        description="用户在本条消息中明确要求调整课表（无论语气坚决还是商量）。"
+                    "置 true 时必须至少给出 1 条 adjustments，不许空数组敷衍、不许以“不建议”回绝；"
+                    "请求不合理时用降低强度/调整课表的方式落地")
     adjustments: list[AdjustmentItem] = Field(default_factory=list,
                                               description="仅当用户明确要求改课时给出，日期限未来 7 天")
     profile_updates: dict = Field(default_factory=dict,

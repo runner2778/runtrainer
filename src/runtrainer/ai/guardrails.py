@@ -44,6 +44,10 @@ class GuardContext:
     paces: dict                          # vd.pace_table 输出
     add_extra_count_this_week: int = 0   # 本周已生效的加练次数
     extra_requested: bool = False
+    force: bool = False                  # 训练者明确强制要求调整：不打回，降级落地（不拒绝）
+    # force 豁免：赛前窗口非轻松改动→降 E 落地；相邻强度日冲突→降 E 落地；挪课进强度夹缝→降 E 挪入；
+    # 周量 +10% 上限豁免；赛前加练→改 20–30 分钟恢复跑。
+    # force 不豁免：距离 ±30%/容量上限钳制与数据合法性（日期范围/课存在/已完成课/占档日）
 
 
 def is_hard(kind: str, pace_zone: str | None) -> bool:
@@ -214,8 +218,11 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
             if changes.duration_min is not None:
                 dur = float(changes.duration_min)
         if taper and not (kind in ("E", "RECOVERY") or (kind == "LR" and zone == "E")):
-            log.append(f"调整#{idx} 赛前 14 天不可改为 {kind}，被丢弃")
-            return None
+            if not ctx.force:
+                log.append(f"调整#{idx} 赛前 14 天不可改为 {kind}，被丢弃")
+                return None
+            log.append(f"调整#{idx} 强制模式：赛前 14 天内不能上 {kind} 强度，按用户要求降为轻松跑 E 落地（跑量保留）")
+            kind, zone = "E", "E"
         # 容量上限
         if kind == "I":
             dist = min(dist, min(CAP_I_WEEK_PCT * ctx.week_km, CAP_I_KM))
@@ -230,12 +237,20 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
         state.by_date[key] = new_w
         if not _adjacent_ok(state.by_date, d):
             state.by_date[key] = workout
-            log.append(f"调整#{idx} 造成相邻日强度课冲突，被丢弃")
-            return None
+            if not ctx.force:
+                log.append(f"调整#{idx} 造成相邻日强度课冲突，被丢弃")
+                return None
+            log.append(f"调整#{idx} 强制模式：相邻日已有强度课，{kind} 无法插入，按用户要求降为 E 轻松跑落地")
+            kind, zone = "E", "E"
+            new_w = dict(workout, kind=kind, pace_zone=zone, distance_km=dist, duration_min=dur)
+            state.by_date[key] = new_w
         if _in_week(ctx, d) and not state.km_delta(ctx, dist - old):
-            state.by_date[key] = workout
-            log.append(f"调整#{idx} 导致周量变化超 ±10% 被丢弃")
-            return None
+            if not ctx.force:
+                state.by_date[key] = workout
+                log.append(f"调整#{idx} 导致周量变化超 ±10% 被丢弃")
+                return None
+            state.week_km += dist - old
+            log.append(f"调整#{idx} 强制模式：周量增幅超 +10% 上限被豁免，按用户要求执行")
         out["changes"] = {"kind": kind, "pace_zone": zone,
                           "distance_km": round(dist, 1), "duration_min": round(dur, 1)}
         if changes and changes.title:
@@ -246,8 +261,10 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
 
     if action == "shift":
         if taper:
-            log.append(f"调整#{idx} 赛前 14 天不可挪课，被丢弃")
-            return None
+            if not ctx.force:
+                log.append(f"调整#{idx} 赛前 14 天不可挪课，被丢弃")
+                return None
+            log.append(f"调整#{idx} 强制模式：赛前 14 天内按用户要求挪课")
         if not changes or not changes.date:
             log.append(f"调整#{idx} 缺少目标日期，被丢弃")
             return None
@@ -268,9 +285,13 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
         state.by_date[_wkey(w)] = w
         if not _adjacent_ok(state.by_date, nd):
             state.by_date.pop(_wkey(w), None)
-            state.by_date[key] = dict(w, date=workout["date"])
-            log.append(f"调整#{idx} 挪课后与相邻日强度课冲突，被丢弃")
-            return None
+            if not ctx.force:
+                state.by_date[key] = dict(w, date=workout["date"])
+                log.append(f"调整#{idx} 挪课后与相邻日强度课冲突，被丢弃")
+                return None
+            log.append(f"调整#{idx} 强制模式：目标日 {nd} 两侧已是强度日，{workout['kind']} 降为 E 轻松跑挪入")
+            w = dict(w, date=nd.isoformat(), kind="E", pace_zone="E")
+            state.by_date[_wkey(w)] = w
         return out
 
     if action == "add_easy":
@@ -298,11 +319,17 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
         kind = (suggestion.kind if suggestion and suggestion.kind in EXTRA_KINDS else "E")
         dur = min(float(suggestion.duration_min) if suggestion else 30.0, 45.0)
         if d >= ctx.race_date - timedelta(days=2):
-            log.append(f"调整#{idx} 赛前 3 天禁止加练，被丢弃")
-            return None
-        if taper and kind != "RECOVERY":
-            log.append(f"调整#{idx} 赛前 14 天只允许恢复跑加练，被丢弃")
-            return None
+            if not ctx.force:
+                log.append(f"调整#{idx} 赛前 3 天禁止加练，被丢弃")
+                return None
+            kind, dur = "RECOVERY", min(dur, 20.0)
+            log.append(f"调整#{idx} 强制模式：赛前 3 天内加练按用户要求落地为 {dur:.0f} 分钟恢复跑")
+        elif taper and kind != "RECOVERY":
+            if not ctx.force:
+                log.append(f"调整#{idx} 赛前 14 天只允许恢复跑加练，被丢弃")
+                return None
+            kind, dur = "RECOVERY", min(dur, 30.0)
+            log.append(f"调整#{idx} 强制模式：赛前 14 天内加练按用户要求落地为 ≤{dur:.0f} 分钟恢复跑")
         e_pace = ctx.paces.get("E", {}).get("slow_s_km") or 360.0
         dist = round(dur * 60 / e_pace, 1)
         new_w = {
