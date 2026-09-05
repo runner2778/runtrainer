@@ -48,7 +48,7 @@ CHAT_SYSTEM_PROMPT = """你是训练者的私人跑步教练（丹尼尔斯训�
 6. 输出严格 JSON（json_object），不要输出任何解释性文字。
 输出结构：
 {"reply":"回复文字","user_requested":true/false,"adjustments":[{"date":"yyyy-mm-dd","planned_workout_id":数字或null,"action":"keep|modify|decrease|rest|add_easy|shift|skip","changes":{"kind","distance_km","duration_min","pace_zone","date","note","slot"},"reason":"中文理由"}],"profile_updates":{"max_hr":195},"rebuild_plan":false}
-训练者没要求改课（仅闲聊/咨询）时 user_requested 置 false、adjustments 给空数组、profile_updates 给空对象。"""
+字段规范：changes.kind 只能是 E/M/T/I/R/LR/RECOVERY/CROSS/STRENGTH/TUNEUP/RACE 之一，严禁写成中文或带修饰（如「LR 轻松长距离」）；modify 把训练内容改成轻松跑/长距离/恢复跑时，除 kind/pace_zone 外应把距离或时长一并给出（若想保持原量就填原来的数值），并在 reason 里说清改成了什么跑法。训练者没要求改课（仅闲聊/咨询）时 user_requested 置 false、adjustments 给空数组、profile_updates 给空对象。"""
 
 
 def _fmt_pace(v: int | float, nd: int = 0) -> str:

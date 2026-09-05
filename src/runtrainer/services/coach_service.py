@@ -328,6 +328,47 @@ def decide_advice(approve: bool) -> dict:
             "errors": errors}
 
 
+# 质量课特征（用于识别"标题/分段仍是旧质量课内容"的残留）
+_QUALITY_TEXT_MARKERS = ("间歇", "阈值", "亚阈", "重复跑", "冲刺", "跨步",
+                        "马拉松配速", "配速跑", "测试", "比赛")
+_QUALITY_SEGMENT_TYPES = {"tempo", "reps", "strides"}
+
+
+def _align_workout_content(w: dict, r: dict) -> None:
+    """AI 把课改成轻松类（LR/E/RECOVERY）后，若标题/描述/分段还停留在原质量课
+    内容上（如原「间歇 4×1200m」只改了 kind），自动对齐：
+    标题换成长距离/轻松跑/放松跑，描述改为调整原因，旧分段清空。
+    """
+    kind = w.get("kind")
+    if kind not in ("LR", "E", "RECOVERY"):
+        return
+    title = (w.get("title") or "").strip()
+    if kind == "LR":
+        need = "长距离" not in title
+    else:
+        desc = w.get("description") or ""
+        text = title + " " + desc
+        segs = w.get("segments_json")
+        try:
+            seg_list = jsonutil.loads(segs) if isinstance(segs, str) else (segs or [])
+        except Exception:
+            seg_list = []
+        need = any(m in text for m in _QUALITY_TEXT_MARKERS) or bool(
+            {s.get("type") for s in seg_list if isinstance(s, dict)} & _QUALITY_SEGMENT_TYPES)
+    if not need:
+        return
+    dist = float(w.get("distance_km") or 0)
+    dur = float(w.get("duration_min") or 0)
+    if kind == "LR":
+        w["title"] = f"长距离 {dist:g}km" if dist else f"长距离 {dur:g} 分钟"
+    elif kind == "RECOVERY":
+        w["title"] = f"放松跑 {dur:g} 分钟" if dur else "放松跑"
+    else:
+        w["title"] = f"轻松跑 {dur:g} 分钟" if dur else "轻松跑"
+    w["description"] = f"教练按你的要求调整：{r.get('reason') or '轻松跑'}"[:300]
+    w["segments_json"] = None
+
+
 def _apply_row(plan: dict, r: dict) -> None:
     action = r["action"]
     changes = jsonutil.loads(r.get("changes_json")) or {}
@@ -344,6 +385,8 @@ def _apply_row(plan: dict, r: dict) -> None:
         for k, v in changes.items():
             if k in w:
                 w[k] = v
+        if action == "modify":
+            _align_workout_content(w, r)   # 类型改轻松类后清理残留的质量课标题/分段
         w["source"] = "ai"
         w["adjustment_id"] = r["id"]
         plan_repo.update_workout(r["workout_id"], w)

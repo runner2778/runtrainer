@@ -364,6 +364,36 @@ def test_chat_forced_failed_apply_stays_pending(monkeypatch, plan):
     assert len(chat_repo.list_messages()) == 2
 
 
+def test_modify_to_long_run_aligns_title_and_segments(monkeypatch, plan):
+    """改成轻松/长距离后，不能残留原质量课的标题与分段（真实 bug：
+    kind=LR 但标题仍是「间歇 4×1200m」，日历看起来没变）。"""
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    target = next(w for w in ws if w["date"] == d)
+    assert target["kind"] in ("T", "I", "R"), "fixture 质量课"
+    client = _FakeChatClient({
+        "reply": "好的，把那天的课改成长距离。",
+        "adjustments": [{
+            "date": d, "planned_workout_id": target["id"], "action": "modify",
+            "changes": {"kind": "LR", "pace_zone": "E"},
+            "reason": "你要求改成轻松长距离",
+        }],
+        "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    res = coach_service.chat("把那天的课改成长距离")
+    out = coach_service.decide_chat_adjustments(res["reply"]["id"], True)
+    assert out["applied"] == 1
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == "LR"
+    assert "长距离" in w["title"], f"标题应改为长距离，实际: {w['title']}"
+    assert "间歇" not in (w["title"] or "") and "阈值" not in (w["title"] or ""), \
+        f"不得残留质量课标题: {w['title']}"
+    assert w["segments_json"] is None, "旧的分段（间歇组/阈值段）应被清空"
+    assert "轻松长距离" in (w["description"] or ""), "描述应替换为调整原因"
+
+
 def test_chat_profile_updates_guarded(monkeypatch, plan):
     from runtrainer.db.repos import profile_repo
     p, ws = plan
