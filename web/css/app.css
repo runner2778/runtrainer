@@ -261,6 +261,8 @@ tbody tr:hover { background: var(--bg-hover); }
   text-overflow: ellipsis;
 }
 .calendar .day .wk.done { opacity: 0.55; text-decoration: line-through; }
+/* 被 AI 教练调整为休息/跳过（skipped）：置灰 + 划线，区别于已完成 */
+.calendar .day .wk.skipped { opacity: 0.4; filter: grayscale(0.8); text-decoration: line-through; }
 .calendar .day .wk.ai { box-shadow: inset 3px 0 0 rgba(0, 0, 0, 0.35); }
 .calendar .day .wk.rest { background: var(--bg-hover); color: var(--text-muted); }
 .calendar .day .act-tag {

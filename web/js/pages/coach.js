@@ -141,7 +141,9 @@ const HTML = `
             <div class="chat-bubble">
               <p class="chat-text" x-text="m.content"></p>
               <div class="mt8" x-show="m.adjustments && m.adjustments.length">
-                <p class="muted">调整建议（批准后应用到课表）：</p>
+                <p class="muted" x-text="m.auto_applied
+                  ? '✅ 已按你的要求直接改到课表（日历已更新）：'
+                  : '调整建议（批准后应用到课表）：'"></p>
                 <template x-for="a in m.adjustments" :key="a.id">
                   <div class="diff-row">
                     <div class="flex between">
@@ -195,7 +197,7 @@ const HTML = `
       </div>
       <div class="flex mt8">
         <textarea class="chat-input" x-model="chatInput" rows="2" :disabled="chatWorking"
-          placeholder="例：这周末出差，把周日长距离换到周六；或：我最大心率其实是 195"
+          placeholder="例：这周末出差，把周日长距离换到周六（改课请求会直接改到课表）；或：我最大心率其实是 195"
           @keydown.enter.prevent.exact="send()"></textarea>
         <button class="btn primary" @click="send()" :disabled="chatWorking || !chatInput.trim()">
           <span x-text="chatWorking ? '思考中…' : '发送'"></span>

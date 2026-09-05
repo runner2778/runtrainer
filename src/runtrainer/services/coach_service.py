@@ -389,12 +389,18 @@ def _apply_row(plan: dict, r: dict) -> None:
 # ---------------- 教练聊天 ----------------
 
 def _persist_chat_items(ctx: dict, items: list[dict], guard_log: list[str],
-                        model: str, prompt: dict, output: ChatOutput) -> list[int]:
-    """聊天提出的调整逐条落库（pending，不写今日缓存）。返回 ids。"""
+                        model: str, prompt: dict, output: ChatOutput,
+                        auto_apply: bool = False) -> tuple[list[int], int]:
+    """聊天提出的调整逐条落库（pending，不写今日缓存）。
+
+    auto_apply=True（用户强制要求改课）时逐条直接应用到课表并置 applied——
+    失败的行保持 pending（可在聊天里再批准）。返回 (ids, 自动应用失败条数)。
+    """
     plan = plan_repo.get_active_plan()
     input_json = {"system": prompt["system"], "user": prompt["user"]}
     output_json = output.model_dump(mode="json")
     ids = []
+    failed = 0
     for it in items:
         r = adjustment_repo.create_adjustment({
             "plan_id": plan["id"], "workout_id": it.get("planned_workout_id"),
@@ -405,7 +411,14 @@ def _persist_chat_items(ctx: dict, items: list[dict], guard_log: list[str],
             "status": "pending",
         })
         ids.append(r["id"])
-    return ids
+        if auto_apply:
+            try:
+                _apply_row(plan, r)
+                adjustment_repo.set_applied(r["id"])
+            except Exception as e:
+                failed += 1
+                log.warning("强制调整 #%s 自动应用失败，保留待批准: %s", r["id"], e)
+    return ids, failed
 
 
 def _apply_profile_updates(updates: dict) -> dict:
@@ -438,11 +451,14 @@ def _apply_profile_updates(updates: dict) -> dict:
 
 def _chat_message_view(m: dict) -> dict:
     ids = jsonutil.loads(m.get("adjustment_ids_json")) or []
+    rows = [_row_view(r) for i in ids if (r := adjustment_repo.get_adjustment(i))]
     return {
         "id": m["id"], "role": m["role"], "content": m["content"],
         "created_at": m.get("created_at"), "model": m.get("model"),
         "adjustment_ids": ids,
-        "adjustments": [_row_view(r) for i in ids if (r := adjustment_repo.get_adjustment(i))],
+        "adjustments": rows,
+        # 强制要求的调整已自动生效（全部 applied）→ 前端不再显示批准按钮、文案改为已执行
+        "auto_applied": bool(rows) and all(r["status"] == "applied" for r in rows),
         "profile_updates": jsonutil.loads(m.get("profile_updates_json")) or {},
     }
 
@@ -485,7 +501,9 @@ def chat(message: str) -> dict:
     items, guard_log = guardrails.validate(
         fake, guardrails.GuardContext(**ctx["guard"], force=bool(output.user_requested)))
     model = getattr(client, "model", "mock")
-    ids = _persist_chat_items(ctx, items, guard_log, model, prompt, output)
+    forced = bool(output.user_requested)
+    ids, auto_failed = _persist_chat_items(
+        ctx, items, guard_log, model, prompt, output, auto_apply=forced)
 
     profile_applied = _apply_profile_updates(output.profile_updates or {})
     rebuild_info = None
@@ -501,6 +519,13 @@ def chat(message: str) -> dict:
     dropped = len(output.adjustments) - len(items)
     if dropped:
         reply += f"\n\n⚠️ 其中 {dropped} 条调整未通过安全护栏被忽略。"
+    if forced:
+        applied_n = len(items) - auto_failed
+        if applied_n > 0:
+            reply += (f"\n\n✅ 已按你的要求直接改到课表（{applied_n} 项），去日历即可看到变化。"
+                      + ("其余调整未执行成功，可点下方「批准」重试。" if auto_failed else ""))
+        elif auto_failed:
+            reply += "\n\n⚠️ 本次调整未能自动执行，请点下方「批准」手动应用到课表。"
     user_row = chat_repo.create_message("user", message)
     coach_row = chat_repo.create_message(
         "coach", reply, adjustment_ids=ids, profile_updates=profile_applied, model=model)

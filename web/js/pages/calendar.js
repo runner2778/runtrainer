@@ -69,7 +69,7 @@ const HTML = `
           <div class="day" :class="(d.inMonth ? '' : 'other') + (d.isToday ? ' today' : '') + (d.isRace ? ' race' : '')">
             <div class="dnum" x-text="Number(d.date.slice(8))"></div>
             <template x-for="w in (byDate[d.date] || [])" :key="w.id">
-              <button class="wk" :class="'kind-' + w.kind + (w.status === 'completed' ? ' done' : '') + (w.source === 'ai' || w.adjustment_id ? ' ai' : '')"
+              <button class="wk" :class="'kind-' + w.kind + (w.status === 'completed' ? ' done' : '') + (w.status === 'skipped' ? ' skipped' : '') + (w.source === 'ai' || w.adjustment_id ? ' ai' : '')"
                       :data-wid="w.id">
                 <span x-text="(w.status === 'completed' ? '✓ ' : '') + (w.slot === 2 ? '② ' : '') + shortTitle(w)"></span>
               </button>
@@ -114,12 +114,17 @@ const HTML = `
           <span x-show="modal.distance_km && modal.duration_min"> · </span>
           <span x-show="modal.duration_min"><b x-text="fmtDur(modal.duration_min)"></b></span>
         </p>
+        <p class="muted mt8" x-show="modal.status === 'skipped'">
+          ⏭ 此课已被教练调整为休息/跳过（原因见 AI 教练页调整历史）。
+        </p>
         <div class="flex mt16">
-          <button class="btn primary" x-show="modal.status !== 'completed'"
+          <button class="btn primary" x-show="modal.status !== 'completed' && modal.status !== 'skipped'"
                   @click="markDone(modal, null)">✓ 标记完成</button>
-          <button class="btn" x-show="modal.status !== 'completed' && sameDayActs.length"
+          <button class="btn" x-show="modal.status !== 'completed' && modal.status !== 'skipped' && sameDayActs.length"
                   @click="showLink = !showLink">关联活动完成</button>
           <button class="btn" x-show="modal.status === 'completed'"
+                  @click="markDone(modal, null, 'planned')">↩ 恢复为计划</button>
+          <button class="btn" x-show="modal.status === 'skipped'"
                   @click="markDone(modal, null, 'planned')">↩ 恢复为计划</button>
           <button class="btn ghost" @click="modal = null; showLink = false">关闭</button>
         </div>
