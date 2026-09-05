@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SuperTrainer</title>
+  <link rel="stylesheet" href="css/app.css">
+  <script defer src="vendor/alpine.min.js"></script>
+  <script defer src="vendor/echarts.min.js"></script>
+  <script type="module" src="js/main.js"></script>
+</head>
+<body x-data="{}" :data-theme="$store.app.effectiveTheme"
+      @toast.window="$store.app.showToast($event.detail.text)"
+      @theme-changed.window="$store.app.setTheme($event.detail.theme)">
+  <aside class="sidebar">
+    <div class="logo">🏃 SuperTrainer</div>
+    <nav>
+      <a href="#/dashboard" :class="{active: $store.app.page==='dashboard'}">仪表盘</a>
+      <a href="#/calendar" :class="{active: $store.app.page==='calendar'}">日历</a>
+      <a href="#/goal" :class="{active: $store.app.page==='goal'}">训练目标</a>
+      <a href="#/coach" :class="{active: $store.app.page==='coach'}">AI 教练</a>
+      <a href="#/activities" :class="{active: $store.app.page==='activities'}">活动</a>
+      <a href="#/health" :class="{active: $store.app.page==='health'}">健康</a>
+      <a href="#/settings" :class="{active: $store.app.page==='settings'}">设置</a>
+    </nav>
+    <div class="sidebar-footer">
+      <button class="btn ghost" @click="$store.app.toggleTheme()">🌓 主题</button>
+    </div>
+  </aside>
+  <main class="content">
+    <div id="sync-banner" class="banner" x-data="{}" x-show="$store.app.syncBanner" x-html="$store.app.syncBanner"></div>
+    <section id="page-dashboard" x-data="{}" x-show="$store.app.page==='dashboard'">
+      <div class="card"><h2>仪表盘</h2><p class="muted">开发中，将在后续里程碑完成</p></div>
+    </section>
+    <section id="page-calendar" x-show="$store.app.page==='calendar'" x-data="calendarPage"></section>
+    <section id="page-goal" x-show="$store.app.page==='goal'" x-data="goalPage"></section>
+    <section id="page-coach" x-show="$store.app.page==='coach'" x-data="coachPage"></section>
+    <section id="page-activities" x-show="$store.app.page==='activities'" x-data="activitiesPage"></section>
+    <section id="page-health" x-show="$store.app.page==='health'" x-data="healthPage"></section>
+    <section id="page-settings" x-show="$store.app.page==='settings'" x-data="settingsPage"></section>
+  </main>
+  <div id="toast" class="toast" x-data="{}" x-show="$store.app.toast.show" x-text="$store.app.toast.text"></div>
+</body>
+</html>

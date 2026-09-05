@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# 测试/工具缓存
+.pytest_cache/
+
+# 构建产物
+build/
+dist/
+
+# 数据与敏感文件（真实数据在 %APPDATA%\RunTrainer，绝不入仓库）
+*.db
+*.db.bak-*
+*.log
+.env
+keyring*.json
+*.pem
+*.key
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/

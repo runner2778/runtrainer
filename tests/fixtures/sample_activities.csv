@@ -1,0 +1,3 @@
+date,start_time,duration_s,distance_m,avg_hr,max_hr,avg_cadence,elevation_gain_m,name
+2026-09-01,06:30:00,3000,10000,145,172,170,120,晨跑
+2026-09-03,18:00:00,1800,6000,150,175,172,60,夜跑
