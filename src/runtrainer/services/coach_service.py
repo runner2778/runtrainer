@@ -203,6 +203,26 @@ def _persist_batch(ctx: dict, output: CoachOutput, items: list[dict], guard_log:
     return ids
 
 
+RETRY_NUDGE = ("\n\n注意：上次回复未通过系统的 JSON 格式校验（字段缺失或类型不符），"
+               "请重新输出一份完整 JSON，所有必填字段齐全、类型正确，不要输出解释文字。")
+
+
+def _validated(client, prompt: dict, cls) -> "CoachOutput | ChatOutput":
+    """调用 AI 并校验输出契约；格式不符时附提示重试一次，仍失败抛中文错误。"""
+    def _call(user: str):
+        return cls.model_validate(client.chat_json(prompt["system"], user, prompt["data"]))
+
+    try:
+        return _call(prompt["user"])
+    except ValidationError as e:
+        log.warning("AI 输出未通过 %s 校验（%s），附提示重试一次", cls.__name__, e.errors()[:2])
+        try:
+            return _call(prompt["user"] + RETRY_NUDGE)
+        except ValidationError as e2:
+            raise RuntimeError(
+                f"AI 输出不符合契约，附格式提示重试后仍失败：{e2.errors()[:2]}") from e2
+
+
 def request_advice(extra_requested: bool = False, user_note: str = "") -> dict:
     """触发一次 AI 建议（当日已有则直接返回缓存）。"""
     today = dates.today()
@@ -216,17 +236,13 @@ def request_advice(extra_requested: bool = False, user_note: str = "") -> dict:
 
     client = _make_client(extra_requested)
     prompt = prompt_builder.build(ctx)
-    raw = client.chat_json(prompt["system"], prompt["user"], prompt["data"])
-    try:
-        output = CoachOutput.model_validate(raw)
-    except ValidationError as e:
-        raise RuntimeError(f"AI 输出不符合契约，已拒绝：{e.errors()[:2]}") from e
+    output = _validated(client, prompt, CoachOutput)
 
-    # 规则 9：请求加练但缺 add_extra_advice → 重试一次
+    # 规则 9：请求加练但缺 add_extra_advice → 附提示重试一次
     if extra_requested and output.add_extra_advice is None:
-        user2 = prompt["user"] + "\n\n注意：用户今天请求了加练，输出必须包含 add_extra_advice 字段。"
-        raw = client.chat_json(prompt["system"], user2, prompt["data"])
-        output = CoachOutput.model_validate(raw)
+        prompt2 = {**prompt, "user": prompt["user"]
+                   + "\n\n注意：用户今天请求了加练，输出必须包含 add_extra_advice 字段。"}
+        output = _validated(client, prompt2, CoachOutput)
 
     g = ctx["guard"]
     items, guard_log = guardrails.validate(output, guardrails.GuardContext(**g))
@@ -459,12 +475,8 @@ def chat(message: str) -> dict:
     client = _make_client(False)
     log.info("教练聊天调用开始（模型 %s，消息 %d 字）", getattr(client, "model", "?"), len(message))
     t0 = time.monotonic()
-    raw = client.chat_json(prompt["system"], prompt["user"], prompt["data"])
+    output = _validated(client, prompt, ChatOutput)
     log.info("教练聊天调用返回，耗时 %.1fs", time.monotonic() - t0)
-    try:
-        output = ChatOutput.model_validate(raw)
-    except ValidationError as e:
-        raise RuntimeError(f"AI 输出不符合契约，已拒绝：{e.errors()[:2]}") from e
 
     # 调整建议走与日常建议相同的护栏
     fake = CoachOutput(summary="chat", readiness="ok", key_signals=[],

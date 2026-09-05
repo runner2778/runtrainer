@@ -192,6 +192,46 @@ def test_provider_zhipu_fallback_model(monkeypatch, plan):
     assert "bigmodel.cn" in str(client._client.base_url)
 
 
+def test_validated_retries_once_then_succeeds(monkeypatch, plan):
+    """真实模式 schema 校验失败 → 附提示重试一次后成功。"""
+    from runtrainer.services import settings_service
+    calls: list[str] = []
+
+    class _Flaky:
+        model = "fake"
+        def chat_json(self, system, user, data=None):
+            calls.append(user)
+            if len(calls) == 1:
+                return {"reply": 123, "adjustments": [], "profile_updates": {}, "rebuild_plan": False}
+            return {"reply": "好的，已按你的要求处理。", "adjustments": [], "profile_updates": {},
+                    "rebuild_plan": False}
+
+    monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(coach_service, "_make_client", lambda extra=False: _Flaky())
+    res = coach_service.chat("帮我把强度课改轻松")
+    assert len(calls) == 2, "首次校验失败应重试一次"
+    assert "JSON 格式校验" in calls[1]
+    assert res["reply"]["content"] == "好的，已按你的要求处理。"
+
+
+def test_validated_both_fail_raises_friendly(monkeypatch, plan):
+    """重试仍失败 → 抛中文可读错误而非裸 pydantic 长文。"""
+    from runtrainer.services import settings_service
+    calls = []
+
+    class _Bad:
+        model = "fake"
+        def chat_json(self, system, user, data=None):
+            calls.append(user)
+            return {"nope": 1}
+
+    monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(coach_service, "_make_client", lambda extra=False: _Bad())
+    with pytest.raises(RuntimeError, match="不符合契约"):
+        coach_service.chat("你好")
+    assert len(calls) == 2
+
+
 # ---------------- 教练聊天 ----------------
 
 class _FakeChatClient:

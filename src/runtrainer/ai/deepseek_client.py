@@ -51,6 +51,16 @@ DEFAULT_MODELS = {p: (info["models"][0] if info.get("models") else DEFAULT_MODEL
                   for p, info in PROVIDERS.items()}
 
 
+def _clean_json_text(text: str) -> str:
+    """容忍模型输出带 ```json 围栏/首尾空白（真实调用曾出现）。"""
+    t = (text or "").strip()
+    if t.startswith("```"):
+        t = t.strip("`").strip()
+        if t.lower().startswith("json"):
+            t = t[4:].strip()
+    return t
+
+
 class DeepSeekClient:
     """任意 OpenAI 兼容端点客户端（DeepSeek/智谱/Ollama 通用）。"""
 
@@ -60,7 +70,7 @@ class DeepSeekClient:
                               base_url=base_url or BASE_URL, timeout=TIMEOUT_S)
 
     def chat_json(self, system: str, user: str, data: dict | None = None) -> dict:
-        resp = self._client.chat.completions.create(
+        kwargs = dict(
             model=self.model,
             messages=[
                 {"role": "system", "content": system},
@@ -70,8 +80,20 @@ class DeepSeekClient:
             max_tokens=MAX_TOKENS,
             response_format={"type": "json_object"},
         )
-        content = resp.choices[0].message.content or "{}"
-        return json.loads(content)
+        last: Exception | None = None
+        for attempt in range(2):  # 偶发截断/围栏：同参重试一次再放弃
+            resp = self._client.chat.completions.create(**kwargs)
+            text = _clean_json_text(resp.choices[0].message.content or "")
+            try:
+                obj = json.loads(text)
+            except json.JSONDecodeError as e:
+                last = e
+                log.warning("AI 返回非法 JSON（第 %d 次）：%s…", attempt + 1, text[:120])
+                continue
+            if isinstance(obj, dict):
+                return obj
+            last = ValueError("JSON 根节点不是对象")
+        raise RuntimeError(f"AI 返回内容无法解析为 JSON（已重试一次仍失败）：{last}")
 
 
 class MockClient:
