@@ -138,7 +138,8 @@ const HTML = `
         <p class="muted mv-center" x-show="!messages.length">和教练聊聊吧：想改哪天的课、最近的身体感觉、出差安排……教练会结合你的健康数据与课表回答，需要改课时会给出可批准的调整。</p>
         <template x-for="m in messages" :key="m.id">
           <div class="chat-row" :class="'chat-' + m.role">
-            <div class="chat-bubble">
+            <div class="chat-bubble" :class="m.kind === 'sync_analysis' ? 'sync' : ''">
+              <p class="muted sync-tag" x-show="m.kind === 'sync_analysis'">📊 同步后自动分析</p>
               <p class="chat-text" x-text="m.content"></p>
               <div class="mt8" x-show="m.adjustments && m.adjustments.length">
                 <p class="muted" x-text="m.auto_applied

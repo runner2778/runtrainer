@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from ..utils import dates, jsonutil
+
 ZONE_NAMES = {"E": "轻松跑", "M": "马拉松配速", "T": "乳酸阈", "I": "间歇", "R": "重复跑"}
 
 SYSTEM_PROMPT = """你是跑步教练，用简体中文工作。训练哲学：以丹尼尔斯训练法（Jack Daniels' Running Formula，VDOT/EMTIR/周期化）为主干，融合当代前沿运动科学——挪威双乳酸阈值训练法、卡诺瓦（Canova）专项训练法、汉森（Hanson）累积疲劳训练法，以及运动营养与康复知识。
@@ -50,6 +52,21 @@ CHAT_SYSTEM_PROMPT = """你是训练者的私人跑步教练（丹尼尔斯训�
 {"reply":"回复文字","user_requested":true/false,"adjustments":[{"date":"yyyy-mm-dd","planned_workout_id":数字或null,"action":"keep|modify|decrease|rest|add_easy|shift|skip","changes":{"kind","distance_km","duration_min","pace_zone","date","note","slot"},"reason":"中文理由"}],"profile_updates":{"max_hr":195},"rebuild_plan":false}
 字段规范：changes.kind 只能是 E/M/T/I/R/LR/RECOVERY/CROSS/STRENGTH/TUNEUP/RACE 之一，严禁写成中文或带修饰（如「LR 轻松长距离」）；modify 把训练内容改成轻松跑/长距离/恢复跑时，除 kind/pace_zone 外应把距离或时长一并给出（若想保持原量就填原来的数值），并在 reason 里说清改成了什么跑法。训练者没要求改课（仅闲聊/咨询）时 user_requested 置 false、adjustments 给空数组、profile_updates 给空对象。"""
 
+SYNC_ANALYSIS_SYSTEM_PROMPT = """你是训练者的私人跑步教练（丹尼尔斯训练法为主干，融合挪威双乳酸阈值、卡诺瓦专项耐力、汉森累积疲劳等前沿训练理论与运动营养、康复知识），在聊天窗口里用简体中文和训练者交流。刚完成一次 Garmin 数据同步，有新的训练数据入库，这是一次自动分析（训练者没有提出改课请求）。
+任务：
+1. 精确读取每条新训练数据（日期/距离/时长/配速/心率/步频/训练效果/课程分段结构），逐条点评执行质量：与课表计划的契合度、强度是否得当、有无伤病或疲劳信号。
+2. 结合近 8 周负荷（ACWR/单调性/应变/完成度）与近 14 天健康数据，给出一段总体总结。
+3. 给出接下来几天的具体建议：恢复节奏、营养睡眠、下一节关键课怎么跑（可引用课表）。
+4. 输出严格 JSON（json_object），不要输出任何解释性文字。
+输出结构：
+{"reply":"分析总结+未来几天建议（中文，像教练聊天，分段清楚）","user_requested":false,"adjustments":[…],"profile_updates":{},"rebuild_plan":false}
+约束：
+- user_requested 必须为 false（训练者没有要求改课）。
+- adjustments 仅当新数据暴露明确问题（恢复差、负荷过高、伤病信号、明显没跟上计划）且调整课表确有必要时才给（限未来 7 天、每条带 reason），否则给空数组。
+- 配速只能用给定配速表（E/M/T/I/R），不许编造配速区间；数据缺失时保守；伤病指征优先建议休息。
+- changes.kind 只能是 E/M/T/I/R/LR/RECOVERY/CROSS/STRENGTH/TUNEUP/RACE 之一，严禁写成中文或带修饰。
+- profile_updates/rebuild_plan 仅当新数据与档案明显矛盾（如最大心率超出档案值 10 bpm 以上）时才用。"""
+
 
 def _fmt_pace(v: int | float, nd: int = 0) -> str:
     if v is None:
@@ -60,6 +77,53 @@ def _fmt_pace(v: int | float, nd: int = 0) -> str:
 def _fmt_duration(minutes: float) -> str:
     m = int(minutes)
     return f"{m // 60}小时{m % 60}分" if m >= 60 else f"{m}分钟"
+
+
+def _activity_lines(acts: list[dict], ctx: dict) -> list[str]:
+    """活动精确详情行：日期 时刻「名称」距离 时长 配速 心率 步频 TE 负荷 [课程分类]。
+
+    AI 无法自行查询数据库，这些精确数字是它分析/回答训练问题的唯一依据，
+    故逐项列全（无采样数据时也能给出训练效果/负荷等 Garmin 指标）。
+    """
+    from ..domain.workout_analysis import classify_workout, estimate_max_hr
+    prof = ctx.get("athlete") or {}
+    max_hr = prof.get("max_hr") or estimate_max_hr(prof.get("birth_year"))
+    rest_hr = prof.get("rest_hr")
+    lines: list[str] = []
+    for a in acts:
+        dt = dates.ts_to_datetime(a["start_ts"])
+        dist = (a.get("distance_m") or 0) / 1000
+        dur = (a.get("duration_s") or 0) / 60
+        parts = [f"{dt:%m-%d %H:%M}「{a.get('name') or a.get('sport') or '训练'}」"]
+        if dist:
+            parts.append(f"{dist:.2f}".rstrip("0").rstrip(".") + "km")
+        if dur:
+            parts.append(f"{int(dur)}分钟")
+        if a.get("avg_pace_s_km"):
+            parts.append(f"配速{dates.fmt_pace(a['avg_pace_s_km'])}/km")
+        if a.get("avg_hr"):
+            parts.append(f"心率{a['avg_hr']:g}"
+                         + (f"(最大{a['max_hr']:g})" if a.get("max_hr") else ""))
+        if a.get("avg_cadence"):
+            parts.append(f"步频{round(a['avg_cadence'], 1):g}")
+        if a.get("aerobic_te") is not None:
+            parts.append(f"训练效果{a['aerobic_te']:g}"
+                         + (f"/{a['anaerobic_te']:g}" if a.get("anaerobic_te") is not None else ""))
+        if a.get("exercise_load"):
+            parts.append(f"负荷{a['exercise_load']:g}")
+        segs = None
+        try:
+            segs = jsonutil.loads(a["structure_json"]) if isinstance(a.get("structure_json"), str) \
+                else (a.get("structure_json") or [])
+        except Exception:
+            segs = []
+        if segs:
+            lab = classify_workout(segs, a.get("duration_s"), a.get("distance_m"),
+                                   a.get("avg_hr"), max_hr, rest_hr).get("label")
+            if lab:
+                parts.append(f"[{lab}]")
+        lines.append("- " + " ".join(parts))
+    return lines
 
 
 def _context_blocks(ctx: dict) -> list[str]:
@@ -141,6 +205,13 @@ def _context_blocks(ctx: dict) -> list[str]:
     if c7.get("ratio") is not None:
         lines.append(f"近 7 天完成度 {c7['done_km']}km / 计划 {c7['planned_km']}km（{c7['ratio'] * 100:.0f}%）")
 
+    lines.append("【最近训练活动详情（精确数据）】")
+    recent_acts = ctx.get("recent_acts") or []
+    if recent_acts:
+        lines.extend(_activity_lines(recent_acts, ctx))
+    else:
+        lines.append("（近 7 天无训练记录）")
+
     lines.append("【配速-心率对照（本地计算，判断进步/退步的依据）】")
     pht = ctx.get("pace_hr_trend") or {}
     if pht.get("best_drop") is not None:
@@ -189,14 +260,30 @@ def build(ctx: dict) -> dict:
         lines.append(f"用户备注：{ctx['user_note']}")
 
     user = "\n".join(lines)
-    data = {
-        "today": today,
+    return {"system": SYSTEM_PROMPT, "user": user, "data": _data(ctx)}
+
+
+def _data(ctx: dict) -> dict:
+    """MockClient 场景生成用的结构化课表快照（真实 AI 不读该字段）。"""
+    return {
+        "today": ctx["today"],
         "workouts": [{"id": w["id"], "date": w["date"], "kind": w["kind"],
                       "pace_zone": w.get("pace_zone"), "distance_km": w.get("distance_km"),
                       "duration_min": w.get("duration_min"), "status": w.get("status")}
                      for w in (ctx.get("week_workouts") or [])],
     }
-    return {"system": SYSTEM_PROMPT, "user": user, "data": data}
+
+
+def build_sync_analysis(ctx: dict, new_acts: list[dict]) -> dict:
+    """同步后自动分析上下文：共用块 + 本次新增活动精确详情。返回 {system, user, data}。"""
+    lines = _context_blocks(ctx)
+    lines.append("【本次同步新增的训练数据（重点分析对象）】")
+    lines.extend(_activity_lines(new_acts, ctx))
+    lines.append("")
+    lines.append("请输出自动分析：先逐条点评新训练的执行质量，再结合负荷与健康数据总结，"
+                 "最后给出接下来几天的建议（训练者没有要求改课，不要凭空安排调整）。")
+    user = "\n".join(lines)
+    return {"system": SYNC_ANALYSIS_SYSTEM_PROMPT, "user": user, "data": _data(ctx)}
 
 
 def build_chat(ctx: dict, history: list[dict]) -> dict:
@@ -223,11 +310,4 @@ def build_chat(ctx: dict, history: list[dict]) -> dict:
     lines.append(ctx.get("user_note") or "")
 
     user = "\n".join(lines)
-    data = {
-        "today": today,
-        "workouts": [{"id": w["id"], "date": w["date"], "kind": w["kind"],
-                      "pace_zone": w.get("pace_zone"), "distance_km": w.get("distance_km"),
-                      "duration_min": w.get("duration_min"), "status": w.get("status")}
-                     for w in (ctx.get("week_workouts") or [])],
-    }
-    return {"system": CHAT_SYSTEM_PROMPT, "user": user, "data": data}
+    return {"system": CHAT_SYSTEM_PROMPT, "user": user, "data": _data(ctx)}

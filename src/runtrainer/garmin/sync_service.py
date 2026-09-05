@@ -193,6 +193,23 @@ def sync_all() -> dict:
             except Exception as e:
                 log.warning("课表重建失败（非致命）: %s", e)
 
+        # 4.5) 同步后有新训练数据 → AI 教练自动读取精确数据生成分析总结 +
+        #      未来几天建议（教练消息 kind=sync_analysis，AI 教练页可见）。
+        #      失败不阻断同步；去重游标在 coach_service 内，重复同步不重复计费。
+        if not settings_service.is_mock_mode() and new_acts:
+            try:
+                from ..services import coach_service
+                res = coach_service.auto_analyze_new_activities(new_acts)
+                if res:
+                    stats["auto_analysis"] = \
+                        f"已自动分析 {res['activities_analyzed']} 条新训练"
+                    if res["adjustment_count"]:
+                        stats["auto_analysis"] += f"，附 {res['adjustment_count']} 条调整建议"
+                    stats["auto_analysis"] += "（AI 教练页查看）"
+            except Exception as e:
+                log.warning("同步后自动分析失败（非致命）: %s", e)
+                stats["auto_analysis_error"] = "AI 分析未生成，可在 AI 教练页手动询问"
+
         meta["cursor_ts"] = int(datetime.now(timezone.utc).timestamp())
         # 增量无变化的同步不要用全零统计覆盖上次结果：
         # 设置页「本次结果」保持最近一次有意义的结果

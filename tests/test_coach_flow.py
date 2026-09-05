@@ -418,3 +418,115 @@ def test_chat_profile_updates_guarded(monkeypatch, plan):
 def test_chat_empty_message_raises(monkeypatch, plan):
     with pytest.raises(RuntimeError, match="消息不能为空"):
         coach_service.chat("   ")
+
+
+# ---------------- 第四批：同步后自动分析 + 对话读取训练数据 ----------------
+
+def _insert_activity(ts: int, external_id: str = "act-new-1",
+                     distance_m: float = 8000.0) -> int:
+    from runtrainer.db.repos import activity_repo
+    aid, is_new = activity_repo.upsert_activity({
+        "source": "garmin", "external_id": external_id, "file_path": None,
+        "name": "晨跑", "sport": "跑步", "start_ts": ts, "tz_offset_min": 0,
+        "duration_s": 2700, "distance_m": distance_m, "avg_pace_s_km": 337.5,
+        "avg_hr": 145.0, "max_hr": 172.0, "avg_cadence": 178.0,
+        "aerobic_te": 3.2, "anaerobic_te": 0.5, "exercise_load": 120.0,
+        "laps_json": None, "has_samples": 0,
+    })
+    assert is_new
+    return aid
+
+
+def test_sync_analysis_creates_coach_message(monkeypatch, plan):
+    """同步带来新训练 → 自动生成分析消息（kind=sync_analysis）+ 可批准的调整建议；
+    游标推进后重复同步不再重复分析。"""
+    from runtrainer.db.repos import chat_repo, sync_repo
+    from runtrainer.utils import jsonutil
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    target = next(w for w in ws if w["date"] == d)
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
+    _insert_activity(ts)
+    client = _FakeChatClient({
+        "reply": "本次训练执行不错，未来几天注意恢复。",
+        "adjustments": [{
+            "date": d, "planned_workout_id": target["id"], "action": "modify",
+            "changes": {"kind": "E", "pace_zone": "E"},
+            "reason": "新数据负荷偏高，建议把今天的强度课改轻松",
+        }],
+        "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    res = coach_service.auto_analyze_new_activities([("act-new-1", ts)], client=client)
+    assert res and res["adjustment_count"] == 1
+    # 教练消息 kind=sync_analysis，调整落 pending（训练者没要求改课，不自动生效）
+    msgs = chat_repo.list_messages()
+    assert len(msgs) == 1 and msgs[0]["role"] == "coach"
+    assert msgs[0]["kind"] == "sync_analysis"
+    view = coach_service.get_chat_history()[0]
+    assert view["kind"] == "sync_analysis" and view["auto_applied"] is False
+    assert view["adjustments"][0]["status"] == "pending"
+    # 提示词包含新增活动精确数据
+    assert "本次同步新增的训练数据" in client.calls[0]["user"]
+    assert "晨跑" in client.calls[0]["user"] and "配速5:38/km" in client.calls[0]["user"]
+    # 游标推进 → 同一批活动再同步不重复分析
+    meta = jsonutil.loads(sync_repo.get_sync_state("garmin")["meta_json"])
+    assert meta["last_analysis_act_ts"] == ts
+    assert coach_service.auto_analyze_new_activities([("act-new-1", ts)], client=client) is None
+    # 批准建议 → 课表生效
+    out = coach_service.decide_chat_adjustments(view["id"], True)
+    assert out["applied"] == 1
+    assert plan_repo.get_workout(target["id"])["kind"] == "E"
+
+
+def test_sync_analysis_no_adjustments_still_posts(monkeypatch, plan):
+    """新数据无需调整时：只发分析总结消息，不给空调整。"""
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
+    _insert_activity(ts)
+    client = _FakeChatClient({
+        "reply": "跑得很好，继续保持。",
+        "adjustments": [],
+        "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    res = coach_service.auto_analyze_new_activities([("act-new-1", ts)], client=client)
+    assert res and res["adjustment_count"] == 0
+    view = coach_service.get_chat_history()[0]
+    assert view["kind"] == "sync_analysis" and view["content"] == "跑得很好，继续保持。"
+    assert view["adjustments"] == []
+
+
+def test_sync_analysis_skips_mock_mode(monkeypatch, plan):
+    """mock 模式不同步触发自动分析（不产生假消息）。"""
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
+    _insert_activity(ts)
+    assert coach_service.auto_analyze_new_activities([("act-new-1", ts)]) is None
+
+
+def test_chat_context_includes_recent_activity_details(monkeypatch, plan):
+    """对话时教练上下文包含近 7 天训练活动精确数据（距离/配速/心率/步频/TE），
+    用户问「今天跑得怎么样」教练能引用真实数字。"""
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 7 * 3600
+    _insert_activity(ts, distance_m=12345.0)
+    client = _FakeChatClient({
+        "reply": "你今天跑了 12.3 公里。",
+        "adjustments": [],
+        "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    coach_service.chat("我今天跑得怎么样？")
+    user = client.calls[0]["user"]
+    assert "最近训练活动详情" in user
+    assert "12.3" in user and "km" in user and "配速5:38/km" in user
+    assert "心率145" in user and "步频178" in user and "训练效果3.2/0.5" in user
+    assert "负荷120" in user

@@ -104,6 +104,11 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "compliance_7d": load_metrics.compliance(planned7, done7, today - timedelta(days=6), today),
     }
 
+    # 最近训练活动精确详情（聊天/自动分析回答训练问题的数据依据，最新在前）
+    recent_acts = [a for a in activity_repo.list_activities(
+        (today - timedelta(days=7)).isoformat(),
+        (today + timedelta(days=1)).isoformat(), limit=50) if a.get("distance_m")]
+
     # 配速-心率对照（AI 判断进步/退步的依据）：近 180 天同配速档心率趋势 + 近 8 周平均
     phr_start = today - timedelta(days=180)
     pace_hr_trend = (workout_analysis.pace_bin_hr(acts, phr_start, today)
@@ -145,6 +150,7 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "today_workouts": today_workouts,
         "week_workouts": workouts,
         "recent": recent,
+        "recent_acts": recent_acts,
         "health": health,
         "pace_hr_trend": pace_hr_trend,
         "pace_hr_weekly": pace_hr_weekly,
@@ -498,6 +504,8 @@ def _chat_message_view(m: dict) -> dict:
     return {
         "id": m["id"], "role": m["role"], "content": m["content"],
         "created_at": m.get("created_at"), "model": m.get("model"),
+        # chat=普通对话；sync_analysis=同步后自动分析（前端展示标记不同）
+        "kind": m.get("kind") or "chat",
         "adjustment_ids": ids,
         "adjustments": rows,
         # 强制要求的调整已自动生效（全部 applied）→ 前端不再显示批准按钮、文案改为已执行
@@ -575,6 +583,62 @@ def chat(message: str) -> dict:
     return {"user_message": user_row, "reply": _chat_message_view(coach_row),
             "guardrail_log": guard_log, "profile_updates": profile_applied,
             "rebuild": rebuild_info}
+
+
+def auto_analyze_new_activities(new_acts: list[tuple[str, int]],
+                                client=None) -> dict | None:
+    """同步后有新训练数据 → 自动生成分析总结 + 未来几天建议（教练消息）。
+
+    new_acts: [(external_id, start_ts)]（sync_service 本轮 upsert 的新活动）。
+    去重游标 last_analysis_act_ts 存 sync_state meta：已分析过的活动不再重复分析
+    （同步多次不重复计费）。mock 模式不触发。返回 None 表示无需分析；
+    AI 失败抛异常，由调用方降级（同步本身不受影响）。
+    """
+    from ..db.repos import sync_repo
+    from . import settings_service
+    if settings_service.is_mock_mode():
+        return None
+    state = sync_repo.get_sync_state("garmin")
+    meta = jsonutil.loads(state["meta_json"]) if state["meta_json"] else {}
+    last_ts = int(meta.get("last_analysis_act_ts") or 0)
+    fresh = [(eid, ts) for eid, ts in new_acts if int(ts) > last_ts]
+    if not fresh:
+        return None
+    today = dates.today()
+    ctx = _gather(today, False, "")
+    if ctx is None:
+        return None
+    # 一次同步（如首次回溯）可能进来几百条：只把最近 30 条喂给 AI，
+    # 游标推进到全部新活动，历史条目不逐条分析
+    fresh_sorted = sorted(fresh, key=lambda x: int(x[1]), reverse=True)
+    to_analyze = {eid for eid, _ in fresh_sorted[:30]}
+    new_rows = sorted(
+        (a for a in activity_repo.list_activities(limit=500)
+         if a.get("source") == "garmin" and a.get("external_id") in to_analyze),
+        key=lambda a: a["start_ts"], reverse=True)
+    if not new_rows:
+        return None
+    from ..services import plan_service
+    ctx["ability"] = (plan_service.wizard_context() or {}).get("ability") or {}
+    prompt = prompt_builder.build_sync_analysis(ctx, new_rows)
+    client = client or _make_client(False)
+    output = _validated(client, prompt, ChatOutput)
+    # 建议走与日常建议相同的护栏（非强制：训练者没有要求改课，违规项照常钳制/丢弃）
+    fake = CoachOutput(summary="sync-analysis", readiness="ok", key_signals=[],
+                       adjustments=output.adjustments, add_extra_advice=None, weekly_notes="")
+    items, guard_log = guardrails.validate(
+        fake, guardrails.GuardContext(**ctx["guard"], force=False))
+    model = getattr(client, "model", "mock")
+    ids, _ = _persist_chat_items(ctx, items, guard_log, model, prompt, output,
+                                 auto_apply=False)
+    coach_row = chat_repo.create_message(
+        "coach", output.reply, adjustment_ids=ids, model=model, kind="sync_analysis")
+    meta["last_analysis_act_ts"] = max(int(ts) for _, ts in fresh)
+    sync_repo.set_sync_state("garmin", meta=meta)
+    log.info("同步后自动分析完成：分析 %d 条新活动，%d 条调整建议，消息 #%s",
+             len(new_rows), len(items), coach_row["id"])
+    return {"message_id": coach_row["id"], "activities_analyzed": len(new_rows),
+            "adjustment_count": len(items)}
 
 
 def decide_chat_adjustments(message_id: int, approve: bool) -> dict:

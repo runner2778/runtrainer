@@ -414,5 +414,7 @@ details summary { cursor: pointer; font-size: 12px; }
   background: var(--bg-hover); border: 1px solid var(--border); }
 .chat-user .chat-bubble { background: color-mix(in srgb, var(--accent) 14%, var(--bg-card));
   border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
+.chat-bubble.sync { border-left: 3px solid var(--accent); }
+.chat-bubble .sync-tag { font-size: 12px; margin-bottom: 4px; }
 .chat-text { white-space: pre-wrap; line-height: 1.55; }
 .chat-input { flex: 1; resize: vertical; min-height: 40px; font-family: inherit; }

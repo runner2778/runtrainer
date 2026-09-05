@@ -12,15 +12,16 @@ def _now() -> str:
 
 
 def create_message(role: str, content: str, *, adjustment_ids: list[int] | None = None,
-                   profile_updates: dict | None = None, model: str | None = None) -> dict:
+                   profile_updates: dict | None = None, model: str | None = None,
+                   kind: str = "chat") -> dict:
     with get_conn() as conn:
         cur = conn.execute(
             "INSERT INTO chat_messages (role, content, adjustment_ids_json, "
-            "profile_updates_json, model, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "profile_updates_json, model, kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (role, content,
              jsonutil.dumps(adjustment_ids) if adjustment_ids else None,
              jsonutil.dumps(profile_updates) if profile_updates else None,
-             model, _now()),
+             model, kind, _now()),
         )
         return row_to_dict(conn.execute(
             "SELECT * FROM chat_messages WHERE id = ?", (cur.lastrowid,)).fetchone())

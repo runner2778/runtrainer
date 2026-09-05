@@ -206,7 +206,8 @@ export function initSettings() {
     dotStyle(err) { return `background: ${err ? 'var(--st-critical)' : 'var(--st-good)'}`; },
     statsText(s) {
       const st = (s.meta && s.meta.last_stats) || {};
-      if (!st.activities && !st.health_days && !st.plan_rebuilt && !st.health_backfill) return '—';
+      if (!st.activities && !st.health_days && !st.plan_rebuilt && !st.health_backfill
+        && !st.auto_analysis) return '—';
       const parts = [];
       if (st.activities) parts.push(`活动 +${st.activities}`);
       if (st.health_days) parts.push(`健康 ${st.health_days} 天`);
@@ -214,6 +215,8 @@ export function initSettings() {
       if (st.health_error) parts.push(`健康本轮未拉到`);
       if (st.plan_rebuilt) parts.push(`课表已按 VDOT ${st.plan_vdot} 更新`);
       if (st.mock_purged) parts.push(`清理演示数据 ${st.mock_purged} 条`);
+      if (st.auto_analysis) parts.push(`📊 ${st.auto_analysis}`);
+      if (st.auto_analysis_error) parts.push(st.auto_analysis_error);
       return parts.join('，');
     },
     fmtTs(ts) {
