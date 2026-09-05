@@ -252,6 +252,12 @@ class Api:
     def get_sync_states(self):
         return _sync_states_with_meta()
 
+    # ---- 仪表盘 ----
+    @envelope
+    def get_dashboard(self):
+        from ..services import dashboard_service
+        return dashboard_service.get_dashboard()
+
     # ---- AI 教练 ----
     @envelope
     def get_coach_snapshot(self):

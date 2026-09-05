@@ -1,6 +1,7 @@
 import { initActivities } from './pages/activities.js';
 import { initCalendar } from './pages/calendar.js';
 import { initCoach } from './pages/coach.js';
+import { initDashboard } from './pages/dashboard.js';
 import { initGoal } from './pages/goal.js';
 import { initHealth } from './pages/health.js';
 import { initSettings } from './pages/settings.js';
@@ -60,6 +61,7 @@ function registerStore() {
 }
 
 function registerPages() {
+  initDashboard();
   initSettings();
   initActivities();
   initHealth();
@@ -171,11 +173,12 @@ function boot() {
       await pasteInto(e.target);
     }
   });
-  // 同步完成（可能重建课表）→ 刷新当前页
+  // 同步完成（可能重建课表）→ 刷新当前页；仪表盘无视 2s 防双载强制刷新
   window.addEventListener('sync-done', () => {
     const sec = document.getElementById('page-' + store.page);
     const data = sec && window.Alpine && window.Alpine.$data(sec);
-    if (data && typeof data.shown === 'function') data.shown();
+    if (data && typeof data.syncRefresh === 'function') data.syncRefresh();
+    else if (data && typeof data.shown === 'function') data.shown();
   });
   window.Alpine.start();
   loadBackendPrefs(store);

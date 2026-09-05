@@ -132,6 +132,38 @@ def loaded():
             "  return {pace: g('health-pacehr-chart'), sleep: g('health-sleep-chart'),"
             "  hrv: g('health-hrv-chart')};})()})"))
 
+        # 5.5) 仪表盘：恢复度/倒计时/KPI 瓷砖/三图/教练卡片全部渲染
+        js("location.hash = '#/dashboard'")
+        settle(3)
+        out["dashboard"] = json.loads(js(
+            "JSON.stringify({"
+            " ready: (document.querySelector('#page-dashboard').textContent||'')"
+            "  .match(/恢复良好|恢复一般|需要恢复|数据不足/)?.[0] || '',"
+            " pills: document.querySelectorAll('#page-dashboard .ready-pill').length,"
+            " tiles: document.querySelectorAll('#page-dashboard .stat-tile').length,"
+            " todayRows: document.querySelectorAll('#page-dashboard .today-row').length,"
+            " progs: document.querySelectorAll('#page-dashboard .progress').length,"
+            " tables: document.querySelectorAll('#page-dashboard table').length,"
+            " syncLine: (document.querySelector('#page-dashboard').textContent||'')"
+            "  .includes('上次同步'),"
+            " coach: (document.querySelector('#page-dashboard').textContent||'')"
+            "  .includes('AI 教练'),"
+            " placeholder: (document.querySelector('#page-dashboard').textContent||'')"
+            "  .includes('开发中'),"
+            " wk: (() => { const c = echarts.getInstanceByDom("
+            "  document.getElementById('dash-weekly-chart'));"
+            "  if (!c) return null; const o = c.getOption();"
+            "  return {names: (o.series||[]).map(s=>s.name), gridBottom: o.grid[0].bottom,"
+            "  nCat: o.xAxis[0].data.length}; })(),"
+            " hrv: (() => { const c = echarts.getInstanceByDom("
+            "  document.getElementById('dash-hrv-chart'));"
+            "  return c ? {n: c.getOption().series.length,"
+            "  w: c.getOption().series[0].lineStyle.width} : null; })(),"
+            " rhr: (() => { const c = echarts.getInstanceByDom("
+            "  document.getElementById('dash-rhr-chart'));"
+            "  return c ? {n: c.getOption().series.length,"
+            "  w: c.getOption().series[0].lineStyle.width} : null; })()})"))
+
         # 6) 目标向导第 2 步：能力预估卡片（综合依据列表）
         js("location.hash = '#/goal'")
         settle(3)

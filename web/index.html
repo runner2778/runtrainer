@@ -29,9 +29,7 @@
   </aside>
   <main class="content">
     <div id="sync-banner" class="banner" x-data="{}" x-show="$store.app.syncBanner" x-html="$store.app.syncBanner"></div>
-    <section id="page-dashboard" x-data="{}" x-show="$store.app.page==='dashboard'">
-      <div class="card"><h2>仪表盘</h2><p class="muted">开发中，将在后续里程碑完成</p></div>
-    </section>
+    <section id="page-dashboard" x-show="$store.app.page==='dashboard'" x-data="dashboardPage"></section>
     <section id="page-calendar" x-show="$store.app.page==='calendar'" x-data="calendarPage"></section>
     <section id="page-goal" x-show="$store.app.page==='goal'" x-data="goalPage"></section>
     <section id="page-coach" x-show="$store.app.page==='coach'" x-data="coachPage"></section>
