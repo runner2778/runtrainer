@@ -168,6 +168,48 @@ def test_coach_advice_from_today_cache(monkeypatch):
     assert d["coach"]["advice"] is None
 
 
+def test_ability_30d_from_profile_vo2max(monkeypatch):
+    """档案有手表 VO2max + max_hr 但近 30 天无跑步 → 手表读数为唯一依据。"""
+    _patch_today(monkeypatch, REAL_TODAY + timedelta(days=1))
+    from runtrainer.db.repos import profile_repo
+    profile_repo.upsert_profile({"vo2max": 50.0, "max_hr": 185})
+    d = dashboard_service.get_dashboard()
+    ab = d["ability_30d"]
+    assert ab["window_days"] == 30
+    assert ab["plan_vdot"] is None          # 无计划
+    assert ab["vdot"] == 50.0
+    assert ab["as_of"] == (REAL_TODAY + timedelta(days=1)).isoformat()
+    assert ab["max_hr"] == 185
+    assert ab["note"] is None
+    assert ab["predictions"], "有 vdot 就必须有等效成绩"
+    assert ab["predictions"]["5K"] > 0
+    assert ab["evidence"][0]["source"] == "garmin_vo2max"
+    assert ab["evidence"][0]["vdot"] == 50.0
+
+
+def test_ability_30d_insufficient_data(monkeypatch):
+    """空库（无档案/无活动/无健康）→ vdot None + 提示语。"""
+    d = dashboard_service.get_dashboard()
+    ab = d["ability_30d"]
+    assert ab["vdot"] is None
+    assert ab["predictions"] is None
+    assert ab["evidence"] == []
+    assert ab["note"] and "不足" in ab["note"]
+
+
+def test_ability_30d_plan_vdot_ref(monkeypatch, plan):
+    """有课表时带出对照用 plan_vdot（课表 VDOT 45），供前端做水平差提示。"""
+    p, _ = plan
+    _patch_today(monkeypatch, REAL_TODAY + timedelta(days=1))
+    from runtrainer.db.repos import profile_repo
+    profile_repo.upsert_profile({"vo2max": 48.0})
+    d = dashboard_service.get_dashboard()
+    ab = d["ability_30d"]
+    assert d["has_plan"] is True
+    assert ab["plan_vdot"] == 45.0
+    assert ab["vdot"] == 48.0
+
+
 def test_bridge_get_dashboard(monkeypatch, plan):
     _patch_today(monkeypatch, REAL_TODAY + timedelta(days=1))
     res = Api().get_dashboard()

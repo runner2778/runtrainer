@@ -345,7 +345,8 @@ class Api:
         from ..domain.workout_analysis import weekly_pace_hr
         end = date.today()
         start = end - timedelta(days=int(days))
-        acts = activity_repo.list_activities(start.isoformat(), limit=3000)
+        # 轻量投影行：分析只消费五列，不走 SELECT * 拖全行大 JSON 字段
+        acts = activity_repo.list_pace_hr_rows(start.isoformat(), end.isoformat())
         return weekly_pace_hr(acts, start, end)
 
     @envelope
@@ -356,7 +357,7 @@ class Api:
         from ..domain.workout_analysis import pace_bin_hr
         end = date.today()
         start = end - timedelta(days=int(days))
-        acts = activity_repo.list_activities(start.isoformat(), limit=3000)
+        acts = activity_repo.list_pace_hr_rows(start.isoformat(), end.isoformat())
         return pace_bin_hr(acts, start, end)
 
     @envelope

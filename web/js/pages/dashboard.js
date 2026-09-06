@@ -97,6 +97,43 @@ const HTML = `
     <p class="muted" x-show="!d.today_workouts.length">今天休息 🎉 没有训练安排</p>
   </div>
 
+  <!-- 成绩水平预估：近 30 天数据综合（比赛/手表 VO2max/配速-心率/间歇），
+       每次同步后 syncRefresh → load 自动重算；与目标页 180 天基线不同，
+       这里回答「现在能跑多少」 -->
+  <div class="card" x-show="d.ability_30d">
+    <div class="flex mb8" style="flex-wrap:wrap;gap:8px">
+      <h2 style="margin:0">成绩水平预估</h2>
+      <span class="muted" x-text="'近 ' + (d.ability_30d.window_days || 30) + ' 天 · ' + abilityCaption()"></span>
+    </div>
+    <template x-if="d.ability_30d.vdot">
+      <div>
+        <div class="grid cols-2">
+          <div>
+            <div class="hero">
+              <span class="big" x-text="d.ability_30d.vdot"></span><span class="unit"> VDOT</span>
+            </div>
+            <p class="muted">按当前水平推算的等效成绩（非训练目标）</p>
+            <div class="flex mt8" style="flex-wrap:wrap;gap:6px">
+              <template x-for="(sec, label) in d.ability_30d.predictions" :key="label">
+                <span class="badge soft" x-text="label + ' ' + fmtRace(sec)"></span>
+              </template>
+            </div>
+            <p class="muted mt8" x-show="d.ability_30d.plan_vdot" x-text="planVdotNote()"></p>
+          </div>
+          <div>
+            <p class="muted">依据</p>
+            <ul class="mt8" style="padding-left:18px">
+              <template x-for="ev in d.ability_30d.evidence" :key="ev.source">
+                <li><span x-text="evName(ev.source)"></span>：<span x-text="ev.detail"></span><span class="muted" x-text="'（VDOT ' + ev.vdot + '）'"></span></li>
+              </template>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </template>
+    <p class="muted mt8" x-show="!d.ability_30d.vdot" x-text="d.ability_30d.note || '数据不足，暂无法预估'"></p>
+  </div>
+
   <div class="card">
     <h3>近 8 周跑量：计划 vs 实际</h3>
     <div class="chart" id="dash-weekly-chart"></div>
@@ -218,6 +255,30 @@ export function initDashboard() {
     },
 
     fmtKm(v) { return v == null ? '—' : String(Math.round(v * 10) / 10); },
+    fmtRace(s) {
+      if (s == null) return '—';
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+      const p = (n) => String(n).padStart(2, '0');
+      return (h ? h + ':' : '') + p(m) + ':' + p(sec);
+    },
+    abilityCaption() {
+      const a = this.d.ability_30d || {};
+      return '每次同步自动重算 · 更新 ' + (a.as_of || '');
+    },
+    evName(src) {
+      return { recent_race: '近期比赛', garmin_vo2max: '手表 VO2max',
+               threshold_trend: '配速-心率阈值', hrr_pace: 'HRR 有氧配速',
+               interval_ability: '间歇能力', hr_trend: '配速-心率趋势' }[src] || src;
+    },
+    planVdotNote() {
+      const a = this.d.ability_30d;
+      if (!a || !a.plan_vdot || !a.vdot) return '';
+      const diff = a.vdot - a.plan_vdot;
+      if (Math.abs(diff) < 0.05) return '当前水平与课表 VDOT ' + a.plan_vdot + ' 一致——正好支撑目标配速';
+      return diff > 0
+        ? '当前水平高过课表 VDOT ' + a.plan_vdot + ' 约 ' + diff.toFixed(1) + '——按目标配速跑会较轻松'
+        : '当前水平比课表 VDOT ' + a.plan_vdot + ' 低约 ' + (-diff).toFixed(1) + '——课表配速偏高，吃力时去教练页反馈调低';
+    },
     fmtTs(ts) {
       const d = new Date(ts * 1000);
       const p = (n) => String(n).padStart(2, '0');

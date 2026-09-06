@@ -543,6 +543,34 @@ def test_chat_context_includes_recent_activity_details(monkeypatch, plan):
     assert "负荷120" in user
 
 
+def test_chat_context_plan_vs_actual_athlete_and_refs(monkeypatch, plan):
+    """第十三批：上下文含计划 vs 实际完成对照（计划课当天只跑 12km 也能
+    在同一行看到两侧数字）、档案身高体重、系统算好的数据参考块
+    （心率区/步频步幅；无健康数据时不虚构 HRV 基线行）。"""
+    from runtrainer.db.repos import profile_repo
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
+    _insert_activity(ts, distance_m=12000.0)   # 「计划 22km 只跑了 12km」场景
+    profile_repo.upsert_profile({"weight_kg": 65.0, "height_cm": 172.0,
+                                 "max_hr": 190, "rest_hr": 50})
+    client = _FakeChatClient({
+        "reply": "今天说好的长距离只跑了一部分，别背包袱——从完成量看强度已经积累得差不多，"
+                 "明天按轻松跑恢复就好，缺口我们留到下周长距离课再补。",
+        "adjustments": [], "profile_updates": {}, "rebuild_plan": False})
+    _real_mode(monkeypatch, client)
+    coach_service.chat("今天说好的长距离我只跑了 12km，要紧吗？")
+    user = client.calls[0]["user"]
+    assert "过去 7 天计划完成情况" in user
+    assert "→ 实际" in user and "12.0km" in user   # 实际完成与计划同窗对照
+    assert "身高 172cm" in user and "体重 65kg" in user   # 营养/健康问题的换算依据
+    assert "【数据参考" in user
+    assert "储备心率法" in user and "恢复跑 <" in user and "轻松跑 " in user
+    assert "平均步频 178 spm" in user and "平均步幅 1.5 m" in user
+    assert "HRV 基线" not in user   # 该场景无健康数据，不虚构基线数字
+
+
 # ---------------- 第十一批：复述防护 + 清空对话（保留记忆） ----------------
 
 class _SequenceChatClient:

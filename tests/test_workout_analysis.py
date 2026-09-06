@@ -83,9 +83,10 @@ def test_weekly_pace_hr_buckets_and_skips_missing():
     assert rows[0]["week_start"] == monday.isoformat()
     assert rows[0]["runs"] == 2
     assert rows[0]["distance_km"] == 15.0
-    # 距离加权平均：300×10 + 320×5 = 4600/15 = 306.7
+    # 距离加权平均（配速与心率同口径）：300×10 + 320×5 = 4600/15 = 306.7；
+    # 心率 (150×10 + 140×5)/15 = 146.7（简单平均会是 145——短慢跑被高估权重）
     assert abs(rows[0]["avg_pace_s_km"] - 306.7) < 0.11
-    assert abs(rows[0]["avg_hr"] - 145.0) < 0.01
+    assert abs(rows[0]["avg_hr"] - 146.7) < 0.11
     assert rows[1]["week_start"] == (monday - timedelta(days=7)).isoformat()
     assert rows[1]["runs"] == 1
     assert rows[1]["avg_pace_s_km"] == 330.0

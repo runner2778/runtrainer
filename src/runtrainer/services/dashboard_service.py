@@ -107,6 +107,48 @@ def _weekly_series(today: date, plan_id: int | None,
     return out
 
 
+def _decode_activity(a: dict) -> dict:
+    """list_activities 行 → ability 输入：structure_json 解出分段结构。"""
+    a = dict(a)
+    raw = a.get("structure_json")
+    a["structure"] = jsonutil.loads(raw) if raw else []
+    return a
+
+
+def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
+    """近 30 天成绩水平预估（仪表盘卡；与目标页 180 天能力卡同算法，
+    窗口不同：目标页看长期基线定 VDOT，这里回答「现在的水平」）。
+
+    依据分量：近期比赛（30 天内）/手表 VO2max/配速-心率回归阈值/间歇
+    能力/HRR 配速/同配速心率趋势——用户关注的配速、配速对应心率、间歇、
+    手表预估、最大摄氧量都在内。每次同步后前端 syncRefresh → get_dashboard
+    重算，天然满足「随每一次同步自动读取并调整」。
+    """
+    from ..domain import ability as ab
+    acts30 = [_decode_activity(a) for a in activity_repo.list_activities(
+        (today - timedelta(days=30)).isoformat(), limit=2000)]
+    for a in acts30:
+        if a.get("start_ts"):
+            a["date"] = dates.ts_to_date(a["start_ts"]).isoformat()
+    # 静息心率：档案优先；否则取近 30 天健康数据中位数（HRR 分量必需）
+    rest_hr = profile.get("rest_hr")
+    if not rest_hr:
+        rhrs = [r["resting_hr"] for r in health_repo.get_health(
+            (today - timedelta(days=30)).isoformat()) if r.get("resting_hr")]
+        if rhrs:
+            rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
+    est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
+                             rest_hr=rest_hr, as_of=today)
+    return {
+        "window_days": 30,
+        "plan_vdot": plan_vdot,  # 对照用：课表训练按目标页定的 VDOT 配速
+        **{k: est.get(k) for k in ("vdot", "predictions", "evidence",
+                                   "max_hr", "as_of")},
+        "note": ("近 30 天跑步数据不足，无法综合预估；跑几次后会自动更新。"
+                 if not est.get("vdot") else None),
+    }
+
+
 def get_dashboard() -> dict:
     """首页聚合数据。无计划时除 today/has_plan 外各块为空结构，前端只显引导。"""
     today = dates.today()
@@ -224,4 +266,9 @@ def get_dashboard() -> dict:
         "error": st.get("last_error"),
         "last_stats": jsonutil.loads(st["meta_json"]).get("last_stats") if st.get("meta_json") else None,
     }
+
+    # 成绩水平预估（近 30 天）：与目标页 180 天能力卡同源算法，窗口不同
+    # 且每次同步自动重算（syncRefresh → get_dashboard）
+    out["ability_30d"] = _ability_30d(profile, today,
+                                      plan["vdot"] if plan else None)
     return out

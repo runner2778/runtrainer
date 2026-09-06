@@ -311,15 +311,18 @@ def weekly_pace_hr(activities: list[dict], start: date, end: date) -> list[dict]
     out = []
     for week in sorted(buckets, reverse=True):
         rows = buckets[week]
-        # 用距离加权平均配速（更接近真实速度）
+        # 距离加权平均配速与平均心率（同口径）：10km 长跑与 3km 放松跑
+        # 不该等权——短慢跑会把周平均心率/配速拉向错误方向
         dists = [(a.get("distance_m") or 0) for a in rows]
         total_dist = sum(dists)
+        wsum = sum(d or 1 for d in dists)
         pace = (sum((a["avg_pace_s_km"] or 0) * (d or 1) for a, d in zip(rows, dists))
-                / sum(d or 1 for d in dists)) if rows else None
+                / wsum) if rows else None
         out.append({
             "week_start": week,
             "avg_pace_s_km": round(pace, 1) if pace else None,
-            "avg_hr": round(sum(a["avg_hr"] for a in rows) / len(rows), 1),
+            "avg_hr": round(sum((a["avg_hr"] or 0) * (d or 1)
+                                for a, d in zip(rows, dists)) / wsum, 1) if rows else None,
             "runs": len(rows),
             "distance_km": round(total_dist / 1000, 1),
         })

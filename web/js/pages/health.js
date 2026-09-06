@@ -26,10 +26,13 @@ const HTML = `
     <p class="muted">配速按 30s/km 分档；同一档位下，越近的时期心率越低 = 有氧能力进步</p>
     <p class="pacehr-summary" x-show="paceBins.summary && paceBins.summary.note"
        x-text="'📊 ' + paceBins.summary.note"></p>
+    <p class="muted" x-show="paceBins.periods && !paceBins.periods.length"
+       x-text="'⚠️ ' + paceBinEmptyNote()"></p>
     <p class="muted">虚线 = 最初时期，实线加粗 = 最近时期</p>
     <div class="chart" id="health-pacehr-chart"></div>
   </div>
   <div class="card"><h3>配速-心率明细</h3>
+    <p class="muted">配速与心率均按距离加权平均——长跑权重大，不会被短慢跑带偏</p>
     <table>
       <thead><tr>
         <th>周（起始）</th><th class="num">平均配速</th><th class="num">平均心率</th>
@@ -123,10 +126,12 @@ export function initHealth() {
       const { ok, data, error } = await tryCall('list_health', start);
       if (!ok) { this.$dispatch('toast', { text: '读取健康数据失败: ' + error }); return; }
       this.rows = data || [];
-      // 配速-心率对照取一年窗口：数据越多时期对照越有说服力
-      const ph = await tryCall('list_weekly_pace_hr', 365);
+      // 配速-心率与时间范围选择器联动（不再固定一年）：选 30 天就只看
+      // 30 天——同步刚结束或切范围后明细/曲线都即时重算
+      const days = parseInt(this.range) || 120;
+      const ph = await tryCall('list_weekly_pace_hr', days);
       this.paceHr = ph.ok ? (ph.data || []) : [];
-      const pb = await tryCall('list_pace_bin_hr', 365);
+      const pb = await tryCall('list_pace_bin_hr', days);
       this.paceBins = pb.ok ? (pb.data || { bins: [], periods: [] }) : { bins: [], periods: [] };
       await this.$nextTick();
       this.renderCharts();
@@ -136,6 +141,10 @@ export function initHealth() {
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     },
     hrvLabel(s) { return { balanced: '平衡', unbalanced: '不平衡', low: '偏低' }[s] || s; },
+    paceBinEmptyNote() {
+      return `所选 ${parseInt(this.range) || 120} 天内跑步次数太少`
+        + '（同配速档每时期至少 2 次才有对照）——放宽时间范围后再看';
+    },
     hrvColor(s) { return { balanced: 'var(--st-good)', unbalanced: 'var(--st-warning)', low: 'var(--st-critical)' }[s] || 'var(--text-muted)'; },
     hrvClass(s) { return { balanced: 'st-good', unbalanced: 'st-warning', low: 'st-critical' }[s] || ''; },
     renderCharts() {

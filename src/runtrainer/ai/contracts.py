@@ -67,11 +67,15 @@ class CoachOutput(BaseModel):
 
 
 # 聊天模式允许 AI 更新的档案键（服务端还要做取值范围钳制）
-PROFILE_UPDATE_KEYS = ("max_hr", "rest_hr", "weight_kg", "run_experience")
+PROFILE_UPDATE_KEYS = ("max_hr", "rest_hr", "weight_kg", "height_cm",
+                       "birth_year", "sex", "run_experience")
 PROFILE_UPDATE_RANGES = {
     "max_hr": (140, 230),
     "rest_hr": (30, 100),
     "weight_kg": (30, 200),
+    "height_cm": (100, 250),
+    "birth_year": (1920, 2020),  # 整型年份（_apply_profile_updates 特殊处理去小数）
+    "sex": None,  # 枚举 {male, female}，_apply_profile_updates 特殊校验
     "run_experience": None,  # 自由文本，仅限长度
 }
 

@@ -106,10 +106,34 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "compliance_7d": load_metrics.compliance(planned7, done7, today - timedelta(days=6), today),
     }
 
-    # 最近训练活动精确详情（聊天/自动分析回答训练问题的数据依据，最新在前）
+    # 最近训练活动精确详情（聊天/自动分析回答训练问题的数据依据，最新在前）。
+    # 窗口放宽到 30 天（上限 15 条）：训练者追问「上周三/十天前那次跑」时
+    # AI 拿得到数据，不再只覆盖一周
     recent_acts = [a for a in activity_repo.list_activities(
+        (today - timedelta(days=30)).isoformat(),
+        (today + timedelta(days=1)).isoformat(), limit=15) if a.get("distance_m")]
+
+    # 过去 7 天「计划 vs 实际」：按日期把计划课与当天实际训练配对（不依赖
+    # 用户手动标记完成）——AI 回答「计划 22km 我只跑了 12km 要紧吗」这类
+    # 完成度/质疑问题时，计划侧与实际侧的精确数字必须同时在场
+    hist7 = plan_repo.get_workouts(
+        plan["id"], (today - timedelta(days=7)).isoformat(), today.isoformat()) if plan else []
+    pa_acts = activity_repo.list_activities(
         (today - timedelta(days=7)).isoformat(),
-        (today + timedelta(days=1)).isoformat(), limit=50) if a.get("distance_m")]
+        (today + timedelta(days=1)).isoformat(), limit=200)
+    acts_by_day: dict[str, list[dict]] = {}
+    for a in pa_acts:
+        if a.get("distance_m"):
+            acts_by_day.setdefault(dates.ts_to_date(a["start_ts"]).isoformat(), []).append(a)
+    plan_actual: list[dict] = []
+    for w in sorted(hist7, key=lambda x: x["date"]):
+        if not w.get("distance_km"):
+            continue
+        acts = acts_by_day.get(w["date"]) or []
+        slot = int(w.get("slot") or 1)
+        actual = (acts[slot - 1] if len(acts) >= slot
+                  else (acts[0] if acts and slot == 1 else None))
+        plan_actual.append({"w": w, "acts": [actual] if actual else []})
 
     # 配速-心率对照（AI 判断进步/退步的依据）：近 180 天同配速档心率趋势 + 近 8 周平均
     phr_start = today - timedelta(days=180)
@@ -129,6 +153,53 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "stress_avg": h.get("stress_avg"),
         "body_battery_min": h.get("body_battery_min"),
     } for h in health_rows]
+
+    # 数据参考（建议与理由必须引用具体数字；系统算好，AI 不得自造数值）：
+    # 心率参考区间按与课程分类相同的口径（静息心率已知用储备心率 %HRR，
+    # 否则 %HRmax，见 workout_analysis.HR_ZONE_KINDS）
+    refs: dict = {}
+    max_hr = profile.get("max_hr")
+    rest_hr = profile.get("rest_hr")
+    if max_hr:
+        use_hrr = bool(rest_hr and max_hr > rest_hr)
+
+        def _bpm(frac: float) -> int:
+            return round(rest_hr + frac * (max_hr - rest_hr)) if use_hrr \
+                else round(max_hr * frac)
+
+        zones = []
+        for name, lo, hi, label in workout_analysis.HR_ZONE_KINDS:
+            if name == "recovery":
+                zones.append(f"{label} <{_bpm(hi)} bpm")
+            elif name == "anaerobic":
+                zones.append(f"{label} ≥{_bpm(lo)} bpm")
+            else:
+                zones.append(f"{label} {_bpm(lo)}–{_bpm(hi)} bpm")
+        refs["hr_zone_lines"] = zones
+        refs["hr_zone_desc"] = (
+            f"{'储备心率法（静息 {rest_hr}）' if use_hrr else '% 最大心率'}，最大 {max_hr} bpm")
+    hrv_vals = [h["hrv_avg_ms"] for h in health if h.get("hrv_avg_ms")]
+    if hrv_vals:
+        refs["hrv_base"] = {"avg": round(sum(hrv_vals) / len(hrv_vals), 1),
+                            "min": min(hrv_vals), "max": max(hrv_vals), "n": len(hrv_vals)}
+    cad_list: list[float] = []
+    stride_list: list[float] = []
+    for a in pa_acts:
+        cad = a.get("avg_cadence")
+        if cad and 120 <= cad <= 240:
+            cad_list.append(cad)
+            dur = a.get("duration_s") or 0
+            dist = a.get("distance_m") or 0
+            if dur > 60 and dist > 0:
+                v = dist / dur  # m/s
+                stride = v * 60 / cad  # m/步
+                if 0.2 <= stride <= 2.5:
+                    stride_list.append(stride)
+    if cad_list:
+        refs["cadence_stride"] = {
+            "cadence": round(sum(cad_list) / len(cad_list)),
+            "stride": round(sum(stride_list) / len(stride_list), 2) if stride_list else None,
+            "n": len(cad_list)}
 
     applied = adjustment_repo.list_adjustments(plan["id"], status="applied", limit=500)
     add_count = sum(
@@ -153,7 +224,9 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "week_workouts": workouts,
         "recent": recent,
         "recent_acts": recent_acts,
+        "plan_actual": plan_actual,
         "health": health,
+        "refs": refs,
         "pace_hr_trend": pace_hr_trend,
         "pace_hr_weekly": pace_hr_weekly,
         "extra_requested": extra_requested,
@@ -526,6 +599,11 @@ def _apply_profile_updates(updates: dict) -> dict:
         if k not in updates or updates[k] is None:
             continue
         v = updates[k]
+        if k == "sex":  # 枚举校验：库内只存 male/female
+            if v not in ("male", "female"):
+                continue
+            clean[k] = v
+            continue
         rng = PROFILE_UPDATE_RANGES.get(k)
         if rng:
             try:
@@ -535,7 +613,7 @@ def _apply_profile_updates(updates: dict) -> dict:
             lo, hi = rng
             if not (lo <= v <= hi):
                 continue
-            v = round(v, 1)
+            v = int(v) if k == "birth_year" else round(v, 1)
         else:
             v = str(v).strip()[:100]
             if not v:

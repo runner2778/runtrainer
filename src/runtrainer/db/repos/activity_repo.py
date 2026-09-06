@@ -65,6 +65,29 @@ def list_activities(start_date: str | None = None, end_date: str | None = None,
         return [dict(r) for r in conn.execute(sql, args)]
 
 
+def list_pace_hr_rows(start_date: str | None = None, end_date: str | None = None,
+                      limit: int = 5000) -> list[dict]:
+    """配速-心率分析用轻量行（避开 laps_json/structure_json 大字段）。
+
+    weekly_pace_hr / pace_bin_hr 只消费 start_ts/distance_m/avg_pace_s_km/
+    avg_hr/max_hr 五列；此前用 list_activities 的 SELECT * 会把整行详情
+    从 SQLite 搬到内存（再解析大 JSON 字段），窗口拉大后明显拖慢。
+    """
+    sql = ("SELECT start_ts, distance_m, avg_pace_s_km, avg_hr, max_hr"
+           " FROM activities WHERE 1=1")
+    args: list = []
+    if start_date:
+        sql += " AND date(start_ts, 'unixepoch', 'localtime') >= date(?)"
+        args.append(start_date)
+    if end_date:
+        sql += " AND date(start_ts, 'unixepoch', 'localtime') <= date(?)"
+        args.append(end_date)
+    sql += " ORDER BY start_ts DESC LIMIT ?"
+    args.append(limit)
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(sql, args)]
+
+
 def get_activity(activity_id: int) -> dict | None:
     with get_conn() as conn:
         return row_to_dict(conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone())

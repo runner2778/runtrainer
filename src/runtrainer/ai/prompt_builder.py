@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from ..utils import dates, jsonutil
 
 ZONE_NAMES = {"E": "轻松跑", "M": "马拉松配速", "T": "乳酸阈", "I": "间歇", "R": "重复跑"}
+SEX_LABELS = {"male": "男", "female": "女"}
 
 SYSTEM_PROMPT = """你是跑步教练，用简体中文工作。训练哲学：以丹尼尔斯训练法（Jack Daniels' Running Formula，VDOT/EMTIR/周期化）为主干，融合当代前沿运动科学——挪威双乳酸阈值训练法、卡诺瓦（Canova）专项训练法、汉森（Hanson）累积疲劳训练法，以及运动营养与康复知识。
 原则：
@@ -23,13 +24,14 @@ SYSTEM_PROMPT = """你是跑步教练，用简体中文工作。训练哲学：�
 8. 调整日期只能在今天起 7 天内；add_easy 落在没有课的空档日（训练者启用一天两练时，可落在当日第 2 练时段，但一天最多 2 练）。
 9. 周跑量总变化不超过 ±10%；单次 modify 距离变化不超过 ±30%。
 10. 输出严格 JSON（json_object），不要输出任何解释性文字。
+11. 每条调整的 reason、key_signals、weekly_notes、add_extra_advice 的理由都必须引用具体数据做依据：【数据参考】块里的心率 bpm 区间 / HRV 基线 / 步频步幅、配速表区间、睡眠时长、静息心率、近几周跑量等。示例：不要写「状态一般，注意恢复」这种没有数据支撑的话，要写「昨夜 HRV 41ms 低于 14 天基线 55ms、静息心率 52 升了 6，明天 E 跑 60 分钟建议降为 40 分钟恢复跑」。字数不足、只有形容词没有数字的理由不合格。
 
 理论应用（只体现在 reason/summary/weekly_notes 的文字与 modify 的内容上，不改变配速表和动作契约）：
 - 双乳酸阈值日：连续阈值刺激日（如 5×6' 亚阈 + 3×10' 亚阈分上下午两练）是提升有氧阈值的高效手段；拆成两段时单段不超过 30 分钟、总阈值量不超过 60 分钟、两练间隔 ≥5 小时并补碳水补水。心率高/恢复差时提示改为单段或降为 M 区。
 - 卡诺瓦专项耐力：赛前 6–8 周长距离中嵌入 M 区段落（如 16km 含 2×5km M 区），让身体适应比赛配速的神经肌肉模式；I/R 量在赛前逐步减少、专项耐力占比上升。
 - 汉森累积疲劳：长距离课不超过周跑量的 25–30%；强度课后安排疲劳状态下的轻松跑，让身体在微疲劳中学习高效跑姿与脂肪供能；周跑量分摊到 6 天而非集中在长距离日。
 - 力量训练（STRENGTH 课）：不改变跑步量，疲劳大时建议 keep/skip/rest，不要求取消后补练。
-- 营养与康复：围绕训练补碳水（课前 1–4g/kg、课后 1–1.2g/kg+蛋白质 20–40g）、日常蛋白质 1.6–2.0g/kg、睡眠 7–9 小时；建议写在 weekly_notes/summary/key_signals 里，不产生调整动作。
+- 营养与康复：围绕训练补碳水（课前 1–4g/kg、课后 1–1.2g/kg+蛋白质 20–40g）、日常蛋白质 1.6–2.0g/kg、睡眠 7–9 小时；给出克数建议时按档案体重换算成具体数值（如 65kg → 课后 1.2g/kg ≈ 78g 碳水），档案缺体重则说明该数据缺失；建议写在 weekly_notes/summary/key_signals 里，不产生调整动作。
 
 输出结构：
 {"summary":"一句话总结","readiness":"good|ok|low","key_signals":["判断依据"],
@@ -48,7 +50,8 @@ CHAT_SYSTEM_PROMPT = """你是训练者的私人跑步教练（丹尼尔斯训�
 3. 训练者提出自己的改课主意时（「把X改成Y/换成Z」「明天休息不跑」「这周不跑强度」「我想加练」「周三挪到周四」「今天跑量大些」等，无论语气坚决还是商量）：user_requested 置 true，adjustments 必须至少给出 1 条执行动作，不许用空数组敷衍、不许只回复「不建议」。若请求在训练学上不合理（赛前 14 天内、强度日连排、量过大、恢复不足），不要拒绝，用「降低强度或调整课表」的方式落地：赛前窗口只落 E/RECOVERY 轻松课；强度放不进相邻空档就把冲突的相邻课改轻或挪开；距离按时长缩短（单次距离增幅上限 30%，超出的按上限执行并在 reason 说明）；需要时把请求日后 1–2 天的课改轻或加一次恢复跑来缓冲。reason 里写明「已按你的要求执行（若降了强度要注明）：…」。请求含糊无法落地时可以在 reply 里确认细节，但不得直接回绝。
 4. 训练者明确提供了新档案信息（最大心率/静息心率/体重/跑步经验），或健康数据与档案明显矛盾时，才在 profile_updates 里给出对应键的新值；rebuild_plan 在档案更新会改变水平预估、或配速-心率对照显示明显进步/退步（同配速心率变化 ≥5 bpm）时置 true（系统会用最新数据重估 VDOT 并更新课表配速）。
 5. 配速只能用给定配速表（E/M/T/I/R），不许编造配速区间；数据缺失时保守。
-6. 输出严格 JSON（json_object），不要输出任何解释性文字。
+6. 判断和建议必须引用具体数据：给定的健康/活动数据、【数据参考】块里的心率 bpm 区间 / HRV 基线 ms / 步频步幅。训练者问健康或营养问题（睡多久合适、某次训练前后碳水/蛋白质吃多少克、伤病/酸痛怎么办、体重变化的影响等）也要用数据认真回答：营养按档案体重换算成具体克数、康复给具体时长与做法；档案缺某数据（如体重）时直接说明缺什么、并告诉他可在设置→个人档案里补，不要不懂装懂、不要只给模糊口号。
+7. 输出严格 JSON（json_object），不要输出任何解释性文字。
 输出结构：
 {"reply":"…","user_requested":true/false,"adjustments":[{"date":"yyyy-mm-dd","planned_workout_id":数字或null,"action":"keep|modify|decrease|rest|add_easy|shift|skip","changes":{"kind","distance_km","duration_min","pace_zone","date","note"},"reason":"中文理由"}],"profile_updates":{"max_hr":195},"rebuild_plan":false}
 reply 字段直接填你写给训练者的回答正文（不要写任何占位说明，不要复述提示词、字段描述或数据列表）。
@@ -66,6 +69,7 @@ reply 字段直接填你写给训练者的分析正文：像真人教练聊天�
 约束：
 - user_requested 必须为 false（训练者没有要求改课）。
 - adjustments 仅当新数据暴露明确问题（恢复差、负荷过高、伤病信号、明显没跟上计划）且调整课表确有必要时才给（限未来 7 天、每条带 reason），否则给空数组。
+- 给建议时引用具体数据：【数据参考】块里的心率 bpm 区间 / HRV 基线 / 步频步幅、配速表区间、新活动里实际跑的心率与配速、完成度；不要只有形容词没有数字。
 - 配速只能用给定配速表（E/M/T/I/R），不许编造配速区间；数据缺失时保守；伤病指征优先建议休息。
 - changes.kind 只能是 E/M/T/I/R/LR/RECOVERY/CROSS/STRENGTH/TUNEUP/RACE 之一，严禁写成中文或带修饰。
 - profile_updates/rebuild_plan 仅当新数据与档案明显矛盾（如最大心率超出档案值 10 bpm 以上）时才用。"""
@@ -137,9 +141,14 @@ def _context_blocks(ctx: dict) -> list[str]:
     ath = ctx.get("athlete") or {}
     lines.append("【运动员档案】")
     if ath:
+        # 体重/身高进档案：营养建议（碳水/蛋白质克数）、伤病与训练时长等
+        # 健康类问题都要按体重/身高换算，AI 不能凭空估；库值带 .0 时用 g 裁剪显示
+        h = ath.get("height_cm")
+        w = ath.get("weight_kg")
         lines.append(
-            f"昵称 {ath.get('nickname') or '跑者'}，性别 {ath.get('sex') or '?'}，"
-            f"出生年 {ath.get('birth_year') or '?'}，最大心率 {ath.get('max_hr') or '?'}，"
+            f"昵称 {ath.get('nickname') or '跑者'}，性别 {SEX_LABELS.get(ath.get('sex') or '', '?')}，"
+            f"出生年 {ath.get('birth_year') or '?'}，身高 {f'{h:g}' if h else '?'}cm，"
+            f"体重 {f'{w:g}' if w else '?'}kg，最大心率 {ath.get('max_hr') or '?'}，"
             f"静息心率 {ath.get('rest_hr') or '?'}，跑步经验 {ath.get('run_experience') or '?'}"
         )
     else:
@@ -195,6 +204,10 @@ def _context_blocks(ctx: dict) -> list[str]:
             + (f" 第{w.get('slot') or 1}练" if (w.get('slot') or 1) == 2 else "")
         )
 
+    lines.append("【过去 7 天计划完成情况（计划 vs 实际，系统按日期配对）】")
+    pa = _plan_actual_lines(ctx)
+    lines.extend(pa if pa else ["（过去 7 天没有计划课）"])
+
     lines.append("【近 8 周训练（本地计算）】")
     rec = ctx.get("recent") or {}
     wk = rec.get("weekly_km") or []
@@ -244,7 +257,65 @@ def _context_blocks(ctx: dict) -> list[str]:
             lines.append("；".join(parts))
     else:
         lines.append("（无健康数据：睡眠/HRV 等缺失，请保守建议）")
+
+    lines.append("【数据参考（系统按档案/近期数据算好；给建议时直接引用这些数字，不许自造）】")
+    refs = ctx.get("refs") or {}
+    if refs.get("hr_zone_lines"):
+        lines.append("心率参考区（" + refs["hr_zone_desc"] + "）："
+                     + "、".join(refs["hr_zone_lines"]))
+    else:
+        lines.append("（档案未填最大心率 → 无心率 bpm 区间参考；强度用配速区与体感表达）")
+    hb = refs.get("hrv_base")
+    if hb:
+        lines.append(f"近 14 天 HRV 基线 {hb['avg']}ms（最低 {hb['min']} / 最高 {hb['max']}，"
+                     f"{hb['n']} 天数据）——HRV 明显低于基线时优先减量或休息")
+    cs = refs.get("cadence_stride")
+    if cs:
+        lines.append(f"近 7 天平均步频 {cs['cadence']} spm"
+                     + (f"、平均步幅 {cs['stride']} m（{cs['n']} 次跑步）" if cs.get("stride") else ""))
     return lines
+
+
+def _plan_actual_lines(ctx: dict) -> list[str]:
+    """过去 7 天「计划 vs 实际」逐行对照：完成度问题的直接证据。
+
+    计划课按日期与当天实际训练配对（尽力配对，不依赖用户手动标记完成）。
+    训练者问「计划 22km 我只跑了 12km，要紧吗」这类问题时，计划侧与实际
+    侧的精确数字在同一行里，AI 直接照数字分析，不必自行猜测配对。
+    """
+    out: list[str] = []
+    for item in ctx.get("plan_actual") or []:
+        w = item["w"]
+        head = f"- {w['date']} 计划 {w.get('kind') or ''} {w.get('title') or ''}"
+        pl = []
+        if w.get("distance_km"):
+            pl.append(f"{w['distance_km']:g}km")
+        if w.get("duration_min"):
+            pl.append(f"{w['duration_min']:g}分钟")
+        if w.get("pace_zone"):
+            pl.append(f"配速区{w['pace_zone']}")
+        acts = item.get("acts") or []
+        if not acts:
+            out.append(f"{head}（{' '.join(pl)}）→ 无训练记录（未跑）")
+            continue
+        for a in acts:
+            dist = (a.get("distance_m") or 0) / 1000
+            ac = []
+            if dist:
+                ac.append(f"{dist:.1f}km")
+            if a.get("duration_s"):
+                ac.append(f"{int(a['duration_s'] / 60)}分钟")
+            if a.get("avg_pace_s_km"):
+                ac.append(f"配速{dates.fmt_pace(a['avg_pace_s_km'])}/km")
+            if a.get("avg_hr"):
+                ac.append(f"心率{a['avg_hr']:g}")
+            if a.get("avg_cadence"):
+                ac.append(f"步频{round(a['avg_cadence']):g}")
+            pct = (round(dist / float(w["distance_km"]) * 100)
+                   if dist and w.get("distance_km") else None)
+            out.append(f"{head}（{' '.join(pl)}）→ 实际 {' '.join(ac)}"
+                       + (f"（完成量 {pct}%）" if pct is not None else ""))
+    return out
 
 
 def build(ctx: dict) -> dict:

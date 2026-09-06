@@ -99,7 +99,7 @@ const HTML = `
           <div class="chart-sm" id="act-pace-chart"></div>
           <div class="chart-sm" id="act-hr-chart"></div>
         </div>
-        <div class="muted">每 5 秒采样曲线（配速 / 心率，分图展示避免双轴）</div>
+        <div class="muted">秒级采样曲线（配速 / 心率，分图展示避免双轴；滚轮缩放、拖拽平移可看细节，暂停时段断线）</div>
       </div>
     </template>
     <template x-if="detail && detail.laps && detail.laps.length > 1">
@@ -145,6 +145,12 @@ export function initActivities() {
       if (!ok) { this.$dispatch('toast', { text: '读取活动失败: ' + error }); return; }
       this.list = data || [];
     },
+    async syncRefresh() {
+      // 同步刚结束：列表必须立即重拉（本页无 _lastLoad 防抖，load 直跑）；
+      // 若详情正打开，重拉详情让 Garmin 回填后的样本/曲线也即时更新
+      await this.load();
+      if (this.detail) await this.openDetail(this.detail.id);
+    },
     daysAgo(n) {
       const d = new Date(); d.setDate(d.getDate() - n);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -170,28 +176,47 @@ export function initActivities() {
       if (!this.detail) return;
       const colors = chartColors();
       const samples = this.detail.samples || [];
-      const t = samples.map((s) => s.t_offset_s);
-      const pace = samples.map((s) => (s.speed_mps ? 1000 / s.speed_mps : null));
-      const hr = samples.map((s) => s.hr);
-      const min = Math.floor((Math.min(...t.filter((v) => v != null)) || 0) / 60);
-      const max = Math.ceil((Math.max(...t.filter((v) => v != null)) || 0) / 60);
-      const mk = () => ({
-        grid: { left: 44, right: 12, top: 24, bottom: 24 },
-        xAxis: { ...baseAxis(colors), type: 'value', min, max, name: '分钟' },
-        yAxis: { ...baseAxis(colors), type: 'value' },
-        tooltip: tooltip(colors),
-        series: [{ type: 'line', showSymbol: false, lineStyle: { width: 2 }, data: [] }],
+      if (samples.length <= 5) return;  // 与模板渲染条件一致
+      const MAX_PTS = 2000;   // 每图抽稀上限：长活动秒级样本可达数千，全量点渲染卡顿
+      const MIN_SPEED = 0.5;  // <0.5m/s（>33:20/km）视作静止/暂停/GPS 漂移 → 断线而非假快/Infinity
+      // X 轴与数据统一为分钟。旧 bug：X 数据是秒、坐标域 min/max 却除以 60 当分钟，
+      // ECharts 把越界点全部裁剪 → 曲线只剩开头几十秒
+      const toMin = (s) => (s == null ? null : s / 60);
+      const paceXY = this.downsample(samples.map((s) => [
+        toMin(s.t_offset_s),
+        s.speed_mps != null && s.speed_mps > MIN_SPEED ? 1000 / s.speed_mps : null,
+      ]), MAX_PTS);
+      const hrXY = this.downsample(samples.map((s) => [toMin(s.t_offset_s), s.hr ?? null]), MAX_PTS);
+
+      const xAxis = { ...baseAxis(colors), type: 'value', name: '分钟' };
+      xAxis.axisLabel = { ...xAxis.axisLabel, formatter: (v) => this.fmtClock(v * 60) };
+      const paceY = { ...baseAxis(colors), type: 'value', scale: true, inverse: true };  // 快在上
+      paceY.axisLabel = { ...paceY.axisLabel, formatter: (v) => this.fmtClock(v) };
+      const hrY = { ...baseAxis(colors), type: 'value', scale: true };
+      const mk = (yAxis, name, color, fmtVal) => ({
+        grid: { left: 54, right: 16, top: 26, bottom: 24 },
+        xAxis,
+        yAxis,
+        tooltip: tooltip(colors, {
+          formatter: (params) => {
+            const p = params && params[0];
+            if (!p || !p.value || p.value[1] == null) return '';  // 断点（暂停）无提示
+            return `<b>${this.fmtClock(p.value[0] * 60)}</b><br/>${p.marker}${name} ${fmtVal(p.value[1])}`;
+          },
+        }),
+        // 滚轮缩放 + 拖拽平移：秒级采样全幅铺开，细节由用户缩放看（不裁剪丢数据）
+        dataZoom: [{ type: 'inside', xAxisIndex: 0 }],
+        series: [{
+          type: 'line', name,
+          showSymbol: false, connectNulls: false,  // 暂停/静止段断线，不连线
+          lineStyle: { width: 2, color }, itemStyle: { color },
+          data: [],
+        }],
       });
-      const paceChart = mk();
-      paceChart.series[0].name = '配速 s/km';
-      paceChart.series[0].data = t.map((x, i) => [x, pace[i]]);
-      paceChart.series[0].lineStyle.color = colors.accent;
-      paceChart.series[0].itemStyle = { color: colors.accent };
-      const hrChart = mk();
-      hrChart.series[0].name = '心率 bpm';
-      hrChart.series[0].data = t.map((x, i) => [x, hr[i]]);
-      hrChart.series[0].lineStyle.color = colors.kindI;
-      hrChart.series[0].itemStyle = { color: colors.kindI };
+      const paceChart = mk(paceY, '配速', colors.accent, (v) => this.fmtPace(v));
+      paceChart.series[0].data = paceXY;
+      const hrChart = mk(hrY, '心率', colors.kindI, (v) => `${Math.round(v)} bpm`);
+      hrChart.series[0].data = hrXY;
       const el1 = document.getElementById('act-pace-chart');
       const el2 = document.getElementById('act-hr-chart');
       if (el1 && el2) {
@@ -200,6 +225,62 @@ export function initActivities() {
         initChart(el1, paceChart);
         initChart(el2, hrChart);
       }
+    },
+    /** 分块 LTTB 抽稀：按「有效值连续段」分配点数预算——null 断点两侧独立抽稀，
+        暂停间隙不会被抹成连线；每段保留首尾点与形态。 */
+    downsample(xy, maxPts) {
+      if (xy.length <= maxPts) return xy;
+      const runs = [];
+      let cur = [];
+      for (const p of xy) {
+        if (p[1] == null) {
+          if (cur.length) { runs.push(cur); cur = []; }
+        } else cur.push(p);
+      }
+      if (cur.length) runs.push(cur);
+      const total = runs.reduce((n, r) => n + r.length, 0);
+      const out = [];
+      for (const r of runs) {
+        const budget = Math.min(r.length, Math.max(2, Math.round(maxPts * r.length / total)));
+        out.push(...this.lttb(r, budget));
+      }
+      return out;
+    },
+    /** LTTB（largest-triangle-three-buckets）：按候选点与相邻平均点构成的三角形
+        面积挑点，保极值形态，复杂度 O(n)（抽稀只发生一次，不做逐段递归）。 */
+    lttb(pts, m) {
+      const n = pts.length;
+      if (m >= n) return pts;
+      if (m < 3) return [pts[0], pts[n - 1]];
+      const out = [pts[0]];
+      const step = (n - 2) / (m - 2);
+      let a = 0;
+      for (let i = 0; i < m - 2; i++) {
+        const ra = Math.floor(i * step) + 1;
+        const rb = Math.min(Math.floor((i + 1) * step) + 1, n - 1);
+        const sa = Math.floor((i + 1) * step) + 1;
+        const sb = Math.min(Math.floor((i + 2) * step) + 1, n);
+        let ax = 0, ay = 0, k = 0;
+        for (let j = sa; j < sb; j++) { ax += pts[j][0]; ay += pts[j][1]; k++; }
+        if (!k) continue;
+        ax /= k; ay /= k;
+        const x0 = pts[a][0], y0 = pts[a][1];
+        let best = -1, bi = -1;
+        for (let j = ra; j < rb; j++) {
+          const area = Math.abs((x0 - pts[j][0]) * (ay - y0) - (x0 - ax) * (pts[j][1] - y0));
+          if (area > best) { best = area; bi = j; }
+        }
+        if (bi >= 0) { out.push(pts[bi]); a = bi; }
+      }
+      out.push(pts[n - 1]);
+      return out;
+    },
+    /** 秒 → mm:ss / h:mm:ss（0 也输出 "0:00"，与 fmtTime 的 '—' 占位语义区分） */
+    fmtClock(s) {
+      s = Math.round(s);
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+      return h ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`
+               : `${m}:${String(sec).padStart(2, '0')}`;
     },
     fmtDate(ts) {
       const d = new Date(ts * 1000);
