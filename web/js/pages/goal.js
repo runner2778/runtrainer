@@ -9,6 +9,19 @@ const DISTANCES = [
 const PHASE_LABELS = { base: '基础期', early: '早期强度', transition: '过渡期', final: '最终强度', taper: '减量期' };
 const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
 const ZONE_LABELS = { E: '轻松配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速' };
+// 课型 → 强度区间（与仪表盘/日历一致：vdot.PACE_ZONES 的区间与 % 带）——
+// 制定出的课表在日历上按此标注「该课属于哪一档强度区间」
+const KIND_ZONES = {
+  E: { label: '轻松区', band: '59–74%' },
+  M: { label: '有氧/马配区', band: '74–82%' },
+  T: { label: '乳酸阈值区', band: '82–92%' },
+  I: { label: '最大摄氧量区', band: '92–100%' },
+  R: { label: '无氧冲刺区', band: '100–105%' },
+  LR: { label: '有氧区（长距离）', band: '59–82%' },
+  RECOVERY: { label: '恢复区', band: '<59%' },
+  TUNEUP: { label: '测试赛强度', band: '' },
+  RACE: { label: '比赛强度', band: '' },
+};
 
 function fmtPace(s) {
   if (!s) return '--';
@@ -150,7 +163,26 @@ const HTML = `
                 <li><span x-text="ev.detail"></span>（VDOT <span x-text="ev.vdot"></span>）</li>
               </template>
             </ul>
-            <p class="muted" x-show="ctx.ability.max_hr">HRmax 估算：<span x-text="ctx.ability.max_hr"></span> bpm</p>
+            <!-- 当前水平各区间配速（恢复→无氧冲刺）：生成的课表/日历中的区间
+                 安排即按此表标注（每种课的 %VDOT 档位与配速带） -->
+            <details class="mt8" x-show="(ctx.ability.zones || []).length" :open="true">
+              <summary class="muted small">当前水平各区间配速（恢复 → 无氧冲刺，课表/日历按此标注）</summary>
+              <div class="zones-table mt8">
+                <template x-for="z in ctx.ability.zones" :key="z.key">
+                  <div class="z-row">
+                    <span class="rail" :class="'zn-' + z.key"></span>
+                    <b x-text="z.label"></b>
+                    <!-- 无档位字母（恢复跑）时仍保留占位格，避免 x-show 移除元素打乱行内网格 -->
+                    <span class="zn-mark" :class="z.mark ? 'kind-' + z.mark : ''" x-text="z.mark || ''"></span>
+                    <span class="muted" x-text="z.band"></span>
+                    <span class="spacer"></span>
+                    <span class="num muted" x-text="z.use"></span>
+                    <span class="num pace" x-text="fmtPace(z.pace_slow_s_km) + ' – ' + fmtPace(z.pace_fast_s_km)"></span>
+                  </div>
+                </template>
+              </div>
+            </details>
+            <p class="muted mt8" x-show="ctx.ability.max_hr">HRmax 估算：<span x-text="ctx.ability.max_hr"></span> bpm</p>
           </div>
         </template>
       </div>
@@ -254,6 +286,8 @@ const HTML = `
             <template x-for="w in preview.workouts.filter(x => x.week_index === wk)" :key="w.date + '-' + (w.slot || 1)">
               <div class="diff-row"><span x-text="w.date.slice(5) + (w.slot === 2 ? ' ②' : '')"></span>
                 <span class="badge" :class="'kind-' + w.kind" x-text="KIND_LABELS[w.kind] || w.kind"></span>
+                <span class="badge zn-chip" :class="'znk-' + w.kind" x-show="zoneOf(w.kind)"
+                      :title="'对应强度区间（配速见左侧各区配速表）'" x-text="zoneOf(w.kind)"></span>
                 <span x-text="w.title"></span></div>
             </template>
           </div>
@@ -284,6 +318,7 @@ export function initGoal() {
     distances: DISTANCES,
     PHASE_LABELS,
     KIND_LABELS,
+    KIND_ZONES,
     today: localToday(),
     ctx: { recent_vdot: null, recent_race: null, avg_weekly_km_4w: null, min_weeks: {} },
     hasPlan: false,
@@ -315,6 +350,10 @@ export function initGoal() {
       // 切回本页时重新确认是否已有计划（不动用户正在填写的表单）
       const plan = await tryCall('get_active_plan');
       this.hasPlan = !!plan.data;
+      // 手动导入/补录刷新 PB 后：当前水平/成绩预估/各区配速即时更新
+      // （ctx 只做展示，与表单相互独立，随时可安全替换）
+      const { ok, data } = await tryCall('get_goal_wizard_context');
+      if (ok) this.ctx = data;
     },
     async syncRefresh() {
       // 同步完成 → 当前水平预估（VDOT/成绩预估）实时更新；
@@ -367,5 +406,11 @@ export function initGoal() {
     },
 
     fmtPace, fmtTime, fmtDate,
+    // 课型 → 强度区间显示（与仪表盘/日历一致：label + %VDOT 带）
+    zoneOf(kind) {
+      const z = KIND_ZONES[kind];
+      if (!z) return '';
+      return z.band ? z.label + ' · ' + z.band : z.label;
+    },
   }));
 }

@@ -2,6 +2,18 @@ import { tryCall } from '../api.js';
 import { baseAxis, chartColors, disposeChart, initChart, resizeIn, tooltip } from '../charts.js';
 
 const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
+// 课型 → 强度区间（与水平预估六区配速表同源：vdot.PACE_ZONES 的区间与 % 带）
+const KIND_ZONES = {
+  E: { label: '轻松区', band: '59–74%' },
+  M: { label: '有氧/马配区', band: '74–82%' },
+  T: { label: '乳酸阈值区', band: '82–92%' },
+  I: { label: '最大摄氧量区', band: '92–100%' },
+  R: { label: '无氧冲刺区', band: '100–105%' },
+  LR: { label: '有氧区（长距离）', band: '59–82%' },
+  RECOVERY: { label: '恢复区', band: '<59%' },
+  TUNEUP: { label: '测试赛强度', band: '' },
+  RACE: { label: '比赛强度', band: '' },
+};
 
 const HTML = `
 <template x-if="d">
@@ -87,6 +99,9 @@ const HTML = `
     <template x-for="w in d.today_workouts" :key="w.id">
       <div class="flex today-row">
         <span class="badge" :class="'kind-' + w.kind" x-text="KIND_LABELS[w.kind] || w.kind"></span>
+        <span class="badge zn-chip" :class="'znk-' + w.kind" x-show="zoneOf(w.kind)"
+              :title="'对应强度区间（配速上限按课表 VDOT）'"
+              x-text="zoneOf(w.kind)"></span>
         <span class="muted" x-show="w.slot > 1" x-text="'第 ' + w.slot + ' 练'"></span>
         <span x-text="w.title"></span>
         <span class="spacer"></span>
@@ -129,6 +144,25 @@ const HTML = `
             </ul>
           </div>
         </div>
+        <!-- 当前水平各区间对应配速（恢复→无氧冲刺）：课表/日历里的区间安排
+             都按这张表标注；PB 刷新后随整卡自动重算 -->
+        <details class="mt8" x-show="(d.ability_30d.zones || []).length" :open="true">
+          <summary class="muted small">当前水平各区间配速（计划与日历按此标注区间）</summary>
+          <div class="zones-table mt8">
+            <template x-for="z in d.ability_30d.zones" :key="z.key">
+              <div class="z-row">
+                <span class="rail" :class="'zn-' + z.key"></span>
+                <b x-text="z.label"></b>
+                <!-- 无档位字母（恢复跑）时仍保留占位格，避免 x-show 移除元素打乱行内网格 -->
+                <span class="zn-mark" :class="z.mark ? 'kind-' + z.mark : ''" x-text="z.mark || ''"></span>
+                <span class="muted" x-text="z.band"></span>
+                <span class="spacer"></span>
+                <span class="num muted" x-text="z.use"></span>
+                <span class="num pace" x-text="fmtPace(z.pace_slow_s_km) + ' – ' + fmtPace(z.pace_fast_s_km)"></span>
+              </div>
+            </template>
+          </div>
+        </details>
         <!-- 近一年最佳成绩 + 训练保持度：数据窗口 30 天时不够「现在能跑多少」
              的参考，这里补上全年硬证据 -->
         <div class="mt8">
@@ -280,8 +314,19 @@ export function initDashboard() {
     },
     evName(src) {
       return { recent_race: '近期比赛', garmin_vo2max: '手表 VO2max',
-               threshold_trend: '配速-心率阈值', hrr_pace: 'HRR 有氧配速',
-               interval_ability: '间歇能力', hr_trend: '配速-心率趋势' }[src] || src;
+               threshold_trend: '配速-心率阈值', cruise_ability: '节奏/巡航跑',
+               t_intervals: '阈值型间歇', hrr_pace: 'HRR 有氧配速',
+               interval_ability: '间歇能力', year_best: '近一年最佳',
+               hr_trend: '配速-心率趋势' }[src] || src;
+    },
+    zoneOf(kind) {
+      const z = KIND_ZONES[kind];
+      if (!z) return '';
+      return z.band ? z.label + ' · ' + z.band : z.label;
+    },
+    fmtPace(s) {
+      if (s == null) return '—';
+      return Math.floor(s / 60) + ':' + String(Math.round(s % 60)).padStart(2, '0');
     },
     yearBestTitle(b) {
       const src = b.source === 'race' ? '比赛/近似全程' : '长跑中切出的最快分段';

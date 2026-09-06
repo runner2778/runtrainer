@@ -35,6 +35,29 @@ SPRINT_SEG_MAX_M = 500.0  # ≤500m 的 work 段按冲刺（R）强度反算，�
 # 代表更高水平，每偏离 1 个单位修正 20%（速度→VDOT 近似线性）
 INTERVAL_REST_REF = 0.6
 INTERVAL_REST_K = 0.20
+# ---- 间歇强度类型识别（第十五批）：同一组快跑段按
+# 心率 / 休息结构 / 段落长度判断落在哪个生理区间，各自按对应 %VDOT 反算
+INTERVAL_VO2MAX_HR_MIN = 0.92   # 段落平均心率 ≥92% HRmax：已到 V·O2 区（铁证，优先）
+INTERVAL_T_HR_WIN = (0.84, 0.92)  # 长段落在阈值心率窗口内 → 乳酸阈值/巡航
+INTERVAL_THRESH_REST_MAX = 0.55  # 休息/快跑比 ≤0.55 → 短休连续刺激 → 乳酸阈值型
+INTERVAL_THRESH_DIST_MIN = 1000.0  # 无可靠心率时 ≥1km 长段落按阈值巡航处理
+# 节奏跑（连续匀速巡航，非间歇）识别：15–60min、平均心率 84–94% HRmax。
+# 配速窗口放宽（3:20–8:20/km，不只收 4:30 内）——阈值课配速随水平浮动，
+# 心率带本身已排除慢走/假慢样本；GPS 假快样本是「快配速+低心率」，同样进不来
+CRUISE_MIN_DURATION_S = 15 * 60
+CRUISE_MAX_DURATION_S = 60 * 60
+CRUISE_PACE_WIN = (200.0, 500.0)
+CRUISE_HR_MIN = 0.84   # LT2≈88% HRmax，阈值课整场平均约在此下沿之上
+CRUISE_HR_MAX = 0.94   # 更高多为全力/比赛节奏，不做巡航样本
+CRUISE_MIN_RUNS = 2
+# 近一年 PB 参与预估：只取超出现有估计的差距的一部分（PB 是过去最好状态，
+# 当前水平不能被一次巅峰成绩拉满），且随时间衰减（越久越软），封顶防失控
+PB_MIN_GAP = 0.3
+PB_WEIGHT = 0.35
+PB_BOOST_CAP = 1.5
+PB_FULL_RECENT_DAYS = 180        # 半年内 PB 全额计权
+PB_DECAY_DAYS = 364              # 一年前衰减到权重下限
+PB_DECAY_FLOOR = 0.35
 # 储备心率(HRR)配速分量
 HRR_TARGET = 0.70        # 用 70% HRR 对应配速反推（有氧区代表强度）
 HRR_MIN = 0.40           # 过低 HRR 样本（慢走/热身）剔除
@@ -351,11 +374,48 @@ def training_consistency(activities: list[dict], today: date | None = None) -> d
     }
 
 
-def interval_ability(activities: list[dict]) -> dict | None:
-    """间歇能力（含恢复时间变量）：按课聚合 work 段配速，短段（≤500m）按
-    冲刺强度 R 反算、长段按间歇强度 I 反算；再按该课「休息时长/快跑时长」
-    修正——休息越短、快段越快 → 水平越高。多课取中位数抗单课噪声。"""
-    workouts = []
+def _interval_type(works: list[dict], rests: list[dict], max_hr: float | None) -> str:
+    """按心率/休息结构/段落长度判定整课间歇的刺激类型。
+
+    规则（顺序即优先级）：
+    1. 段落平均心率 ≥92% HRmax → 最大摄氧量型（心率是生理金标准，最高优先；
+       无氧冲刺段短、段均心率读不到这么高，不会误伤）；
+    2. 休息/快跑比 ≤0.55 → 短休连续刺激 → 乳酸阈值型（典型 T 巡航间歇）；
+    3. 段落中位距离 ≤500m → 无氧冲刺型（R）；
+    4. 段均心率落在阈值窗口 84–92% HRmax、或 >=1km 长段落无心率依据 →
+       乳酸阈值型（巡航间歇/长距离重复）；
+    5. 其余 → 最大摄氧量型（600–1000m 经典 I 间歇）。
+    """
+    hrs = [w.get("avg_hr") for w in works if w.get("avg_hr")]
+    hr_ratio = (sorted(hrs)[len(hrs) // 2] / max_hr) if hrs and max_hr else None
+    work_t = sum(w.get("elapsed_s") or (w.get("distance_m") or 0)
+                 * (w["pace_s_km"] or 300) / 1000 for w in works)
+    rest_t = sum(r.get("elapsed_s") or 0 for r in rests)
+    rest_ratio = rest_t / work_t if work_t > 0 and rests else None
+    dists = sorted(w["distance_m"] or 0 for w in works)
+    med_dist = dists[len(dists) // 2]
+    if hr_ratio is not None and hr_ratio >= INTERVAL_VO2MAX_HR_MIN:
+        return "vo2max"
+    if rest_ratio is not None and rest_ratio <= INTERVAL_THRESH_REST_MAX:
+        return "threshold"
+    if med_dist <= SPRINT_SEG_MAX_M:
+        return "speed"
+    if med_dist >= INTERVAL_THRESH_DIST_MIN and (
+            hr_ratio is None or INTERVAL_T_HR_WIN[0] <= hr_ratio < INTERVAL_T_HR_WIN[1]):
+        return "threshold"
+    return "vo2max"
+
+
+_PCT_BY_INTERVAL_TYPE = {"threshold": vd.T_PCT, "vo2max": vd.I_PCT, "speed": vd.R_PCT}
+
+
+def interval_ability(activities: list[dict], max_hr: float | None = None) -> dict | None:
+    """间歇能力（按刺激类型 + 恢复时间变量）：逐课先按心率/休息结构/段落
+    长度识别类型（乳酸阈值/最大摄氧量/无氧冲刺），再以该类型对应 %VDOT
+    反算单课 VDOT；休息越短、快段越快 → 水平越高（恢复比修正）。返回总体
+    中位数 vdot（跨类型合并抗单课噪声）与各类型分项 types，供分量与展示用。"""
+    workouts: list[dict] = []
+    by_type: dict[str, list[dict]] = {"threshold": [], "vo2max": [], "speed": []}
     for a in activities:
         structure = a.get("structure") or []
         if isinstance(structure, str):
@@ -373,8 +433,8 @@ def interval_ability(activities: list[dict]) -> dict | None:
         med_pace = paces[len(paces) // 2]
         dists = sorted(w["distance_m"] or 0 for w in works)
         med_dist = dists[len(dists) // 2]
-        pct = vd.R_PCT if med_dist <= SPRINT_SEG_MAX_M else vd.I_PCT
-        v = _vdot_for_pace(med_pace, pct)
+        itype = _interval_type(works, rests, max_hr)
+        v = _vdot_for_pace(med_pace, _PCT_BY_INTERVAL_TYPE[itype])
         work_t = sum(w.get("elapsed_s") or (w.get("distance_m") or 0)
                      * (w["pace_s_km"] or 300) / 1000 for w in works)
         rest_t = sum(r.get("elapsed_s") or 0 for r in rests)
@@ -383,8 +443,10 @@ def interval_ability(activities: list[dict]) -> dict | None:
         ratio = rest_t / work_t if work_t > 0 and rests else None
         if ratio is not None:
             v *= 1 + INTERVAL_REST_K * (INTERVAL_REST_REF - ratio)
-        workouts.append({"vdot": v, "ratio": ratio,
-                         "pace_s_km": med_pace, "n": len(works)})
+        rec = {"vdot": v, "ratio": ratio, "pace_s_km": med_pace,
+               "n": len(works), "type": itype}
+        workouts.append(rec)
+        by_type[itype].append(rec)
     if not workouts:
         return None
     vdots = sorted(w["vdot"] for w in workouts)
@@ -393,11 +455,64 @@ def interval_ability(activities: list[dict]) -> dict | None:
     med_ratio = sorted(ratios)[len(ratios) // 2] if ratios else None
     seg_paces = sorted(w["pace_s_km"] for w in workouts)
     med_pace = seg_paces[len(seg_paces) // 2]
+
+    def _type_median(key: str) -> dict | None:
+        recs = by_type[key]
+        if not recs:
+            return None
+        vs = sorted(r["vdot"] for r in recs)
+        ps = sorted(r["pace_s_km"] for r in recs)
+        return {"vdot": round(vs[len(vs) // 2], 1),
+                "pace_s_km": round(ps[len(ps) // 2], 1),
+                "n_workouts": len(recs),
+                "n_segments": sum(r["n"] for r in recs)}
+
+    types = {k: _type_median(k) for k in ("threshold", "vo2max", "speed")}
+    types = {k: v for k, v in types.items() if v}
     return {"pace_s_km": round(med_pace, 1),
             "n_segments": sum(w["n"] for w in workouts),
             "n_workouts": len(workouts),
             "rest_ratio": round(med_ratio, 2) if med_ratio is not None else None,
-            "vdot": round(med_v, 1)}
+            "vdot": round(med_v, 1), "types": types}
+
+
+def cruise_ability(activities: list[dict], max_hr: float) -> dict | None:
+    """节奏跑/巡航能力：连续（非间歇、非比赛）15–60min 匀速跑，平均心率
+    84–94% HRmax → 阈值课特征。多课取中位配速按 T（88% VDOT）反算——
+    作为「阈值配速回归」缺失时的替代分量（同一生理信号的另一种测法）。"""
+    if not max_hr:
+        return None
+    paces = []
+    for a in activities:
+        if not a.get("avg_pace_s_km") or not a.get("avg_hr"):
+            continue
+        if _is_interval_day(a.get("structure")):
+            continue
+        dur = a.get("duration_s") or 0
+        if not (CRUISE_MIN_DURATION_S <= dur <= CRUISE_MAX_DURATION_S):
+            continue
+        if not (CRUISE_PACE_WIN[0] <= a["avg_pace_s_km"] <= CRUISE_PACE_WIN[1]):
+            continue
+        hr_ratio = a["avg_hr"] / max_hr
+        if not (CRUISE_HR_MIN <= hr_ratio <= CRUISE_HR_MAX):
+            continue
+        name = (a.get("name") or "").lower()
+        if any(h in name for h in RACE_NAME_HINTS):
+            continue  # 比赛/测试跑不进巡航样本
+        if (a.get("distance_m") or 0) >= 3000 and hr_ratio >= 0.88:
+            for std, tol in RACE_BANDS:
+                if abs(a["distance_m"] - std) / std <= tol:
+                    break  # 心率够高且距离落在标准比赛带 → 按比赛剔除
+            else:
+                paces.append(a["avg_pace_s_km"])
+        else:
+            paces.append(a["avg_pace_s_km"])
+    if len(paces) < CRUISE_MIN_RUNS:
+        return None
+    paces.sort()
+    med_pace = paces[len(paces) // 2]
+    return {"pace_s_km": round(med_pace, 1), "n_runs": len(paces),
+            "vdot": _vdot_for_pace(med_pace, vd.T_PCT)}
 
 
 def hrr_ability(activities: list[dict], max_hr: float, rest_hr: float) -> dict | None:
@@ -466,19 +581,36 @@ def _weighted(components: list[dict]) -> float | None:
 
 def compute_ability(activities: list[dict], vo2max: float | None,
                     profile_max_hr=None, rest_hr: float | None = None,
-                    as_of: date | None = None) -> dict:
+                    as_of: date | None = None,
+                    year_bests: list[dict] | None = None) -> dict:
     """综合各数据源输出水平预估。
 
     activities: 近 180 天活动（含 avg_pace_s_km/avg_hr/max_hr/distance_m/
                 duration_s/start_ts/name，可选 structure 分段）。
     rest_hr: 静息心率（HRR 分量必需）；缺省时该分量跳过。
-    返回 {"vdot", "predictions", "evidence", "as_of"}；无任何依据时 vdot=None。
+    year_bests: distance_bests() 的近一年各距离最佳（含 vdot/date/distance/
+                best_seconds/source）；显著快于当前估计时给保守加分（带时间衰减）。
+    返回 {"vdot", "predictions", "zones", "evidence", "max_hr", "as_of"}；
+    无任何依据时 vdot=None。
     """
     max_hr = estimate_max_hr(profile_max_hr, activities)
     race = best_recent_race(activities)
     threshold = threshold_pace_from_trend(activities, max_hr) if max_hr else None
-    intervals = interval_ability(activities)
+    intervals = interval_ability(activities, max_hr)
     hrr = hrr_ability(activities, max_hr, rest_hr) if max_hr and rest_hr else None
+    # 阈值分量三来源按可靠性递补：心率-配速回归（整场稳定样本，最全）→
+    # 节奏/巡航跑中位配速（连续匀速课）→ 乳酸阈值型间歇（短休长段）。
+    # 后者即便存在也仅作替代——混入会让单一阈值槽被多次加权。
+    threshold_src = None
+    t_typed = (intervals.get("types") or {}).get("threshold") if intervals else None
+    if not threshold:
+        cruise = cruise_ability(activities, max_hr) if max_hr else None
+        if cruise:
+            threshold, threshold_src = cruise, "cruise"
+        elif t_typed:
+            threshold = {"vdot": t_typed["vdot"], "pace_s_km": t_typed["pace_s_km"],
+                         "n_runs": t_typed["n_workouts"]}
+            threshold_src = "t_intervals"
 
     evidence: list[dict] = []
     components: list[dict] = []
@@ -496,10 +628,22 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                          "detail": "手表 VO2max 读数"})
     if threshold:
         components.append({"vdot": threshold["vdot"], "weight": 0.15, "kind": "threshold"})
-        evidence.append({"source": "threshold_trend", "vdot": threshold["vdot"],
-                         "detail": f"阈值配速 {_fmt_pace(threshold['pace_s_km'])}/km"
-                                   f"（{threshold['n_runs']} 次心率-配速回归）",
-                         "pace_s_km": threshold["pace_s_km"]})
+        if threshold_src == "cruise":
+            evidence.append({"source": "cruise_ability", "vdot": threshold["vdot"],
+                             "detail": f"节奏/巡航跑中位配速 {_fmt_pace(threshold['pace_s_km'])}/km"
+                                       f"（{threshold['n_runs']} 课，平均心率 84–94% HRmax）",
+                             "pace_s_km": threshold["pace_s_km"]})
+        elif threshold_src == "t_intervals":
+            evidence.append({"source": "t_intervals", "vdot": threshold["vdot"],
+                             "detail": f"乳酸阈值型间歇（短休长段）中位配速 "
+                                       f"{_fmt_pace(threshold['pace_s_km'])}/km"
+                                       f"（{threshold['n_runs']} 课）",
+                             "pace_s_km": threshold["pace_s_km"]})
+        else:
+            evidence.append({"source": "threshold_trend", "vdot": threshold["vdot"],
+                             "detail": f"阈值配速 {_fmt_pace(threshold['pace_s_km'])}/km"
+                                       f"（{threshold['n_runs']} 次心率-配速回归）",
+                             "pace_s_km": threshold["pace_s_km"]})
     if hrr:
         components.append({"vdot": hrr["vdot"], "weight": 0.10, "kind": "hrr"})
         evidence.append({"source": "hrr_pace", "vdot": hrr["vdot"],
@@ -513,6 +657,11 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                   f"（{intervals['n_workouts']} 课 {intervals['n_segments']} 段")
         if intervals.get("rest_ratio") is not None:
             detail += f"，休息/快跑比 {intervals['rest_ratio']}（越短水平越高）"
+        types = intervals.get("types") or {}
+        if len(types) > 1:
+            name_map = {"threshold": "阈值", "vo2max": "摄氧", "speed": "冲刺"}
+            parts = [f"{name_map[k]}型 {v['n_workouts']} 课" for k, v in types.items()]
+            detail += "，" + "、".join(parts)
         evidence.append({"source": "interval_ability", "vdot": intervals["vdot"],
                          "detail": detail + "）",
                          "pace_s_km": intervals["pace_s_km"]})
@@ -536,6 +685,34 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                       f"{up_down} {abs(trend['drop_bpm']):.0f} bpm → "
                       f"调整 {'+' if trend['adj_vdot'] >= 0 else ''}{trend['adj_vdot']} VDOT",
         })
+    # 近一年 PB 加分：PB 是「曾经跑出过」的证据——比当前估计快时按差距的
+    # 一部分加分（0.35×），随距今时间衰减（180 天内全值 → 一年衰减到 35%），
+    # 单次封顶 1.5 VDOT；与近期比赛同为一条记录（等效 VDOT 相同）时不重复计。
+    if year_bests and vdot_val:
+        pbs = [r for r in year_bests if r.get("vdot")]
+        if pbs:
+            pb = max(pbs, key=lambda r: r["vdot"])
+            dup_race = bool(race and pb.get("source") == "race"
+                            and abs(pb["vdot"] - race["vdot"]) < 0.1)
+            gap = pb["vdot"] - vdot_val
+            if not dup_race and gap > PB_MIN_GAP:
+                age = _days_old(pb.get("date") or pb.get("start_ts"), as_of)
+                recency = 1.0 if age <= PB_FULL_RECENT_DAYS else max(
+                    PB_DECAY_FLOOR,
+                    1.0 - (1.0 - PB_DECAY_FLOOR) * (age - PB_FULL_RECENT_DAYS)
+                    / max(PB_DECAY_DAYS - PB_FULL_RECENT_DAYS, 1))
+                boost = min(gap * PB_WEIGHT * recency, PB_BOOST_CAP)
+                if boost >= 0.1:
+                    vdot_val = round(vdot_val + boost, 1)
+                    age_txt = f"（{age} 天前）" if age > 0 else ""
+                    evidence.append({
+                        "source": "year_best",
+                        "vdot": vdot_val,
+                        "detail": f"近一年最佳 {pb['distance']} "
+                                  f"{_fmt_time(pb['best_seconds'])}{age_txt}等效 "
+                                  f"VDOT {pb['vdot']} 高于当前估计 → 上调 "
+                                  f"+{boost:.1f}（PB 加成，按 {int(recency * 100)}% 计权）",
+                    })
     # 上限钳制：能力预估不高于「已跑出的最佳比赛成绩等效 VDOT + 2」——
     # 手表 VO2max 读数偏高时（如 63 vs 比赛等效 48.9）不能把课表配速
     # 拉到无法完成的水平；下限不加钳制（状态差时按保守值训练）
@@ -544,11 +721,34 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     result = {
         "vdot": vdot_val,
         "predictions": vd.equivalent_times(vdot_val) if vdot_val else None,
+        "zones": vd.intensity_zones(vdot_val) if vdot_val else None,
         "evidence": evidence,
         "max_hr": round(max_hr) if max_hr else None,
         "as_of": (as_of or date.today()).isoformat(),
     }
     return result
+
+
+def _days_old(value, as_of: date | None) -> int:
+    """记录日期（date/iso 字符串）距 as_of 的天数；无法解析视为 0。"""
+    day = None
+    if isinstance(value, str):
+        try:
+            day = date.fromisoformat(value[:10])
+        except ValueError:
+            day = None
+    if day is None:
+        return 0
+    return max(((as_of or date.today()) - day).days, 0)
+
+
+def _fmt_time(s: float) -> str:
+    s = int(round(s))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
 
 
 def _fmt_pace(s: float) -> str:

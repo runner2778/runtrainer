@@ -24,6 +24,42 @@ KINDS = ("E", "M", "T", "I", "R")
 # 常用比赛距离（用于等效成绩换算）
 DISTANCES = {"5K": 5000.0, "10K": 10000.0, "半马": 21097.5, "全马": 42195.0}
 
+# 全区间配速表（%VDOT 连续覆盖，供「水平预估 → 各区对应配速」展示；
+# 边界以 E/M/T/I/R 锚点为准：M=0.82 / T=0.88 / I=0.98 / R=1.05 均在区间内）
+PACE_ZONES = (
+    {"key": "recovery", "label": "恢复跑", "mark": "", "pct_lo": 0.50, "pct_hi": 0.59,
+     "use": "放松排酸/热身"},
+    {"key": "easy", "label": "轻松跑", "mark": "E", "pct_lo": 0.59, "pct_hi": 0.74,
+     "use": "日常轻松跑（E 区）"},
+    {"key": "aerobic", "label": "有氧跑", "mark": "M", "pct_lo": 0.74, "pct_hi": 0.82,
+     "use": "长距离/马拉松配速（M 0.82）"},
+    {"key": "threshold", "label": "乳酸阈值", "mark": "T", "pct_lo": 0.82, "pct_hi": 0.92,
+     "use": "节奏跑/巡航间歇（T 0.88）"},
+    {"key": "vo2max", "label": "最大摄氧量", "mark": "I", "pct_lo": 0.92, "pct_hi": 1.00,
+     "use": "V·O2max 间歇（I 0.98）"},
+    {"key": "anaerobic", "label": "无氧冲刺", "mark": "R", "pct_lo": 1.00, "pct_hi": 1.05,
+     "use": "短冲重复跑（R 1.05）"},
+)
+
+
+def intensity_zones(vdot: float) -> list[dict] | None:
+    """给定 VDOT 的各强度区间配速表（配速随 %VDOT 升高而变快）。
+
+    返回 PACE_ZONES 每行加 pace_slow_s_km（低 % 端，慢）/pace_fast_s_km
+    （高 % 端，快），供水平预估卡/向导预览/日历区间标注共用。
+    """
+    if not vdot or vdot <= 0:
+        return None
+    rows = []
+    for z in PACE_ZONES:
+        slow = pace_s_km(vdot, z["pct_lo"])
+        fast = pace_s_km(vdot, z["pct_hi"])
+        rows.append({**z,
+                     "band": f"{int(z['pct_lo'] * 100)}–{int(z['pct_hi'] * 100)}% VDOT",
+                     "pace_slow_s_km": round(slow),
+                     "pace_fast_s_km": round(fast)})
+    return rows
+
 
 def _vo2cost(v_m_min: float) -> float:
     return -4.60 + 0.182258 * v_m_min + 0.000104 * v_m_min * v_m_min

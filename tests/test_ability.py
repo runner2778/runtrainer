@@ -96,9 +96,11 @@ def test_interval_ability_component():
 
 
 def test_interval_rest_ratio_adjusts_vdot():
-    """休息/快跑比变量：休息越短、快段越快 → 间歇水平越高。"""
-    # 两课快段配速相同，但休息比不同：短休息课修正后 VDOT 更高
-    base = ab._vdot_for_pace(250, vd.I_PCT)
+    """休息/快跑比 + 类型识别：休息越短 → 刺激类型越靠阈值侧、水平越高。"""
+    # 两课快段配速相同但休息比不同：短休(0.2≤0.55)→乳酸阈值型按 T(88%)反算
+    # （同配速在更低的强度 % 上成立 → 代表更高水平）；长休(0.67)→经典 I 组。
+    base_t = ab._vdot_for_pace(250, vd.T_PCT)
+    base_i = ab._vdot_for_pace(250, vd.I_PCT)
     short_rest = [
         _act(6, 320, 140, 185, 8000, 43 * 60, structure=[
             {"type": "work", "distance_m": 800, "elapsed_s": 200, "pace_s_km": 250, "avg_hr": 178},
@@ -117,17 +119,39 @@ def test_interval_rest_ratio_adjusts_vdot():
             {"type": "work", "distance_m": 800, "elapsed_s": 200, "pace_s_km": 248, "avg_hr": 180},
         ]),
     ]
-    # 短休息比 120/600=0.2 → ×(1+0.2×0.4)=1.08；长休息比 400/600=0.67 → ×0.986
+    # 短休息比 120/600=0.2 → 阈值型 ×(1+0.2×0.4)=1.08；
+    # 长休息比 400/600=0.67 → 摄氧型 ×(1+0.2×(0.6−2/3))=×0.9867
     ev_short = ab.interval_ability(short_rest)
     ev_long = ab.interval_ability(long_rest)
-    assert abs(ev_short["vdot"] - round(base * 1.08, 1)) < 0.21
-    assert abs(ev_long["vdot"] - round(base * (1 + 0.2 * (0.6 - 400 / 600)), 1)) < 0.21
+    assert abs(ev_short["vdot"] - round(base_t * 1.08, 1)) < 0.21
+    assert abs(ev_long["vdot"] - round(base_i * (1 + 0.2 * (0.6 - 400 / 600)), 1)) < 0.21
     assert ev_short["vdot"] > ev_long["vdot"]
     assert ev_short["rest_ratio"] == 0.2
-    # 混合两课：中位数聚合（短休息课拉高）
+    # 类型分项：短休 → threshold 型；长休（无心率依据）→ vo2max 型
+    assert ev_short["types"]["threshold"]["n_workouts"] == 1
+    assert "vo2max" not in ev_short["types"]
+    assert "threshold" not in ev_long["types"]
+    assert ev_long["types"]["vo2max"]["n_workouts"] == 1
+    # 混合两课：中位数聚合（偶数取上中位 → 短休课拉高）
     mixed = ab.interval_ability(short_rest + long_rest)
     assert mixed["n_workouts"] == 2
-    assert abs(mixed["vdot"] - round(base * 1.08, 1)) < 0.21
+    assert abs(mixed["vdot"] - round(base_t * 1.08, 1)) < 0.21
+
+
+def test_interval_hr_gate_labels_high_hr_as_vo2max():
+    """段落平均心率 ≥92% HRmax → 短休也判最大摄氧量型（心率铁证优先）。"""
+    acts = [
+        _act(5, 320, 140, 190, 8000, 43 * 60, structure=[
+            {"type": "work", "distance_m": 1000, "elapsed_s": 250, "pace_s_km": 250, "avg_hr": 182},
+            {"type": "rest", "distance_m": 200, "elapsed_s": 60, "pace_s_km": 400, "avg_hr": 150},
+            {"type": "work", "distance_m": 1000, "elapsed_s": 250, "pace_s_km": 250, "avg_hr": 183},
+            {"type": "rest", "distance_m": 200, "elapsed_s": 60, "pace_s_km": 400, "avg_hr": 150},
+            {"type": "work", "distance_m": 1000, "elapsed_s": 250, "pace_s_km": 252, "avg_hr": 182},
+        ]),
+    ]
+    ev = ab.interval_ability(acts, max_hr=190)  # 182/190 = 0.958 ≥ 0.92
+    assert "threshold" not in ev["types"]
+    assert ev["types"]["vo2max"]["n_workouts"] == 1
 
 
 def test_hrr_pace_component():
@@ -275,3 +299,82 @@ def test_consistency_weeks_and_recent_vs_year():
     year_avg = (7 * 10 + 8 + 5) / span
     assert abs(c["recent_4w_avg_km"] - 7 * 10 / 4) < 0.01
     assert c["recent_vs_year_pct"] == round(7 * 10 / 4 / year_avg * 100)
+
+
+# ---- 第十五批：PB 参与预估 / 间歇类型 / 各区配速表 ----
+def _yr_pb(days_ago, label, best_s, vdot_val=None):
+    d = dates.today() - timedelta(days=days_ago)
+    return {"distance": label, "best_seconds": best_s, "date": d.isoformat(),
+            "source": "race", "vdot": vdot_val or round(vd.estimate_vdot(
+                5000 if label == "5K" else 10000, best_s), 1)}
+
+
+def test_year_best_boost_lifts_estimate():
+    """近一年 PB 高于当前估计 → 按差距×0.35 加分（受封顶约束），并出证据。"""
+    pb = _yr_pb(90, "5K", 18 * 60 + 20)  # 5K 18:20 → VDOT 明显高于 50
+    est = ab.compute_ability([], 50.0, year_bests=[pb])
+    ev = next(e for e in est["evidence"] if e["source"] == "year_best")
+    gap = pb["vdot"] - 50.0
+    expect = 50.0 + min(gap * ab.PB_WEIGHT, ab.PB_BOOST_CAP)
+    assert abs(est["vdot"] - round(expect, 1)) < 0.11
+    assert "近一年最佳 5K" in ev["detail"]
+    # 差距小于门槛 → 不加分
+    est2 = ab.compute_ability([], 50.0, year_bests=[_yr_pb(90, "5K", 18 * 60 + 20,
+                                                           vdot_val=50.1)])
+    assert not any(e["source"] == "year_best" for e in est2["evidence"])
+    assert est2["vdot"] == 50.0
+
+
+def test_year_best_boost_decays_with_age_and_no_double_count():
+    """PB 越久越软（一年前衰减到 0.35）；与近期比赛同一条记录不重复计。"""
+    # 300 天前的 PB：recency ≈ 1 − 0.65×(300−180)/184 ≈ 0.58
+    old = _yr_pb(300, "10K", 36 * 60)  # 10K 36:00 → VDOT 明显高于 50
+    est = ab.compute_ability([], 50.0, year_bests=[old])
+    ev = next(e for e in est["evidence"] if e["source"] == "year_best")
+    gap = old["vdot"] - 50.0
+    recency = 1.0 - 0.65 * (300 - 180) / (ab.PB_DECAY_DAYS - ab.PB_FULL_RECENT_DAYS)
+    assert abs(est["vdot"] - round(50.0 + min(gap * ab.PB_WEIGHT * recency,
+                                              ab.PB_BOOST_CAP), 1)) < 0.11
+    # 近期比赛已在分量内：等效 VDOT 相同的 PB 不重复加分
+    race_act = [_yr_act(10, 10000, 36 * 60, avg_hr=170, max_hr=190, name="10K 比赛")]
+    same = _yr_pb(10, "10K", 36 * 60)
+    est2 = ab.compute_ability(race_act, 63.0, year_bests=[same])
+    assert not any(e["source"] == "year_best" for e in est2["evidence"])
+
+
+def test_cruise_ability_substitutes_threshold_slot():
+    """回归缺样本时：连续节奏跑（15–60min、84–94% HRmax）递补阈值分量。"""
+    acts = []
+    for days_ago, pace, hr in [(20, 260, 172), (15, 258, 174), (10, 262, 170)]:
+        # 8.6km 匀速 38min ≈ 4:20/km（不在标准比赛距离带内）；avg_hr 170/193≈0.88–0.90
+        acts.append(_act(days_ago, pace, hr, 193, 8600, 38 * 60, name="节奏跑"))
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    ev = next(e for e in est["evidence"] if e["source"] == "cruise_ability")
+    assert 2 < ev["vdot"] < 60
+    assert "节奏/巡航跑" in ev["detail"]
+    # 强度不足（心率 <84%）不认作巡航课
+    easy = [_act(10, 300, 140, 193, 8600, 38 * 60, name="轻松跑")]
+    est2 = ab.compute_ability(easy, None, profile_max_hr=193)
+    assert not any(e["source"] == "cruise_ability" for e in est2["evidence"])
+
+
+def test_zones_table_in_result_and_anchors():
+    """水平预估返回 6 区间配速表：M/T/I/R 锚点 % 在各自区间内。"""
+    est = ab.compute_ability([], 50.0)
+    zones = est["zones"]
+    assert zones is not None and len(zones) == 6
+    keys = [z["key"] for z in zones]
+    assert keys == ["recovery", "easy", "aerobic", "threshold", "vo2max", "anaerobic"]
+    by_key = {z["key"]: z for z in zones}
+    assert by_key["threshold"]["pct_lo"] <= vd.T_PCT <= by_key["threshold"]["pct_hi"]
+    assert by_key["vo2max"]["pct_lo"] <= vd.I_PCT <= by_key["vo2max"]["pct_hi"]
+    assert by_key["aerobic"]["pct_hi"] == vd.M_PCT
+    assert by_key["anaerobic"]["pct_hi"] == vd.R_PCT
+    # 配速随强度单调变快（低 % 慢、高 % 快）
+    paces = [z["pace_fast_s_km"] for z in zones]
+    assert paces == sorted(paces, reverse=True)
+    # 与 E 区表一致：轻松区上限 = E 上限配速
+    tbl = vd.pace_table(50.0)
+    assert by_key["easy"]["pace_fast_s_km"] == tbl["E"]["fast_s_km"]
+    # 无依据时不返回配速表
+    assert ab.compute_ability([], None)["zones"] is None

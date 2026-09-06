@@ -150,10 +150,15 @@ def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
             a.get("has_samples") for a in acts_year) else None,
         max_hr=est.get("max_hr"))
     consistency = ab.training_consistency(acts_year, today)
+    # 近一年 PB 参与「现在水平」：显著快于估计时保守加分（时间衰减/封顶）；
+    # 新 PB 同步进来 → 本卡与下方预测随每次 get_dashboard 自动刷新
+    if year_bests and est.get("vdot") is not None:
+        est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
+                                 rest_hr=rest_hr, as_of=today, year_bests=year_bests)
     return {
         "window_days": 30,
         "plan_vdot": plan_vdot,  # 对照用：课表训练按目标页定的 VDOT 配速
-        **{k: est.get(k) for k in ("vdot", "predictions", "evidence",
+        **{k: est.get(k) for k in ("vdot", "predictions", "zones", "evidence",
                                    "max_hr", "as_of")},
         "year_bests": year_bests,
         "consistency": consistency,

@@ -39,13 +39,15 @@ PROVIDERS: dict[str, dict] = {
         "hint": "Key 在 platform.deepseek.com 注册后获取，按 token 计费。",
     },
     "zhipu": {
-        "label": "智谱 GLM-5.3-Flash（免费）",
+        "label": "智谱 GLM（免费）",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "models": ["glm-5.3-flash", "glm-4.7-flash"],
+        # models[0] 为默认快档：4.7-flash 显式关闭思考后秒级返回（教练聊天首选）；
+        # 5.3-flash 始终思考、单条回复明显更慢，仅当用户在意「更聪明」时手动切换
+        "models": ["glm-4.7-flash", "glm-5.3-flash"],
         "max_tokens": 8192,
         "needs_key": True,
         "extra_body_by_model": {"glm-4.7-flash": {"thinking": {"type": "disabled"}}},
-        "hint": "在 open.bigmodel.cn 注册即送 Key；glm-5.3-flash 为现役免费主力（思考常开但秒级返回、回复更聪明），glm-4.7-flash 备用免费。",
+        "hint": "在 open.bigmodel.cn 注册即送 Key。glm-4.7-flash：关思考、回复快（默认）；glm-5.3-flash：思考常开、回复更聪明但明显更慢。",
     },
     "ollama": {
         "label": "Ollama 本地模型（免费离线）",
@@ -67,7 +69,8 @@ def resolve_extra_body(provider: str, model: str) -> dict | None:
 
     GLM-4.7-flash 需 thinking.type=disabled（否则深度思考 1~2 分钟）；
     GLM-5.x 系列始终思考、传 disabled 会报 1210——因此 4.7 的关闭思考只能
-    挂在 extra_body_by_model 下，新模型（默认 5.3-flash）不带任何 extra_body。
+    挂在 extra_body_by_model 下（默认快档，回复秒级）；5.3-flash 手动切换
+    时不带任何 extra_body。
     """
     info = PROVIDERS.get(provider) or {}
     by_model = info.get("extra_body_by_model") or {}

@@ -31,46 +31,69 @@ const HTML = `
 
     <div class="card">
       <h2>AI 教练</h2>
-      <div class="form-row">
-        <label>服务商</label>
-        <select x-model="aiProvider" @change="saveAiProvider()">
-          <template x-for="p in aiProviders" :key="p.key">
-            <option :value="p.key" x-text="p.label"></option>
-          </template>
-        </select>
-      </div>
-      <p class="muted mt8" x-text="aiHint()"></p>
-      <template x-if="provFreeText()">
-        <div class="form-row">
-          <label>模型（输入本地已拉取的模型名）</label>
-          <input x-model="aiModel" list="ai-model-suggest" @change="saveAiModel()">
-          <datalist id="ai-model-suggest">
-            <template x-for="m in modelOptions()" :key="m"><option :value="m"></option></template>
-          </datalist>
-        </div>
-      </template>
-      <template x-if="!provFreeText()">
-        <div class="form-row">
-          <label>模型</label>
-          <select x-model="aiModel" @change="saveAiModel()">
-            <template x-for="m in modelOptions()" :key="m">
-              <option :value="m" x-text="modelLabel(m)"></option>
+      <!-- 生效配置条：锁定态只读展示当前实际使用的模型 -->
+      <div class="ai-lockbar" :class="aiLocked ? 'locked' : 'editing'">
+        <div class="flex between gap8">
+          <div class="small">
+            <template x-if="aiLocked"><span class="badge soft">🔒 已确定</span></template>
+            <template x-if="!aiLocked"><span class="badge warn">✏️ 更改中（未生效）</span></template>
+            <template x-if="aiLocked">
+              <span>AI 教练使用：<b x-text="activeAiText()"></b></span>
             </template>
-          </select>
-        </div>
-      </template>
-      <template x-if="provNeedsKey()">
-        <div class="form-row">
-          <label>API Key（存于 Windows 凭据管理器，不落盘）</label>
-          <div class="flex">
-            <input type="password" :placeholder="keyPlaceholder()" x-model="aiKey" style="flex:1">
-            <button class="btn small" @click="pasteInto('aiKey')">📋 粘贴</button>
+            <template x-if="aiLocked && aiWebSearch">
+              <span class="muted"> · 知识问答联网检索已开</span>
+            </template>
           </div>
+          <button class="btn small" x-show="aiLocked" @click="unlockAi()">更改配置</button>
         </div>
-        <div class="flex">
-          <button class="btn primary" @click="saveAiKey()" :disabled="!aiKey">保存 Key</button>
-          <button class="btn" x-show="hasAiKey()" @click="clearAiKey()">清除</button>
-          <span class="badge soft" x-show="hasAiKey()">已配置</span>
+      </div>
+      <template x-if="!aiLocked">
+        <div>
+          <div class="form-row">
+            <label>服务商</label>
+            <select x-model="aiProvider">
+              <template x-for="p in aiProviders" :key="p.key">
+                <option :value="p.key" x-text="p.label"></option>
+              </template>
+            </select>
+          </div>
+          <p class="muted mt8" x-text="aiHint()"></p>
+          <template x-if="provFreeText()">
+            <div class="form-row">
+              <label>模型（输入本地已拉取的模型名）</label>
+              <input x-model="aiModel" list="ai-model-suggest">
+              <datalist id="ai-model-suggest">
+                <template x-for="m in modelOptions()" :key="m"><option :value="m"></option></template>
+              </datalist>
+            </div>
+          </template>
+          <template x-if="!provFreeText()">
+            <div class="form-row">
+              <label>模型</label>
+              <select x-model="aiModel">
+                <template x-for="m in modelOptions()" :key="m">
+                  <option :value="m" x-text="modelLabel(m)"></option>
+                </template>
+              </select>
+            </div>
+          </template>
+          <template x-if="provNeedsKey() && !hasAiKey()">
+            <div class="form-row">
+              <label>API Key（存于 Windows 凭据管理器，不落盘）</label>
+              <div class="flex">
+                <input type="password" :placeholder="keyPlaceholder()" x-model="aiKey" style="flex:1">
+                <button class="btn small" @click="pasteInto('aiKey')">📋 粘贴</button>
+              </div>
+            </div>
+          </template>
+          <p class="muted small" x-show="provNeedsKey() && hasAiKey()">
+            该服务商 Key 已保存在 Windows 凭据管理器，无需重复输入；需要更换 Key 时先在下面清除再粘贴。
+          </p>
+          <div class="flex gap8">
+            <button class="btn primary" @click="confirmAi()">确定（保存并锁定）</button>
+            <button class="btn" @click="cancelAiEdit()">放弃更改</button>
+            <button class="btn" x-show="hasAiKey()" @click="clearAiKey()">清除已存 Key</button>
+          </div>
         </div>
       </template>
       <div class="form-row" x-show="aiProvider === 'zhipu'">
@@ -79,7 +102,7 @@ const HTML = `
           <span>知识类问题联网检索（约 ¥0.01/次；让教练用最新运动科学研究/数据作答，而不是只靠内置知识）</span>
         </label>
       </div>
-      <p class="muted mt8">教练 AI 每天最多自动调用一次；知识类提问（如伤病、营养、训练原理）联网检索为可选增量。Mock 模式下完全由本地样例模拟，不消耗任何服务商额度。</p>
+      <p class="muted mt8">AI 选择需「确定」后锁定生效，之后想改须手动点「更改配置」再重新确定；教练每天最多自动调用一次，知识类提问联网检索为可选增量。Mock 模式下完全由本地样例模拟，不消耗任何服务商额度。</p>
     </div>
   </div>
 
@@ -184,6 +207,7 @@ export function initSettings() {
     aiWebSearch: false,
     syncStates: [],
     syncing: false,
+    aiLocked: true,  // AI 选择确定后锁定；更改需手动解锁（任务：确定/锁定流）
 
     async init() {
       const { ok, data, error } = await tryCall('get_settings');
@@ -200,6 +224,7 @@ export function initSettings() {
       this.mockMode = data.mock_mode;
       this.aiWebSearch = data.ai_web_search;
       this.syncStates = data.sync_states || [];
+      this.aiLocked = true;
     },
     // 切到设置页时刷新（同步状态/档案可能已变化；也兜底启动时 init 未跑成的情况）
     async shown() { await this.init(); },
@@ -278,7 +303,7 @@ export function initSettings() {
       this.syncing = false;
       this.$dispatch('toast', { text: '同步超时（仍在进行），请稍后查看同步状态表' });
     },
-    // ---- AI 服务商 ----
+    // ---- AI 服务商（确定/锁定流：选择不即时生效，点「确定」一次性提交并锁定）----
     provInfo() { return (this.aiProviders || []).find((p) => p.key === this.aiProvider) || null; },
     provNeedsKey() { const p = this.provInfo(); return !!(p && p.needs_key); },
     provFreeText() { const p = this.provInfo(); return !!(p && p.free_text); },
@@ -287,33 +312,56 @@ export function initSettings() {
       const d = {
         'deepseek-v4-pro': 'deepseek-v4-pro（推理更强，推荐）',
         'deepseek-v4-flash': 'deepseek-v4-flash（便宜快速）',
-        'glm-4.7-flash': 'glm-4.7-flash（永久免费，已关思考提速）',
+        'glm-4.7-flash': 'glm-4.7-flash（免费 · 已关思考，回复快，默认）',
+        'glm-5.3-flash': 'glm-5.3-flash（免费 · 思考常开，更聪明但明显更慢）',
       };
       return d[m] || m;
+    },
+    // 教练页展示用：服务商标签 + 模型说明（读本地设置，不上 API）
+    activeAiText() {
+      const p = this.provInfo();
+      const base = (p ? p.label : this.aiProvider) + ' · ' + this.modelLabel(this.aiModel);
+      return this.mockMode ? base + '（Mock 模式）' : base;
     },
     aiHint() { const p = this.provInfo(); return p ? p.hint : ''; },
     keyPlaceholder() {
       return this.aiProvider === 'deepseek' ? 'sk-...（platform.deepseek.com 获取）' : 'API Key（服务商控制台获取）';
     },
     hasAiKey() { return !!(this.aiKeys || {})[this.aiProvider]; },
-    async saveAiProvider() {
-      const { ok, error } = await tryCall('set_setting', 'ai_provider', this.aiProvider);
-      if (!ok) { this.$dispatch('toast', { text: '切换失败: ' + error }); await this.init(); return; }
-      // 模型名不在新服务商候选列表时，落到其默认模型并保存（与后端回落逻辑一致）
+    unlockAi() {
+      this.aiKey = '';
+      this.aiLocked = false;
+      this.$dispatch('toast', { text: '已解锁：修改后点「确定（保存并锁定）」生效' });
+    },
+    async cancelAiEdit() {
+      this.aiLocked = true;
+      await this.init();  // 放弃草稿：从本地配置读回已生效值
+      this.$dispatch('toast', { text: '已放弃更改，仍使用原配置' });
+    },
+    async confirmAi() {
       const info = this.provInfo();
+      const r = await tryCall('set_setting', 'ai_provider', this.aiProvider);
+      if (!r.ok) { this.$dispatch('toast', { text: '切换失败: ' + r.error }); return; }
+      // 模型名不在新服务商候选列表时，落到其默认模型并保存（与后端回落逻辑一致）
       if (info && info.models && info.models.length && !info.models.includes(this.aiModel)) {
         this.aiModel = info.models[0];
-        await tryCall('set_setting', 'ai_model', this.aiModel);
       }
-      this.aiKey = '';
-      this.$dispatch('toast', { text: '已切换到「' + (info ? info.label : this.aiProvider) + '」' });
-    },
-    async saveAiKey() {
-      const { ok, error } = await tryCall('save_ai_key', this.aiProvider, this.aiKey);
-      if (!ok) { this.$dispatch('toast', { text: '保存失败: ' + error }); return; }
-      this.aiKeys = { ...this.aiKeys, [this.aiProvider]: true };
-      this.aiKey = '';
-      this.$dispatch('toast', { text: 'API Key 已保存' });
+      const m = await tryCall('set_setting', 'ai_model', this.aiModel);
+      if (!m.ok) { this.$dispatch('toast', { text: '模型保存失败: ' + m.error }); return; }
+      // 需要 Key 且本地没有 → 要求粘贴；已有 → 无需二次输入
+      if (info && info.needs_key && !this.hasAiKey()) {
+        if (!this.aiKey) {
+          this.$dispatch('toast', { text: `「${info.label}」需要 API Key：粘贴后再次确定，或换免费/本地方案` });
+          return;
+        }
+        const k = await tryCall('save_ai_key', this.aiProvider, this.aiKey);
+        if (!k.ok) { this.$dispatch('toast', { text: 'Key 保存失败: ' + k.error }); return; }
+        this.aiKeys = { ...this.aiKeys, [this.aiProvider]: true };
+        this.aiKey = '';
+      }
+      this.aiLocked = true;
+      this.$dispatch('ai-config-changed');
+      this.$dispatch('toast', { text: '已确定并锁定：' + this.activeAiText(), ms: 3500 });
     },
     async clearAiKey() {
       const { ok, error } = await tryCall('clear_ai_key', this.aiProvider);
@@ -321,7 +369,6 @@ export function initSettings() {
       this.aiKeys = { ...this.aiKeys, [this.aiProvider]: false };
       this.$dispatch('toast', { text: 'Key 已清除' });
     },
-    async saveAiModel() { await tryCall('set_setting', 'ai_model', this.aiModel); },
     async saveTheme() {
       await tryCall('set_setting', 'theme', this.theme);
       this.$dispatch('theme-changed', { theme: this.theme });

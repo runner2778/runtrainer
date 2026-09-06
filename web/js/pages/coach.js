@@ -55,7 +55,7 @@ const HTML = `
           <p class="muted">AI 教练会综合近 14 天睡眠 / HRV / 静息心率 / 压力与本周课表，给出今日调整建议。</p>
           <div class="flex mt16">
             <button class="btn primary big" @click="generate(false)" :disabled="working">
-              <span x-text="working ? 'DeepSeek 思考中…' : '🤖 生成今日建议'"></span>
+              <span x-text="working ? 'AI 思考中…' : '🤖 生成今日建议'"></span>
             </button>
             <button class="btn big" @click="askExtra()" :disabled="working" title="今天想多练一次？AI 评估恢复状态后决定">
               ➕ 今天想加练
@@ -133,10 +133,18 @@ const HTML = `
     <div class="card">
       <div class="flex between">
         <h2>教练聊天 <span class="muted">训练感受 · 改课请求 · 身体反馈</span></h2>
-        <button class="btn ghost" @click="clearChat()"
-                title="清空聊天显示并开启新对话（教练仍记得之前的交流与你的训练数据）">
-          <span x-text="_confirmClear ? '再点一次确认清空' : '🗑 清空对话'"></span>
-        </button>
+        <div class="flex gap8">
+          <span class="chip ai-chip" x-show="aiModelText"
+                :title="'当前实际使用的 AI 模型（读本地设置）：在「设置 → AI 教练」确定后锁定；' +
+                        '想换模型需手动点更改配置再重新确定。'">
+            🤖 <b x-text="aiModelText"></b>
+            <template x-if="lastReplySec"><span class="muted">· 上条回复 <b x-text="lastReplySec"></b> 秒</span></template>
+          </span>
+          <button class="btn ghost" @click="clearChat()"
+                  title="清空聊天显示并开启新对话（教练仍记得之前的交流与你的训练数据）">
+            <span x-text="_confirmClear ? '再点一次确认清空' : '🗑 清空对话'"></span>
+          </button>
+        </div>
       </div>
       <div class="mv-center mt8" x-show="chatHasMore">
         <button class="btn ghost small" @click="loadEarlier()">↑ 加载更早的消息</button>
@@ -262,6 +270,8 @@ export function initCoach() {
     loading: true,
     working: false,
     error: '',
+    aiModelText: '',    // 教练页直观显示当前使用的模型（本地设置，不上 API）
+    lastReplySec: '',   // 上一条聊天回复实测耗时（秒）
     // 是否吸附在聊天底部：用户向上翻历史时自动取消，发送消息/首载时置回
     _stickBottom: true,
     _confirmClear: false,
@@ -289,7 +299,22 @@ export function initCoach() {
       this.hasActivePlan = data.has_active_plan;
       this.advice = data.advice;
       this.history = data.history || [];
+      await this.refreshModelInfo();
       await this.loadMessages();
+    },
+    // 当前实际使用的模型（读本地 get_settings；设置页「确定并锁定」后此处即更新）
+    async refreshModelInfo() {
+      const s = await tryCall('get_settings');
+      if (!s.ok) return;
+      const d = s.data || {};
+      const prov = (d.ai_providers || []).find((p) => p.key === d.ai_provider);
+      const modelNotes = {
+        'glm-4.7-flash': '', 'glm-5.3-flash': '（思考常开，较慢）',
+        'deepseek-v4-pro': '', 'deepseek-v4-flash': '',
+      };
+      this.aiModelText = (prov ? prov.label : (d.ai_provider || '—'))
+        + ' · ' + (d.ai_model || '—') + (modelNotes[d.ai_model] || '')
+        + (d.mock_mode ? '（Mock）' : '');
     },
     async loadMessages(limit = 60) {
       // 首屏只取最近 60 条（调整详情重，避免一次渲染上百条）；
@@ -342,7 +367,12 @@ export function initCoach() {
         adjustments: [], profile_updates: {} };
       this.messages.push(pending);
       this.scrollChat();
+      const t0 = performance.now();
       const { ok, data, error } = await tryCall('coach_chat', text);
+      if (ok) {
+        // 实测单条回复耗时（毫秒 → 秒），显示在页头模型徽章旁
+        this.lastReplySec = (Math.round((performance.now() - t0) / 100) / 10).toFixed(1);
+      }
       this.chatWorking = false;
       if (!ok) {
         this.messages = this.messages.filter(m => m.id !== pending.id);

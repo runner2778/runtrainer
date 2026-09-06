@@ -36,7 +36,7 @@ def _make_client(extra_requested: bool):
         if info.get("needs_key") and not key:
             raise RuntimeError(
                 f"未配置 {info['label']} 的 API Key，请在设置页配置；"
-                "或改选「智谱 GLM-4.7-Flash（免费）」/「Ollama 本地」不消耗 DeepSeek 费用")
+                "或改选「智谱 GLM（免费）」/「Ollama 本地」免费方案")
         model = settings_service.get_ai_model()
         # 模型不在该服务商候选且服务商非自由输入 → 回落默认模型
         if not info.get("free_text") and model not in info["models"]:

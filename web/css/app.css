@@ -461,3 +461,151 @@ details summary { cursor: pointer; font-size: 12px; }
 .today-row { padding: 7px 0; border-bottom: 1px solid var(--border); }
 .today-row:last-child { border-bottom: none; }
 a.btn { display: inline-block; }
+
+/* ---- 机械风刷新：直角件 + 键盘键帽按钮 + 工程字体数字 + 发丝描边 ----
+   不动配色语义（训练类型色/状态色仍固定映射），只把「观感语言」切到
+   仪器/面板风格：圆角收紧到 2–4px，卡片 1px 发丝边，按钮带 1px 底边
+   按下 1px 位移，数字用 Bahnschrift（DIN 系）呈现机械表盘感。 */
+:root {
+  --font-head: "Bahnschrift", "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --font-num: "Bahnschrift", "Segoe UI", "Microsoft YaHei", sans-serif;
+  --border-strong: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.card { border-radius: 4px; }
+.btn { border-radius: 3px; box-shadow: 0 1px 0 color-mix(in srgb, var(--border) 55%, transparent); font-weight: 600; letter-spacing: .2px; }
+.btn:hover { box-shadow: none; }
+.btn.primary { box-shadow: 0 2px 0 color-mix(in srgb, var(--accent) 65%, #000); }
+.btn:active { transform: translateY(1px); box-shadow: none; }
+.btn.ghost { box-shadow: none; }
+input, select, textarea { border-radius: 3px; }
+.modal { border-radius: 5px; border-top: 3px solid var(--accent); }
+.badge { border-radius: 3px; letter-spacing: .3px; }
+.banner { border-radius: 3px; border-left-width: 3px; }
+.toast { border-radius: 4px; font-weight: 600; }
+.stat { border-radius: 3px; }
+.phase-line { border-radius: 3px; }
+.diff-row { border-radius: 4px; }
+.dist-grid .dist-opt { border-radius: 4px; }
+.chat-bubble { border-radius: 4px; }
+.steps .step { border-radius: 3px; }
+.ready-pill { border-radius: 3px; }
+.sidebar nav a { border-radius: 3px; }
+.calendar .day { border-radius: 3px; }
+.calendar .day .wk { border-radius: 2px; }
+.calendar .day .act-tag { border-radius: 2px; }
+/* 侧栏激活项：左侧色条 + 平角，取代圆底 */
+.sidebar nav a { position: relative; }
+.sidebar nav a.active::before {
+  content: ''; position: absolute; left: 0; top: 22%; bottom: 22%;
+  width: 3px; border-radius: 1px; background: var(--accent);
+}
+.sidebar nav a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+/* 标题/数字走工程字体（Bahnschrift 无衬线 DIN 系，机械刻度感） */
+.logo, h1, h2, h3, .card h2, .card h3 {
+  font-family: var(--font-head);
+  letter-spacing: .4px;
+}
+.num, .t-val, .stat b, .stat span, .hero .big, .ready-big, .mv-center,
+.ready-pill, .calendar .dnum, .chat-bubble, .badge, .btn.small {
+  font-family: var(--font-num);
+}
+th, .form-row label, .t-label, .stat-tile .t-label { letter-spacing: .5px; }
+/* 焦点/悬停：1px 显式描边（机械边框感），不用阴影晕 */
+input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent); box-shadow: none; }
+table th { border-bottom: 1.5px solid var(--border-strong); }
+.progress { border-radius: 2px; }
+.progress-fill { border-radius: 2px; }
+.istrip { border-radius: 2px; }
+.istrip-seg:first-child { border-radius: 2px 0 0 2px; }
+.istrip-seg:last-child { border-radius: 0 2px 2px 0; }
+.istrip-mk { border-left-width: 1px; border-left-style: dashed; opacity: .85; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { border-radius: 2px; border: 1px solid var(--bg); }
+.stat-tile { border-radius: 4px; }
+.stat-tile .t-val { letter-spacing: .3px; }
+
+/* 小号文字 / 紧凑间距工具 */
+.small { font-size: 12px; }
+.gap8 { gap: 8px; }
+.badge.warn { background: var(--st-warning); color: #261f0d; }
+
+/* 状态锁条：AI 教练生效配置（确定=锁定绿边 / 更改中=黄边警示） */
+.ai-lockbar {
+  display: flex; align-items: center; margin-bottom: 12px;
+  padding: 8px 12px; border-radius: 3px;
+  border: 1px solid var(--border); border-left: 3px solid var(--text-muted);
+  background: var(--bg-hover);
+}
+.ai-lockbar > .flex { flex: 1; }
+.ai-lockbar.locked {
+  background: color-mix(in srgb, var(--st-good) 8%, var(--bg-card));
+  border-left-color: var(--st-good);
+}
+.ai-lockbar.locked b { color: var(--accent); font-weight: 700; }
+.ai-lockbar.editing {
+  background: color-mix(in srgb, var(--st-warning) 12%, var(--bg-card));
+  border-left-color: var(--st-warning);
+}
+
+/* 教练页模型状态徽章（读本地设置实时显示实际使用的模型） */
+.chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 9px; border-radius: 3px;
+  border: 1px solid var(--border); background: var(--bg-card);
+  font-size: 12px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.ai-chip > b { color: var(--accent); }
+
+/* 区间芯片（计划/日历/向导：课型 → 强度区间轮廓标签，与 kind 色同源） */
+.zn-chip { border: 1px solid; font-weight: 600; }
+.znk-E, .znk-LR { color: var(--kind-e); border-color: color-mix(in srgb, var(--kind-e) 60%, var(--border)); background: color-mix(in srgb, var(--kind-e) 10%, transparent); }
+.znk-M { color: var(--kind-m); border-color: color-mix(in srgb, var(--kind-m) 60%, var(--border)); background: color-mix(in srgb, var(--kind-m) 10%, transparent); }
+.znk-T { color: var(--kind-t); border-color: color-mix(in srgb, var(--kind-t) 60%, var(--border)); background: color-mix(in srgb, var(--kind-t) 12%, transparent); }
+.znk-I { color: var(--kind-i); border-color: color-mix(in srgb, var(--kind-i) 60%, var(--border)); background: color-mix(in srgb, var(--kind-i) 10%, transparent); }
+.znk-R { color: var(--kind-r); border-color: color-mix(in srgb, var(--kind-r) 60%, var(--border)); background: color-mix(in srgb, var(--kind-r) 10%, transparent); }
+.znk-RECOVERY { color: var(--kind-recovery); border-color: color-mix(in srgb, var(--kind-recovery) 60%, var(--border)); background: color-mix(in srgb, var(--kind-recovery) 10%, transparent); }
+.znk-TUNEUP { color: var(--kind-tuneup); border-color: color-mix(in srgb, var(--kind-tuneup) 60%, var(--border)); background: color-mix(in srgb, var(--kind-tuneup) 10%, transparent); }
+.znk-RACE { color: var(--kind-race); border-color: color-mix(in srgb, var(--kind-race) 60%, var(--border)); background: color-mix(in srgb, var(--kind-race) 10%, transparent); }
+
+/* 实际跑步分类徽章（日历活动详情，与活动列表 kind-* 全彩同色） */
+.badge.hrz-interval { background: var(--kind-i); }
+.badge.hrz-repeats { background: var(--kind-r); }
+.badge.hrz-tempo { background: var(--kind-t); }
+.badge.hrz-aerobic { background: var(--kind-m); }
+.badge.hrz-high_aerobic { background: var(--kind-hi); }
+.badge.hrz-easy { background: var(--kind-e); }
+.badge.hrz-recovery { background: var(--kind-recovery); }
+.badge.hrz-anaerobic { background: var(--kind-i); }
+.badge.hrz-unknown { background: var(--bg-hover); color: var(--text-muted); }
+
+/* 各区间配速表（仪表盘能力卡 / 目标向导水平预估）：区带行 + 刻度条 + 档位字母 */
+.zones-table {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+  background: var(--bg-card);
+}
+.z-row {
+  display: grid;
+  grid-template-columns: 4px minmax(84px, auto) auto auto 1fr auto auto;
+  column-gap: 8px; align-items: center;
+  padding: 4px 10px 4px 0; font-size: 12px;
+  border-top: 1px solid var(--gridline);
+}
+.z-row:first-child { border-top: none; }
+.z-row:hover { background: var(--bg-hover); }
+.z-row .rail { align-self: stretch; background: var(--border); }
+.rail.zn-recovery { background: var(--kind-recovery); }
+.rail.zn-easy { background: var(--kind-e); }
+.rail.zn-aerobic { background: var(--kind-m); }
+.rail.zn-threshold { background: var(--kind-t); }
+.rail.zn-vo2max { background: var(--kind-i); }
+.rail.zn-anaerobic { background: var(--kind-r); }
+.zn-mark {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 15px; height: 15px; padding: 0 3px;
+  border-radius: 2px; font-size: 10px; font-weight: 800; color: #fff;
+  letter-spacing: 0;
+}
+.z-row .num.muted { white-space: nowrap; }
+.z-row .pace { font-weight: 700; white-space: nowrap; }

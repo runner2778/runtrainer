@@ -3,6 +3,22 @@ import { tryCall } from '../api.js';
 const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
 const PHASE_LABELS = { base: '基础期', early: '早期强度', transition: '过渡期', final: '最终强度', taper: '减量期' };
 const ZONE_LABELS = { E: '轻松配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速', strength: '力量训练' };
+// 课型 → 强度区间（与水平预估六区配速表同源：vdot.PACE_ZONES 的区间与 % 带）。
+// 计划/日历里每种课对应哪一档、对应什么配速带，都由这张表标注。
+const KIND_ZONES = {
+  E: { label: '轻松区', band: '59–74%' },
+  M: { label: '有氧/马配区', band: '74–82%' },
+  T: { label: '乳酸阈值区', band: '82–92%' },
+  I: { label: '最大摄氧量区', band: '92–100%' },
+  R: { label: '无氧冲刺区', band: '100–105%' },
+  LR: { label: '有氧区（长距离）', band: '59–82%' },
+  RECOVERY: { label: '恢复区', band: '<59%' },
+  TUNEUP: { label: '测试赛强度', band: '' },
+  RACE: { label: '比赛强度', band: '' },
+};
+// 实际跑步分类 kind（后端 classify_workout）→ 无心率区档位的简名；带档位的
+// kind（recovery/easy/aerobic/high_aerobic/tempo/anaerobic）直接用其 label
+const ACT_HZ = { interval: '间歇跑', repeats: '重复跑', unknown: '匀速跑' };
 const DOW = ['一', '二', '三', '四', '五', '六', '日'];
 
 function fmtPace(s) {
@@ -95,6 +111,9 @@ const HTML = `
   <div class="modal">
       <div>
         <h3><span class="badge" :class="'kind-' + modal.kind" x-text="KIND_LABELS[modal.kind] || modal.kind"></span>
+          <span class="badge zn-chip" :class="'znk-' + modal.kind" x-show="zoneOf(modal.kind)"
+                :title="'对应强度区间（%VDOT 带，当前课表 VDOT 下的目标配速见下方）'"
+                x-text="zoneOf(modal.kind)"></span>
           <span x-text="modal.title"></span></h3>
         <p class="muted"><span x-text="modal.date"></span> · 第 <span x-text="modal.week_index + 1"></span> 周 ·
           <span x-text="PHASE_LABELS[modal.phase] || modal.phase"></span>
@@ -164,7 +183,18 @@ const HTML = `
       <div><div class="muted">有氧训练效果</div><b x-text="actModal.aerobic_te != null ? actModal.aerobic_te.toFixed(1) : '—'"></b></div>
       <div><div class="muted">训练负荷</div><b x-text="actModal.exercise_load != null ? actModal.exercise_load.toFixed(0) : '—'"></b></div>
     </div>
-    <p class="mt8" x-show="actStructureLabel"><span class="badge soft" x-text="actStructureLabel"></span></p>
+    <!-- 实际强度归类（后端 classify_workout）：间歇/重复跑按结构，匀速按心率六区带 -->
+    <template x-if="actModal && actModal.workout">
+      <div class="flex mt8" style="flex-wrap:wrap;gap:6px;align-items:center">
+        <span class="badge" :class="'hrz-' + (actModal.workout.kind || 'unknown')"
+              :title="actClassTitle()" x-text="actClassText()"></span>
+        <span class="badge soft" x-show="actModal.workout.hr_pct != null"
+              :title="actModal.workout.hr_metric === 'hrr'
+                ? 'Karvonen 储备心率百分比（LT1 78% / LT2 88%）'
+                : '平均心率 / 最大心率百分比'"
+              x-text="'心率 ' + Math.round(actModal.workout.hr_pct * 100) + '%' + (actModal.workout.hr_metric === 'hrr' ? ' 储备' : '')"></span>
+      </div>
+    </template>
     <template x-if="actSegments.length > 1">
       <table class="mt8">
         <thead><tr><th>分段</th><th class="num">距离(m)</th><th class="num">用时</th><th class="num">配速</th><th class="num">平均心率</th></tr></thead>
@@ -214,6 +244,7 @@ export function initCalendar() {
 
   window.Alpine.data('calendarPage', () => ({
     KIND_LABELS,
+    KIND_ZONES,
     PHASE_LABELS,
     DOW,
     plan: null,
@@ -313,16 +344,16 @@ export function initCalendar() {
       if (!ok || !data) { this.$dispatch('toast', { text: '读取活动失败' }); return; }
       this.actModal = data;
     },
-    get actStructureLabel() {
-      const st = this.actModal && this.actModal.structure;
-      if (!st || !st.length) return '';
-      if (st.some((s) => s.type === 'rest' || s.type === 'recovery')) {
-        const works = st.filter((s) => s.type === 'work');
-        const rests = st.filter((s) => s.type === 'rest' || s.type === 'recovery');
-        const km = works.reduce((t, s) => t + (s.distance_m || 0), 0) / 1000;
-        return `间歇训练：${works.length} 组跑段共 ${km.toFixed(1)} km，${rests.length} 段休息`;
-      }
-      return '匀速跑';
+    // 实际跑步的强度归类展示（数据来自后端 classify_workout 附加的 workout 字段）
+    actClassText() {
+      const w = this.actModal && this.actModal.workout;
+      if (!w) return '';
+      // 间歇/重复跑/缺心率匀速跑没有单一心率档：用结构简名
+      return ACT_HZ[w.kind] || w.label;
+    },
+    actClassTitle() {
+      const w = this.actModal && this.actModal.workout;
+      return w ? w.label : '';
     },
     get actSegments() {
       const st = this.actModal && this.actModal.structure;
@@ -330,6 +361,12 @@ export function initCalendar() {
     },
     segLabel(t) {
       return { work: '跑段', rest: '休息', recovery: '热身/冷身' }[t] || t;
+    },
+    // 课型 → 强度区间显示（与仪表盘一致：label + %VDOT 带）
+    zoneOf(kind) {
+      const z = KIND_ZONES[kind];
+      if (!z) return '';
+      return z.band ? z.label + ' · ' + z.band : z.label;
     },
 
     moveMonth(n) {

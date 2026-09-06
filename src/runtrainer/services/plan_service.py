@@ -56,6 +56,19 @@ def wizard_context() -> dict:
             rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
     est = ab.compute_ability(acts180, prof.get("vo2max"), prof.get("max_hr"),
                              rest_hr=rest_hr)
+    # 近一年各距离最佳成绩（比赛硬证据 + 长跑最快分段）+ 训练保持度：
+    # 供 AI 教练「预估水平/今年状态」类提问引用，并参与水平预估（PB 加成）
+    year_bests = ab.distance_bests(
+        acts_year,
+        get_samples=(lambda aid: activity_repo.get_samples(aid)) if any(
+            a.get("has_samples") for a in acts_year) else None,
+        max_hr=est.get("max_hr"))
+    consistency = ab.training_consistency(acts_year, today)
+    # 近一年 PB 参与预估：显著快于估计时给保守加分（时间衰减/封顶）——
+    # 重算一次让 evidence 与 recent_vdot 反映 PB；无 PB 时保持首轮结果
+    if year_bests and est.get("vdot") is not None:
+        est = ab.compute_ability(acts180, prof.get("vo2max"), prof.get("max_hr"),
+                                 rest_hr=rest_hr, year_bests=year_bests)
 
     recent_vdot = est.get("vdot")
     recent_vdot_source = "ability" if recent_vdot is not None else None
@@ -79,18 +92,10 @@ def wizard_context() -> dict:
     max_hr = prof.get("max_hr") or estimate_max_hr(prof.get("birth_year"))
     phase_suggestion = suggest_phase(acts180, today, max_hr=max_hr,
                                      rest_hr=prof.get("rest_hr"))
-    # 近一年各距离最佳成绩（比赛硬证据 + 长跑最快分段）+ 训练保持度：
-    # 供 AI 教练「预估水平/今年状态」类提问引用（build_chat 输出块）。
-    year_bests = ab.distance_bests(
-        acts_year,
-        get_samples=(lambda aid: activity_repo.get_samples(aid)) if any(
-            a.get("has_samples") for a in acts_year) else None,
-        max_hr=est.get("max_hr"))
-    consistency = ab.training_consistency(acts_year, today)
     return {"today": today.isoformat(), "recent_vdot": recent_vdot,
             "recent_vdot_source": recent_vdot_source, "recent_race": recent_race,
             "ability": {k: est.get(k) for k in
-                        ("vdot", "predictions", "evidence", "max_hr", "as_of")}
+                        ("vdot", "predictions", "zones", "evidence", "max_hr", "as_of")}
             | {"year_bests": year_bests, "consistency": consistency},
             "avg_weekly_km_4w": avg_km_4w, "min_weeks": MIN_WEEKS,
             "phase_suggestion": phase_suggestion}
