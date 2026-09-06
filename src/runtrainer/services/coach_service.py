@@ -91,20 +91,26 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
     sessions = [
         {"date": dates.ts_to_date(a["start_ts"]).isoformat(),
          "distance_km": (a.get("distance_m") or 0) / 1000,
-         "duration_min": (a.get("duration_s") or 0) / 60}
+         "duration_min": (a.get("duration_s") or 0) / 60,
+         "sport": a.get("sport")}
         for a in acts if a.get("distance_m")
     ]
     weekly = load_metrics.weekly_totals(sessions)[-8:]
+    # 近 7 天计划执行覆盖：按计划日与实际跑步逐日配对、逐日封顶，窗口夹在
+    # 课表生命周期 [start_date, race_date] 内——开课前课表没课可执行（覆盖
+    # 为空），计划外的自由跑不撑执行率（AI 拿到的是诚实数字）
+    run_sessions = [s for s in sessions if load_metrics.is_running(s.get("sport"))]
+    runs_day = load_metrics.run_days_from_sessions(run_sessions)
     planned7 = [{"date": w["date"], "distance_km": w.get("distance_km")}
-                for w in workouts if today - timedelta(days=6) <= date.fromisoformat(w["date"]) <= today]
-    done7 = [s for s in sessions
-             if today - timedelta(days=6) <= date.fromisoformat(s["date"]) <= today]
+                for w in workouts
+                if plan["start_date"] <= w["date"] <= plan["race_date"]
+                and (today - timedelta(days=6)).isoformat() <= w["date"] <= today.isoformat()]
     recent = {
         "weekly_km": [round(w["km"], 1) for w in weekly],
         "acwr": load_metrics.acwr(sessions, today),
         "monotony": load_metrics.monotony(sessions, today),
         "strain": load_metrics.strain(sessions, today),
-        "compliance_7d": load_metrics.compliance(planned7, done7, today - timedelta(days=6), today),
+        "compliance_7d": load_metrics.plan_coverage(planned7, runs_day),
     }
 
     # 最近训练活动精确详情（聊天/自动分析回答训练问题的数据依据，最新在前）。

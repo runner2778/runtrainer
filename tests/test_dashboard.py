@@ -87,26 +87,45 @@ def test_with_plan_and_data(monkeypatch, plan):
     assert d["readiness"]["status"] == "good"
     assert d["readiness"]["date"] == today.isoformat()
     assert [i["key"] for i in d["readiness"]["items"]] == ["sleep", "hrv", "resting_hr"]
-    # 本周负荷：按周一~周日窗口算期望（today-3d 是否同周取决于今天是周几）
+    # 本周负荷：按周一~周日窗口算期望（today-3d 是否同周取决于今天是周几）。
+    # 实际侧只认跑步；% 是「计划日覆盖」：计划行逐日按 min(计划量, 当日跑量)
+    # 配对封顶，计划外的自由跑不撑执行率 → pct ≤ 100
     ws = today - timedelta(days=today.weekday())
     runs = [(today, 8.0), (today - timedelta(days=3), 6.0)]
     same_week_km = sum(km for day, km in runs if ws <= day <= ws + timedelta(days=6))
     assert d["week_load"]["done_km"] == round(same_week_km, 1)
-    assert d["week_load"]["planned_km"] >= d["week_load"]["done_km"]
-    assert d["week_load"]["pct"] is not None
-    # 今日训练：今天有课
+    week_rows = [w for w in plan_repo.get_workouts(p["id"])
+                 if ws.isoformat() <= w["date"] <= (ws + timedelta(days=6)).isoformat()
+                 and (w.get("distance_km") or 0) > 0]
+    run_by_day = {day.isoformat(): km for day, km in runs}
+    cov_exp = sum(min((w.get("distance_km") or 0), run_by_day.get(w["date"], 0.0))
+                  for w in week_rows)
+    # 与服务端同两步舍入：ratio 先 round 3 位再 *100 round
+    pct_exp = round(round(cov_exp / sum(w["distance_km"] for w in week_rows), 3) * 100)
+    assert d["week_load"]["planned_km"] > 0
+    assert d["week_load"]["pct"] == pct_exp
+    assert 0 <= d["week_load"]["pct"] <= 100
+    assert d["week_load"]["covered_km"] == round(cov_exp, 1)
+    assert d["week_load"]["done_plan"] >= 1  # run_day 8km 自动判定为已执行
+    # 今日训练：今天有课且当天跑量已自动匹配完成
     assert d["today_workouts"], "今天应有一节计划课"
     assert d["today_workouts"][0]["kind"] == run_day["kind"]
-    # KPI：ACWR 存在（今天+3 天前急性 vs 含 14 天前慢性）；完成度已算
+    assert d["today_workouts"][0]["auto_done"] is True
+    # KPI：ACWR 存在（今天+3 天前急性 vs 含 14 天前慢性）；执行覆盖已算且 ≤100%
     assert d["kpis"]["acwr"] is not None
-    assert d["kpis"]["compliance_7d"]["planned_km"] > 0
-    # 周序列：与服务同款的周桶公式算期望，逐桶核对
+    c7 = d["kpis"]["compliance_7d"]
+    assert c7["planned_km"] > 0 and c7["ratio"] is not None
+    assert 0 < c7["ratio"] <= 1 and c7["covered_days"] >= 1
+    assert c7["planned_days"] >= c7["covered_days"]
+    # 周序列：与服务同款的周桶公式算期望，逐桶核对；本周带覆盖比，前期周无计划
     start = ws - timedelta(days=7 * 7)
     expected = {7: 8.0}
     for day, km in [(today - timedelta(days=3), 6.0), (today - timedelta(days=14), 10.0)]:
         b = (day - start).days // 7
         expected[b] = expected.get(b, 0) + km
     assert d["weekly_series"][-1]["current"] is True
+    assert d["weekly_series"][-1]["coverage"] is not None
+    assert d["weekly_series"][-1]["coverage"] <= 1
     for b, km in expected.items():
         assert d["weekly_series"][b]["done_km"] == round(km, 1)
     # 健康趋势与教练/同步块
@@ -294,3 +313,67 @@ def test_recovery_pace_selfheals_to_recovery_band_on_read(monkeypatch, plan):
     assert n == 0
     es = [w for w in plan_repo.get_workouts(p["id"]) if w["kind"] == "E"]
     assert es and all(w["pace_zone"] == "E" for w in es)
+
+
+def test_dashboard_before_plan_start_reports_empty_execution(monkeypatch, plan):
+    """课表未开始（真实库场景：9/7 开课、今天 9/6）：执行指标应跟随课表
+    生命周期为空而不是把自由跑量算成执行（曾出现 2325%）。
+
+    挑一个早于开课 ≥9 天的周日当「今天」，保证它所在的周一~周日周窗与
+    KPI 7 天窗内完全没有计划课；自由跑 12km 只进 done_km 不撑执行率。
+    """
+    p, _ = plan
+    today = REAL_TODAY - timedelta(days=REAL_TODAY.weekday() + 8)  # 周日
+    _patch_today(monkeypatch, today)
+    _insert_activity(today, 12.0, "free-run")
+
+    d = dashboard_service.get_dashboard()
+    assert d["has_plan"] is True
+    assert d["race"]["progress_pct"] == 0
+    # 本周负荷：无计划课（planned_n=0）→ 无执行率；自由跑只报实际跑量
+    wl = d["week_load"]
+    assert wl["planned_km"] == 0 and wl["planned_n"] == 0
+    assert wl["done_km"] == 12.0 and wl["done_n"] == 1
+    assert wl["done_plan"] == 0 and wl["pct"] is None and wl["covered_km"] == 0
+    assert d["today_workouts"] == []
+    # KPI：7 天窗内无计划课 → ratio None（不做分母比较）。done_km 是配对
+    # 语义（只统计计划日当天的实际跑量），窗口无计划日 → 0；自由跑量
+    # 在 week_load.done_km / weekly_series 展示，不在此混入
+    c7 = d["kpis"]["compliance_7d"]
+    assert c7["planned_km"] == 0 and c7["ratio"] is None
+    assert c7["done_km"] == 0 and c7["covered_km"] == 0
+    # 周序列：本周无计划量/无覆盖，只有自由跑
+    cur = d["weekly_series"][-1]
+    assert cur["current"] is True and cur["coverage"] is None
+    assert cur["planned_km"] == 0 and cur["done_km"] == 12.0
+    # 进度：已过日期 0 节 → 进度不把课表没开始的跑算进去
+    pr = Api().get_plan_progress()["data"]
+    assert pr["workouts_past"] == 0 and pr["workouts_done"] == 0
+    assert pr["planned_km_4w"] == 0 and pr["done_km_4w"] == 0
+    assert pr["compliance_4w"] is None
+
+
+def test_progress_and_grid_auto_match_runs_and_respect_lifecycle(monkeypatch, plan):
+    """当天跑了课表量的一半以上 → 进度/日历网格自动视为已执行（读取侧，
+    不写库）；计划生命周期内的未来课不误标。"""
+    p, ws = plan
+    # 取计划中一节 ≤12km 的最大课当天当「今天」：同日其它课都更小，
+    # 8km 跑量必然先摊给它且 ≥ 其半程计划量 → auto_done 确定性成立
+    cands = [w for w in ws if 0 < (w.get("distance_km") or 0) <= 12.0]
+    run_day = max(cands, key=lambda w: w["distance_km"])
+    today = dates.date.fromisoformat(run_day["date"])
+    _patch_today(monkeypatch, today)
+    _insert_activity(today, 8.0, "act-run-day")
+
+    pr = Api().get_plan_progress()["data"]
+    assert pr["workouts_past"] >= 1
+    assert pr["workouts_done"] >= 1
+    assert pr["planned_km_4w"] > 0
+    assert pr["compliance_4w"] is not None and 0 < pr["compliance_4w"] <= 1
+    assert pr["covered_days_4w"] >= 1
+
+    grid = Api().get_plan_workouts(p["id"], p["start_date"], p["race_date"])["data"]
+    by_id = {w["id"]: w for w in grid}
+    assert by_id[run_day["id"]]["auto_done"] is True
+    future = next(w for w in grid if w["date"] > today.isoformat())
+    assert future["auto_done"] is False

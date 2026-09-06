@@ -435,9 +435,94 @@ def test_training_components_dominate_without_race():
     est = ab.compute_ability(acts, 55.0, profile_max_hr=193)
     thr = next(ev for ev in est["evidence"] if ev["source"] == "threshold_trend")
     assert thr["vdot"] < 45  # 训练端确实弱（对照物：手表虚高 55）
-    # 结果贴住训练端而非读数端：(36.3×0.40 + 55×0.16)/0.56 ≈ 41.6——
-    # 距训练端 5 分、距读数 13 分；旧权重（读数 0.40 vs 阈值 0.28）下
-    # 结果 ≈49，距读数端仅 6 分，此断言可把新旧权重区分开
+    # 结果贴住训练端而非读数端：新权重（阈值 0.32/专项课 0.22 无专项课时
+    # 归一化 ≈0.73 vs 读数 0.12→0.27）下加权 ≈41.4，距训练端 ~5 分、距
+    # 读数 ~13 分；旧权重（读数 0.40 vs 阈值 0.28）结果 ≈49 距读数仅 6 分
     assert est["vdot"] is not None
     assert est["vdot"] < 45.0
     assert abs(est["vdot"] - thr["vdot"]) < abs(55.0 - est["vdot"])
+
+
+# ---- 第十七批：专项区间强度课分量 + 上限条件放松 + 读取侧自动完成 ----
+
+def _q(pace, days_ago, hr=165, dur_s=2400, name="强度课", dist_m=9000):
+    """阈值带内匀速强度课（非比赛距离带、非间歇）：9km 40min @ hr/max≈0.855。"""
+    return _act(days_ago, pace, hr, 210, dist_m, dur_s, name=name)
+
+
+def test_quality_workouts_component_without_race():
+    """近一月连续阈值带强度课（无比赛）→ quality 分量独立进预估，中位配速为准。"""
+    acts = [_q(250, d) for d in (1, 3, 6)]
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    q_ev = next(ev for ev in est["evidence"] if ev["source"] == "quality_workouts")
+    expect = ab._vdot_for_pace(250, vd.T_PCT)
+    assert abs(q_ev["vdot"] - expect) < 0.2
+    assert "3 堂" in q_ev["detail"] and "82–95% HRmax" in q_ev["detail"]
+    assert est["vdot"] == q_ev["vdot"]      # 唯一取值分量即最终水平
+
+
+def test_quality_hr_floor_accepts_82_84_percent():
+    """真实用户阈值课整场均心率常落 82–84%（真实库 166–171/201≈0.83）——
+    心率带下沿必须接住这类课，84% 会整批漏掉让分量休眠。"""
+    acts = [_q(258, d, hr=h) for d, h in ((1, 159), (3, 161), (6, 160))]  # /193≈0.82–0.83
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    q_ev = next(ev for ev in est["evidence"] if ev["source"] == "quality_workouts")
+    assert "3 堂" in q_ev["detail"] and est["vdot"] == q_ev["vdot"]
+    # 再往下沿 80%（M 带顶之下）的轻松跑不算强度证据
+    easy = [_q(330, d, hr=h) for d, h in ((1, 155), (3, 154), (6, 153))]  # /193≈0.79–0.80
+    est2 = ab.compute_ability(easy, None, profile_max_hr=193)
+    assert not any(ev["source"] == "quality_workouts" for ev in est2["evidence"])
+
+
+def test_quality_evidence_requires_recent_samples():
+    """样本须在近一月内：两个月前的旧强度课不参与（「当下水平」只看近况）。"""
+    acts = [_q(250, d) for d in (3, 5, 45)]
+    est = ab.compute_ability(acts, None, profile_max_hr=193, as_of=dates.today())
+    assert not any(e["source"] == "quality_workouts" for e in est["evidence"])
+
+
+def test_quality_can_lift_stale_race_cap():
+    """条件放松上限：旧比赛等效+2 是默认上限；近一月强度课中位明显更高
+    （≥3 堂稳定样本）→ 按训练证据抬线，封顶=min(未封顶加权, 训练中位+1)。"""
+    acts = [_q(250, d) for d in (1, 3, 6)]
+    # 20 天前的 10K 测试赛（等效 VDOT 明显低于当前强度课）
+    acts.append(_act(20, 300, 180, 210, 10000, 3000, name="10K 测试赛"))
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    race_ev = next(ev for ev in est["evidence"] if ev["source"] == "recent_race")
+    q_ev = next(ev for ev in est["evidence"] if ev["source"] == "quality_workouts")
+    cap = race_ev["vdot"] + 2.0
+    assert est["vdot"] > cap + 0.05                 # 抬线成功
+    assert est["vdot"] <= q_ev["vdot"] + 1.0 + 0.05  # 不逐课追高
+    cap_ev = next(ev for ev in est["evidence"] if ev["source"] == "cap_check")
+    assert "抬线" in cap_ev["detail"] or "放松" in cap_ev["detail"]
+
+
+def test_quality_weak_keeps_race_hard_cap():
+    """训练证据未越线时维持硬上限：专项课配速（5:00+）低于比赛水平 →
+    不被抬线（防虚高读数越过跑过的成绩），且不做多余上限提示。"""
+    acts = [_q(380, d) for d in (1, 3, 6)]          # 明显偏慢的“强度课”
+    acts.append(_act(20, 300, 180, 210, 10000, 3000, name="10K 测试赛"))
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    race_ev = next(ev for ev in est["evidence"] if ev["source"] == "recent_race")
+    cap = race_ev["vdot"] + 2.0
+    assert est["vdot"] <= cap + 0.05
+    assert not any(e["source"] == "cap_check" for e in est["evidence"])
+
+
+def test_quality_execution_counts_auto_matched():
+    """读取侧自动完成并入完成统计：completed 直计，auto_done 集内且非
+    skipped/力量课计完成；skipped 不因当天有跑而复活。"""
+    d = dates.today() - timedelta(days=10)
+    rows = [
+        {"id": 1, "kind": "T", "status": "completed", "date": d.isoformat()},
+        {"id": 2, "kind": "T", "status": "planned", "date": d.isoformat()},
+        {"id": 3, "kind": "I", "status": "skipped", "date": d.isoformat()},
+        {"id": 4, "kind": "TUNEUP", "status": "planned", "date": d.isoformat()},
+        {"id": 5, "kind": "E", "status": "planned", "date": d.isoformat()},
+    ]
+    r0 = ab.quality_execution(rows)                       # 无自动判定：仅手动
+    assert r0 == {"done": 1, "total": 4, "ratio": 0.25}
+    r1 = ab.quality_execution(rows, auto_done={2, 4})
+    assert r1 == {"done": 3, "total": 4, "ratio": 0.75}
+    r2 = ab.quality_execution(rows, auto_done={3})        # skipped 不算
+    assert r2["done"] == 1 and r2["total"] == 4

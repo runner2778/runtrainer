@@ -68,6 +68,18 @@ QUALITY_MIN_TOTAL = 2            # 计划质量课 <2 堂 → 样本不足，不
 QUALITY_K = 1.6                  # 完成率 → VDOT 线性系数（r=1→+0.48，r=0→−1.12）
 QUALITY_ADJ_MAX = 0.6            # 全额完成只小幅加分（配速本就是按该水平生成的）
 QUALITY_ADJ_MIN = -1.2           # 全缺勤大幅下调，防按「没练成的水平」生成课表
+# ---- 专项区间强度课分量（第十七批）：近一个月的连续匀速高强度课
+# （整场心率落在阈值带、非间歇）是「当下」配速-心率证据——比 90 天回归
+# 平均更贴现状。心率是生理门控：平均心率过低（没在跑强度）/ 过高（已近
+# 全力）都排除；间歇日快慢交替拉低整场均心率，整场配速不代表阈值，排除。
+# 心率下沿 82%（真实用户阈值课整场均心率常落 82–85%，84% 会漏接；M 带
+# 顶正是 82%，再低就开始放进 M/轻松跑了）；95% 上沿排除已近全力样本。
+QT_HR_WIN = (0.82, 0.95)         # 阈值强度课整场平均心率带（%HRmax）
+QT_PACE_WIN = (180.0, 500.0)     # 3:00–8:20/km（阈值配速随水平浮动，不硬收窄）
+QT_DUR_WIN = (10 * 60, 75 * 60)  # 连续匀速 10–75 min
+QT_WINDOW_DAYS = 35              # 近一个月（留几天松弛）
+QT_MIN_RUNS = 3                  # 专项课 <3 堂 → 样本不足，不参与
+QT_LIFT = 1.0                    # 上限放松后最高到「专项课中位 +1」（不逐课追高）
 # 储备心率(HRR)配速分量
 HRR_TARGET = 0.70        # 用 70% HRR 对应配速反推（有氧区代表强度）
 HRR_MIN = 0.40           # 过低 HRR 样本（慢走/热身）剔除
@@ -581,6 +593,50 @@ def hr_trend_ability(activities: list[dict], as_of: date | None = None) -> dict 
             "adj_vdot": round(adj, 2)}
 
 
+def quality_workout_evidence(activities: list[dict], max_hr: float | None,
+                             as_of: date | None = None) -> dict | None:
+    """近一个月专项区间强度课的配速水平（独立分量，第十七批）。
+
+    选择「稳定跑完了的」高强度课：整场平均心率在 82–95% HRmax（心率佐证
+    确实在阈值带内）、配速 3:00–8:20/km、时长 10–75 min、非间歇日。单课
+    按 T 强度反算 VDOT（保守：若实际以更高强度完成，等效阈值只会更快），
+    取中位数抗个别失真课。返回 None 表示样本不足（<QT_MIN_RUNS）——
+    此时该分量不参与，不给旧比赛上限抬线。
+    """
+    if not max_hr:
+        return None
+    lo_ts = None
+    if as_of is not None:
+        from ..utils import dates
+        lo_ts = dates.date_to_ts(as_of - timedelta(days=QT_WINDOW_DAYS))
+    votes: list[float] = []
+    paces: list[float] = []
+    hrs: list[float] = []
+    for a in activities:
+        if (not a.get("avg_pace_s_km") or not a.get("avg_hr")
+                or _is_interval_day(a.get("structure"))):
+            continue
+        if lo_ts is not None and a.get("start_ts") and a["start_ts"] < lo_ts:
+            continue
+        if not (QT_DUR_WIN[0] <= (a.get("duration_s") or 0) <= QT_DUR_WIN[1]):
+            continue
+        if not (QT_PACE_WIN[0] <= a["avg_pace_s_km"] <= QT_PACE_WIN[1]):
+            continue
+        pct_hr = a["avg_hr"] / max_hr
+        if not (QT_HR_WIN[0] <= pct_hr <= QT_HR_WIN[1]):
+            continue
+        votes.append(_vdot_for_pace(a["avg_pace_s_km"], vd.T_PCT))
+        paces.append(a["avg_pace_s_km"])
+        hrs.append(a["avg_hr"])
+    if len(votes) < QT_MIN_RUNS:
+        return None
+    vs = sorted(votes)
+    ps = sorted(paces)
+    return {"vdot": vs[len(vs) // 2], "n_runs": len(votes),
+            "pace_s_km": ps[len(ps) // 2],
+            "hr_lo": int(min(hrs)), "hr_hi": int(max(hrs))}
+
+
 def _weighted(components: list[dict]) -> float | None:
     comps = [c for c in components if c and c.get("vdot")]
     if not comps:
@@ -613,6 +669,7 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     threshold = threshold_pace_from_trend(activities, max_hr) if max_hr else None
     intervals = interval_ability(activities, max_hr)
     hrr = hrr_ability(activities, max_hr, rest_hr) if max_hr and rest_hr else None
+    quality = quality_workout_evidence(activities, max_hr, as_of) if max_hr else None
     # 阈值分量三来源按可靠性递补：心率-配速回归（整场稳定样本，最全）→
     # 节奏/巡航跑中位配速（连续匀速课）→ 乳酸阈值型间歇（短休长段）。
     # 后者即便存在也仅作替代——混入会让单一阈值槽被多次加权。
@@ -627,16 +684,14 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                          "n_runs": t_typed["n_workouts"]}
             threshold_src = "t_intervals"
 
-    # 第十六批权重重排：近期训练数据（课程内容/配速/心率/完成情况）占大头。
-    # 训练分量 = 阈值趋势（近 90 天配速-心率回归，课程配速+心率）+ HRR 配速
-    # + 间歇能力 + 课表完成度，有比赛时合计 0.48+ > 比赛单源 0.32；
-    # 手表 VO2max 降至底数位，但与比赛保持 1.6 比例（有比赛在场时读数
-    # 仍是有效旁证）；无比赛时训练分量合计 0.84 绝对主导。
-    # _weighted 按权重占比归一化——缺失分量自动放大剩余占比。
+    # 权重重排：近期训练数据（课程内容/配速/心率/完成情况）占大头。训练分量 =
+    # 阈值趋势 + 专项区间强度课（第十七批新增，近一月阈值带稳定课，比 90 天
+    # 回归平均更贴当下）+ HRR 配速 + 间歇能力 + 课表完成度；比赛与手表 VO2max
+    # 退居硬底数。_weighted 按权重占比归一化——缺失分量自动放大剩余占比。
     evidence: list[dict] = []
     components: list[dict] = []
     if race:
-        components.append({"vdot": race["vdot"], "weight": 0.32, "kind": "race"})
+        components.append({"vdot": race["vdot"], "weight": 0.28, "kind": "race"})
         evidence.append({
             "source": "recent_race",
             "vdot": race["vdot"],
@@ -644,11 +699,11 @@ def compute_ability(activities: list[dict], vo2max: float | None,
             "race": race,
         })
     if vo2max:
-        components.append({"vdot": round(float(vo2max), 1), "weight": 0.20, "kind": "vo2max"})
+        components.append({"vdot": round(float(vo2max), 1), "weight": 0.16, "kind": "vo2max"})
         evidence.append({"source": "garmin_vo2max", "vdot": round(float(vo2max), 1),
                          "detail": "手表 VO2max 读数"})
     if threshold:
-        components.append({"vdot": threshold["vdot"], "weight": 0.24, "kind": "threshold"})
+        components.append({"vdot": threshold["vdot"], "weight": 0.22, "kind": "threshold"})
         if threshold_src == "cruise":
             evidence.append({"source": "cruise_ability", "vdot": threshold["vdot"],
                              "detail": f"节奏/巡航跑中位配速 {_fmt_pace(threshold['pace_s_km'])}/km"
@@ -666,7 +721,7 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                                        f"（{threshold['n_runs']} 次心率-配速回归）",
                              "pace_s_km": threshold["pace_s_km"]})
     if hrr:
-        components.append({"vdot": hrr["vdot"], "weight": 0.12, "kind": "hrr"})
+        components.append({"vdot": hrr["vdot"], "weight": 0.10, "kind": "hrr"})
         evidence.append({"source": "hrr_pace", "vdot": hrr["vdot"],
                          "detail": f"{int(hrr['hrr_pct'] * 100)}% HRR 对应配速 "
                                    f"{_fmt_pace(hrr['pace_s_km'])}/km"
@@ -686,11 +741,20 @@ def compute_ability(activities: list[dict], vo2max: float | None,
         evidence.append({"source": "interval_ability", "vdot": intervals["vdot"],
                          "detail": detail + "）",
                          "pace_s_km": intervals["pace_s_km"]})
+    if quality:
+        components.append({"vdot": quality["vdot"], "weight": 0.16, "kind": "quality"})
+        evidence.append({
+            "source": "quality_workouts", "vdot": quality["vdot"],
+            "detail": f"近一月专项强度课 {quality['n_runs']} 堂中位配速 "
+                      f"{_fmt_pace(quality['pace_s_km'])}/km"
+                      f"（平均心率 {quality['hr_lo']}–{quality['hr_hi']} bpm，"
+                      f"82–95% HRmax 阈值带内稳定完成）",
+        })
     # 缺比赛时重新分配权重：训练分量（阈值趋势/HRR/间歇）占大头绝对主导，
     # 手表 VO2max 只作底数（无比赛在场时读数的「上限」属性最值得怀疑）
     if not race and components:
-        weights = {"vo2max": 0.16, "threshold": 0.40, "hrr": 0.20,
-                   "interval": 0.24, "race": 0.40}
+        weights = {"vo2max": 0.12, "threshold": 0.32, "quality": 0.22,
+                   "hrr": 0.16, "interval": 0.18, "race": 0.40}
         for c in components:
             c["weight"] = weights[c["kind"]]
     vdot_val = _weighted(components)
@@ -755,11 +819,36 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                                   f"VDOT {pb['vdot']} 高于当前估计 → 上调 "
                                   f"+{boost:.1f}（PB 加成，按 {int(recency * 100)}% 计权）",
                     })
-    # 上限钳制：能力预估不高于「已跑出的最佳比赛成绩等效 VDOT + 2」——
-    # 手表 VO2max 读数偏高时（如 63 vs 比赛等效 48.9）不能把课表配速
-    # 拉到无法完成的水平；下限不加钳制（状态差时按保守值训练）
+    # 上限钳制（条件放松）：预估不高于「已跑出的最佳比赛成绩等效 VDOT + 2」，
+    # 防手表 VO2max 读数偏高（如 63 vs 比赛等效 48.9）时把课表配速拉到无法
+    # 完成的水平。但旧比赛是几个月前的状态——近一月持续稳定完成专项区间
+    # 强度课（≥QT_MIN_RUNS 堂，阈值带配速心率佐证）且训练证据中位高于旧
+    # 上限时，按 max(旧上限, min(未封顶加权, 训练中位 + QT_LIFT)) 抬线，
+    # 让训练进步不被过期比赛成绩钉死；偶发快课/单堂冲刺不给抬线。
+    cap_note = None
     if race and vdot_val:
-        vdot_val = round(min(vdot_val, race["vdot"] + 2.0), 1)
+        race_cap = race["vdot"] + 2.0
+        uncapped = vdot_val
+        cand = None
+        if quality:
+            t_cand = threshold["vdot"] if threshold else None
+            cand = max(v for v in (quality["vdot"], t_cand) if v)
+        if cand is not None and cand > race_cap:
+            lifted = max(race_cap, min(vdot_val, cand + QT_LIFT))
+            vdot_val = round(lifted, 1)
+            if lifted > race_cap + 0.05:
+                cap_note = ("专项区间强度课持续达成且配速中位高于旧比赛水平 "
+                            f"（{race['vdot']:.0f} 等效 → 上限 {race_cap:.0f}）"
+                            f"，按训练证据抬线至 {lifted:.1f}")
+        else:
+            vdot_val = round(min(vdot_val, race_cap), 1)
+            if quality and vdot_val >= race_cap - 0.05:
+                cap_note = ("仍以近期最佳比赛等效 VDOT 为硬上限"
+                            f"（{race['vdot']:.0f} + 2 = {race_cap:.0f}）；"
+                            "近一月专项课训练证据未越过该线")
+    if cap_note:
+        evidence.append({"source": "cap_check", "vdot": vdot_val,
+                         "detail": "上限校验：" + cap_note})
     result = {
         "vdot": vdot_val,
         "predictions": vd.equivalent_times(vdot_val) if vdot_val else None,
@@ -771,13 +860,16 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     return result
 
 
-def quality_execution(workouts: list[dict], today: date | None = None) -> dict | None:
+def quality_execution(workouts: list[dict], today: date | None = None,
+                      auto_done: set[int] | None = None) -> dict | None:
     """近 8 周课表内质量课完成比例（课程内容 + 完成情况的硬证据）。
 
-    workouts: plan_repo.get_workouts() 行（需含 date/kind/status），可为空；
+    workouts: plan_repo.get_workouts() 行（需含 date/kind/status/id），可为空；
     本函数按 [today−QUALITY_WINDOW_DAYS, today] 再滤一次。质量课之外的
-    轻松跑/休息日不算（那些缺勤不代表强度水平）；completed 计入完成，
-    skipped/planned 计入未完成。样本 <QUALITY_MIN_TOTAL 返回 None。
+    轻松跑/休息日不算（那些缺勤不代表强度水平）；status='completed' 计入
+    完成，其余按读取侧自动判定 auto_done（load_metrics.workout_auto_done，
+    服务层配对当日实际跑步后传入）计入；skipped/planned 且无自动完成
+    计入未完成。样本 <QUALITY_MIN_TOTAL 返回 None。
     """
     end = today or date.today()
     start = end - timedelta(days=QUALITY_WINDOW_DAYS)
@@ -787,7 +879,13 @@ def quality_execution(workouts: list[dict], today: date | None = None) -> dict |
           and start.isoformat() <= w["date"] <= end.isoformat()]
     if len(qs) < QUALITY_MIN_TOTAL:
         return None
-    done = sum(1 for w in qs if w.get("status") == "completed")
+    done = 0
+    for w in qs:
+        st = w.get("status")
+        if st == "completed":
+            done += 1
+        elif auto_done and st != "skipped" and w.get("id") in auto_done:
+            done += 1
     return {"done": done, "total": len(qs), "ratio": done / len(qs)}
 
 

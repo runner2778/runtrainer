@@ -225,7 +225,14 @@ def _context_blocks(ctx: dict) -> list[str]:
         lines.append(f"单调性 {rec['monotony']}，应变 {rec.get('strain')}")
     c7 = rec.get("compliance_7d") or {}
     if c7.get("ratio") is not None:
-        lines.append(f"近 7 天完成度 {c7['done_km']}km / 计划 {c7['planned_km']}km（{c7['ratio'] * 100:.0f}%）")
+        # 覆盖口径：计划日跑量被实际跑步覆盖的比例（≤100%）；done_km 是
+        # 计划日的实际总跑量（可高于 covered，计划外自由跑不撑执行率）
+        lines.append(
+            f"近 7 天课表执行率 {c7['covered_km']}km / 计划 {c7['planned_km']}km"
+            f"（{c7['ratio'] * 100:.0f}%，按计划日配对封顶；计划日实际跑了"
+            f" {c7['done_km']}km，超出计划的部分按计划量封顶）"
+            if "covered_km" in c7 else
+            f"近 7 天完成度 {c7['done_km']}km / 计划 {c7['planned_km']}km（{c7['ratio'] * 100:.0f}%）")
 
     lines.append("【最近训练活动详情（精确数据）】")
     recent_acts = ctx.get("recent_acts") or []

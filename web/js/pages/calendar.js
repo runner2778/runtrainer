@@ -77,10 +77,10 @@ const HTML = `
       <div class="grid cols-4 mt8">
         <div class="stat"><b x-text="'第 ' + (Math.floor(progress.weeks_elapsed) + 1) + ' / ' + progress.total_weeks + ' 周'"></b>
           <span>距比赛 <b x-text="raceDaysLeft"></b> 天（<span x-text="progress.race_date"></span>）</span></div>
-        <div class="stat"><b x-text="progress.workouts_done + ' / ' + progress.workouts_past"></b>
-          <span>已过日期的课完成</span></div>
-        <div class="stat"><b><span x-text="progress.compliance_4w === null ? '--' : Math.round(progress.compliance_4w * 100) + '%'"></span></b>
-          <span>计划窗口内执行率（实际 <span x-text="progress.done_km_4w"></span> / 计划 <span x-text="progress.planned_km_4w"></span> km）</span></div>
+        <div class="stat"><b x-text="progress.workouts_past ? (progress.workouts_done + ' / ' + progress.workouts_past) : '未开始'"></b>
+          <span>已过日期课完成（当天跑量自动匹配）</span></div>
+        <div class="stat"><b :title="complTitle()" x-text="progress.compliance_4w == null ? '--' : Math.round(progress.compliance_4w * 100) + '%'"></b>
+          <span x-text="complSpan()"></span></div>
         <div class="stat"><b x-text="currentPhase ? PHASE_LABELS[currentPhase] : '—'"></b>
           <span>当前时期（至 <span x-text="currentPhaseEnd"></span>）</span></div>
       </div>
@@ -93,11 +93,11 @@ const HTML = `
           <div class="day" :class="(d.inMonth ? '' : 'other') + (d.isToday ? ' today' : '') + (d.isRace ? ' race' : '')">
             <div class="dnum" x-text="Number(d.date.slice(8))"></div>
             <template x-for="w in (byDate[d.date] || [])" :key="w.id">
-              <button class="wk" :class="'kind-' + w.kind + (w.status === 'completed' ? ' done' : '') + (w.status === 'skipped' ? ' skipped' : '') + (w.source === 'ai' || w.adjustment_id ? ' ai' : '')"
-                      :data-wid="w.id">
+              <button class="wk" :class="'kind-' + w.kind + (isDone(w) ? ' done' : '') + (w.status === 'skipped' ? ' skipped' : '') + (w.source === 'ai' || w.adjustment_id ? ' ai' : '')"
+                      :data-wid="w.id" :title="wkTitle(w)">
                 <span class="wk-line">
                   <b class="wkz" x-show="WK_MARK[w.kind]" x-text="WK_MARK[w.kind]"></b>
-                  <span class="wkt" x-text="(w.status === 'completed' ? '✓ ' : '') + (w.slot === 2 ? '② ' : '') + shortTitle(w)"></span>
+                  <span class="wkt" x-text="(isDone(w) ? '✓ ' : '') + (w.slot === 2 ? '② ' : '') + shortTitle(w)"></span>
                 </span>
                 <span class="wks" x-show="zoneBand(w.kind)" x-text="zoneBand(w.kind)"
                       :title="'强度区间：' + (zoneOf(w.kind) || '')"></span>
@@ -141,8 +141,9 @@ const HTML = `
             <div class="seg-row" x-html="segText(s)"></div>
           </template>
         </div>
-        <p class="mt8" x-show="modal.pace_slow_s_km">
-          目标配速：<b x-text="fmtPace(modal.pace_slow_s_km) + (modal.pace_fast_s_km && modal.pace_fast_s_km !== modal.pace_slow_s_km ? ' – ' + fmtPace(modal.pace_fast_s_km) : '')"></b>/km
+        <p class="mt8" x-show="targetPaceOf()">
+          目标配速：<b x-text="targetPaceOf().text"></b>/km
+          <span class="muted" x-show="targetPaceOf().fb" x-text="fbNote()"></span>
         </p>
         <p class="mt8" x-show="modal.distance_km || modal.duration_min">
           <span x-show="modal.distance_km">约 <b x-text="modal.distance_km"></b> km</span>
@@ -399,6 +400,69 @@ export function initCalendar() {
     actKindName(a) {
       const w = a.workout;
       return w ? (ACT_ZN[w.kind] || w.label || '') : '';
+    },
+    // 完成判定：手动勾选 或 当天实际跑量自动匹配（auto_done，读侧配对不落库）；
+    // 已跳过优先算未完成
+    isDone(w) {
+      if (!w) return false;
+      if (w.status === 'completed') return true;
+      if (w.status === 'skipped') return false;
+      return !!w.auto_done;
+    },
+    wkTitle(w) {
+      if (!w) return '';
+      const base = w.title || '';
+      if (w.status === 'completed') return base + '（已手动标记完成）';
+      if (w.status === 'skipped') return base + '（已跳过）';
+      if (w.auto_done) return base + '（当天跑量已自动匹配 ≥ 半程计划量）';
+      return base + '（未完成）';
+    },
+    // 近 4 周执行率说明（统计 3 格宽度有限，完整语义放 title）
+    complSpan() {
+      const p = this.progress;
+      if (!p) return '';
+      if (p.compliance_4w == null) {
+        return p.planned_km_4w === 0 ? '窗口内暂无计划课（课表未开始）' : '近 4 周无计划课可执行';
+      }
+      let t = '近 4 周课表执行 · 计划日覆盖 ' + p.covered_km_4w + ' / ' + p.planned_km_4w + ' km';
+      if (p.done_km_4w != null && p.done_km_4w > p.covered_km_4w) t += '（计划日实际 ' + p.done_km_4w + ' km）';
+      return t;
+    },
+    complTitle() {
+      const p = this.progress;
+      if (!p || p.compliance_4w == null) return '';
+      return '覆盖 ' + p.covered_km_4w + ' km / 计划 ' + p.planned_km_4w + ' km'
+        + ' · ' + p.covered_days_4w + '/' + p.planned_days_4w + ' 个计划日达成'
+        + '（实际跑步按计划日配对并封顶，自由跑不计执行率）';
+    },
+    // 课型 → 配速表区间键（旧行缺落库配速时回退到课表 VDOT 区间）
+    kindZone(kind) {
+      return { E: 'E', M: 'M', T: 'T', I: 'I', R: 'R', LR: 'E',
+               RECOVERY: 'RECOVERY', TUNEUP: 'T', RACE: 'race' }[kind];
+    },
+    // 弹窗「目标配速」：落库配速带优先；NULL（旧行/未知）→ 课表 VDOT 对应区间
+    targetPaceOf() {
+      const w = this.modal;
+      if (!w) return '';
+      const slow = w.pace_slow_s_km, fast = w.pace_fast_s_km;
+      if (slow) {
+        return { text: this.fmtPace(slow)
+          + (fast && fast !== slow ? ' – ' + this.fmtPace(fast) : ''), fb: false };
+      }
+      const zone = w.pace_zone || this.kindZone(w.kind);
+      const p = zone && this.paces[zone];
+      if (!p) return '';
+      if (typeof p === 'object') {
+        return { text: this.fmtPace(p.slow_s_km) + ' – ' + this.fmtPace(p.fast_s_km), fb: true };
+      }
+      return { text: this.fmtPace(p), fb: true };
+    },
+    fbNote() {
+      const w = this.modal;
+      const z = w && (w.pace_zone || this.kindZone(w.kind)) || '';
+      const v = this.plan && this.plan.vdot;
+      return '按课表 VDOT ' + (v != null ? v : '')
+        + ' 对应「' + (ZONE_LABELS[z] || z) + '」区间（课表生成值）';
     },
 
     moveMonth(n) {

@@ -83,25 +83,51 @@ def _week_buckets(rows: list[dict], key: str, value_key: str,
     return buckets
 
 
+def _plan_rows(rows: list[dict], plan: dict | None) -> list[dict]:
+    """计划侧聚合前按课表生命周期裁剪：只认 [start_date, race_date] 内的课。
+
+    开课前（如 9/7 开课、今天 9/6）课表还没有任何课可以执行，计划指标
+    应为空而不是把旧课表残留/预备课算进本周；比赛日后计划行不再参与。
+    """
+    if not plan:
+        return []
+    lo, hi = plan["start_date"], plan["race_date"]
+    return [w for w in rows if lo <= w["date"] <= hi]
+
+
 def _weekly_series(today: date, plan_id: int | None,
-                   sessions: list[dict]) -> list[dict]:
-    """近 8 周计划跑量 vs 实际跑量（含本周）。"""
+                   sessions: list[dict], plan: dict | None = None,
+                   runs_day: dict[str, float] | None = None) -> list[dict]:
+    """近 8 周计划跑量 vs 实际跑量（含本周）+ 每周覆盖比。
+
+    coverage: 该周计划日跑量被实际跑步覆盖的比例（plan_coverage，∈[0,1]；
+    计划跑量 0 → None）。计划行按课表生命周期裁剪，开课前/比赛后的周为 0。
+    """
     weeks = 8
     ws = today - timedelta(days=today.weekday())
     start = ws - timedelta(days=7 * (weeks - 1))
     planned: dict[str, float] = {}
+    ws_rows: list[dict] = []
     if plan_id is not None:
-        ws_rows = plan_repo.get_workouts(plan_id, start.isoformat(), (ws + timedelta(days=6)).isoformat())
+        ws_rows = _plan_rows(plan_repo.get_workouts(
+            plan_id, start.isoformat(), (ws + timedelta(days=6)).isoformat()), plan)
         planned = _week_buckets(ws_rows, "date", "distance_km", start, weeks)
     done = _week_buckets(sessions, "date", "distance_km", start, weeks)
     out = []
     for i in range(weeks):
         d = start + timedelta(days=7 * i)
+        coverage = None
+        if ws_rows and runs_day:
+            wk_rows = [w for w in ws_rows
+                       if d.isoformat() <= w["date"] <= (d + timedelta(days=6)).isoformat()]
+            if wk_rows:
+                coverage = load_metrics.plan_coverage(wk_rows, runs_day)["ratio"]
         out.append({
             "week_start": d.isoformat(),
             "label": d.strftime("%m-%d"),
             "planned_km": round(planned.get(i, 0.0), 1),
             "done_km": round(done.get(i, 0.0), 1),
+            "coverage": coverage,
             "current": d <= today <= d + timedelta(days=6),
         })
     return out
@@ -147,11 +173,18 @@ def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
     if plan_vdot is not None:
         ap = plan_repo.get_active_plan()
         if ap:
-            plan_exec = ab.quality_execution(
-                plan_repo.get_workouts(ap["id"],
-                                       (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
-                                       today.isoformat()),
-                today=today)
+            q_rows = _plan_rows(plan_repo.get_workouts(
+                ap["id"], (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
+                today.isoformat()), ap)
+            # 用户不手动勾完成 → 质量课按当日实际跑步自动判定已执行
+            run_day: dict[str, float] = {}
+            for a in acts_year:
+                if (a.get("date") and a.get("distance_m")
+                        and load_metrics.is_running(a.get("sport"))):
+                    run_day[a["date"]] = run_day.get(a["date"], 0.0) \
+                        + a["distance_m"] / 1000.0
+            auto = load_metrics.workout_auto_done(q_rows, run_day)
+            plan_exec = ab.quality_execution(q_rows, today=today, auto_done=auto)
     est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
                              rest_hr=rest_hr, as_of=today, plan_exec=plan_exec)
     # 近一年各距离最佳成绩 + 训练保持度：与「现在水平」互相印证
@@ -207,40 +240,53 @@ def get_dashboard() -> dict:
         "sleep_score": h.get("sleep_score"),
     } for h in health_rows]
 
-    # 训练数据（周负荷/KPI/系列共用）：近 10 周活动 + 课表
+    # 训练数据（周负荷/KPI/系列共用）：近 10 周活动 + 课表。
+    # 执行率/完成进度等计划侧指标只按「跑步」配对：跨训练不是执行课表。
     acts = activity_repo.list_activities(
         (today - timedelta(days=70)).isoformat(), limit=2000)
     sessions = [
         {"date": dates.ts_to_date(a["start_ts"]).isoformat(),
          "distance_km": (a.get("distance_m") or 0) / 1000,
-         "duration_min": (a.get("duration_s") or 0) / 60}
+         "duration_min": (a.get("duration_s") or 0) / 60,
+         "sport": a.get("sport")}
         for a in acts if a.get("distance_m")
     ]
+    run_sessions = [s for s in sessions if load_metrics.is_running(s.get("sport"))]
+    runs_day = load_metrics.run_days_from_sessions(run_sessions)
     if plan:
         plan_id = plan["id"]
-        # 本周负荷：计划（周一~周日全周课表）vs 实际（本周活动）
-        week_wk = plan_repo.get_workouts(
+        # 本周负荷：计划课（周窗 ∩ 课表生命周期 [start_date, race_date]）
+        # vs 实际本周跑步。% = 覆盖比（计划日跑量逐日封顶配对，∈[0,100]；
+        # 计划外自由跑不计入执行，防「每天 12km 自由跑」把课表撑成几百 %）
+        week_all = plan_repo.get_workouts(
             plan_id, ws.isoformat(), (ws + timedelta(days=6)).isoformat())
+        week_wk = _plan_rows(week_all, plan)
         planned_km = sum(w.get("distance_km") or 0 for w in week_wk)
         planned_n = len(week_wk)
-        done_km = sum(s["distance_km"] for s in sessions
+        done_km = sum(s["distance_km"] for s in run_sessions
                       if ws <= date.fromisoformat(s["date"]) <= ws + timedelta(days=6))
-        done_n = sum(1 for s in sessions
+        done_n = sum(1 for s in run_sessions
                      if ws <= date.fromisoformat(s["date"]) <= ws + timedelta(days=6))
-        done_plan = sum(1 for w in week_wk if w["status"] == "completed")
+        auto_wk = load_metrics.workout_auto_done(week_wk, runs_day)
+        done_plan = sum(1 for w in week_wk
+                        if w["status"] == "completed" or w["id"] in auto_wk)
+        cov_wk = load_metrics.plan_coverage(week_wk, runs_day)
         out["week_load"] = {
             "planned_km": round(planned_km, 1), "done_km": round(done_km, 1),
             "planned_n": planned_n, "done_n": done_n, "done_plan": done_plan,
-            "pct": round(done_km / planned_km * 100) if planned_km else None,
+            "pct": round(cov_wk["ratio"] * 100) if cov_wk["ratio"] is not None else None,
+            "covered_km": cov_wk["covered_km"],
         }
-        # 今日训练（含二练）
-        tws = sorted(plan_repo.get_workouts(plan_id, today.isoformat(), today.isoformat()),
-                     key=lambda w: w.get("slot") or 1)
+        # 今日训练（含二练；auto_done：今天这节按当日跑步自动判定已执行）
+        tws = sorted(_plan_rows(
+            plan_repo.get_workouts(plan_id, today.isoformat(), today.isoformat()), plan),
+            key=lambda w: w.get("slot") or 1)
         out["today_workouts"] = [{
             "id": w["id"], "slot": w.get("slot") or 1, "kind": w["kind"],
             "title": w["title"], "distance_km": w.get("distance_km"),
             "duration_min": w.get("duration_min"), "pace_zone": w.get("pace_zone"),
             "status": w["status"],
+            "auto_done": w["id"] in auto_wk,
         } for w in tws]
         # 比赛倒计时
         goal = goal_repo.get_active_goal() or {}
@@ -256,25 +302,21 @@ def get_dashboard() -> dict:
             "total_weeks": plan["total_weeks"],
             "vdot": plan["vdot"],
         }
-        # KPI：完成度/ACWR/单调性/应变/上周跑量
-        planned7 = [{"date": w["date"], "distance_km": w.get("distance_km")}
-                    for w in plan_repo.get_workouts(
-                        plan_id, (today - timedelta(days=6)).isoformat(), today.isoformat())]
-        done7 = [s for s in sessions
-                 if today - timedelta(days=6) <= date.fromisoformat(s["date"]) <= today]
+        # KPI：执行覆盖（近 7 天课表日被实际跑步覆盖的比例）/ACWR/单调性/应变
+        planned7 = _plan_rows(plan_repo.get_workouts(
+            plan_id, (today - timedelta(days=6)).isoformat(), today.isoformat()), plan)
         acwr = load_metrics.acwr(sessions, today)
         acwr_ratio = acwr["ratio"] if acwr else None
         weekly = load_metrics.weekly_totals(sessions)
         out["kpis"] = {
-            "compliance_7d": load_metrics.compliance(
-                planned7, done7, today - timedelta(days=6), today),
+            "compliance_7d": load_metrics.plan_coverage(planned7, runs_day),
             "acwr": acwr_ratio,
             "acwr_status": "ok" if acwr_ratio is not None and 0.8 <= acwr_ratio <= 1.3 else "warn",
             "monotony": load_metrics.monotony(sessions, today),
             "strain": load_metrics.strain(sessions, today),
             "last_week_km": round(weekly[-1]["km"], 1) if weekly else None,
         }
-        out["weekly_series"] = _weekly_series(today, plan_id, sessions)
+        out["weekly_series"] = _weekly_series(today, plan_id, sessions, plan, runs_day)
     else:
         out["week_load"] = out["race"] = out["kpis"] = None
         out["today_workouts"] = []

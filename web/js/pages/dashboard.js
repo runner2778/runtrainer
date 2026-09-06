@@ -61,10 +61,11 @@ const HTML = `
       <h2>本周负荷</h2>
       <div class="hero">
         <span class="big" x-text="fmtKm(d.week_load.done_km)"></span>
-        <span class="unit" x-text="' / ' + d.week_load.planned_km + ' km'"></span>
+        <span class="unit" x-show="d.week_load.planned_n > 0" x-text="' / ' + d.week_load.planned_km + ' km'"></span>
+        <span class="unit" x-show="!d.week_load.planned_n" x-text="' km'"></span>
       </div>
       <div class="progress mt8"><div class="progress-fill" :style="'width:' + (d.week_load.pct || 0) + '%'"></div></div>
-      <p class="muted mt8" x-text="'已完成 ' + d.week_load.done_n + ' 次 / 计划 ' + d.week_load.planned_n + ' 次 · 课表完成 ' + d.week_load.done_plan + ' 节 · 上周 ' + fmtKm(d.kpis.last_week_km) + ' km'"></p>
+      <p class="muted mt8" x-text="weekLoadNote()"></p>
     </div>
   </div>
 
@@ -72,7 +73,7 @@ const HTML = `
     <div class="card stat-tile">
       <div class="t-label">近 7 天执行率</div>
       <div class="t-val" x-text="d.kpis.compliance_7d && d.kpis.compliance_7d.ratio != null ? Math.round(d.kpis.compliance_7d.ratio * 100) + '%' : '—'"></div>
-      <div class="t-hint" x-show="d.kpis.compliance_7d" x-text="'完成 ' + d.kpis.compliance_7d.done_km + ' / 计划 ' + d.kpis.compliance_7d.planned_km + ' km'"></div>
+      <div class="t-hint" x-show="d.kpis.compliance_7d" x-text="complHint()"></div>
     </div>
     <div class="card stat-tile">
       <div class="t-label">ACWR（急/慢性负荷比）</div>
@@ -106,10 +107,11 @@ const HTML = `
         <span x-text="w.title"></span>
         <span class="spacer"></span>
         <span class="muted" x-text="workoutLine(w)"></span>
-        <span class="badge soft" x-text="statusLabel(w.status)"></span>
+        <span class="badge soft" x-text="statusLabel(w.status, w.auto_done)"></span>
       </div>
     </template>
-    <p class="muted" x-show="!d.today_workouts.length">今天休息 🎉 没有训练安排</p>
+    <p class="muted" x-show="!d.today_workouts.length"
+       x-text="d.race && d.race.progress_pct > 0 ? '今天休息 🎉 没有训练安排' : '课表还未开始：开课前的日子没有计划课，可以自由跑'"></p>
   </div>
 
   <!-- 成绩水平预估：近 30 天数据综合（比赛/手表 VO2max/配速-心率/间歇），
@@ -186,7 +188,7 @@ const HTML = `
     <div class="chart" id="dash-weekly-chart"></div>
     <table class="mt8">
       <thead><tr>
-        <th>周（起始）</th><th class="num">计划 km</th><th class="num">实际 km</th><th class="num">完成率</th>
+        <th>周（起始）</th><th class="num">计划 km</th><th class="num">实际 km</th><th class="num">执行率</th>
       </tr></thead>
       <tbody>
         <template x-for="r in d.weekly_series" :key="r.week_start">
@@ -194,7 +196,7 @@ const HTML = `
             <td class="num" x-text="r.label"></td>
             <td class="num" x-text="r.planned_km"></td>
             <td class="num" x-text="r.done_km"></td>
-            <td class="num" x-text="r.planned_km > 0 ? Math.round(r.done_km / r.planned_km * 100) + '%' : '—'"></td>
+            <td class="num" :title="r.planned_km > 0 ? '计划日覆盖比（实际跑量只按计划量封顶配对，自由跑不计）' : '课表周期外'" x-text="r.planned_km > 0 && r.coverage != null ? Math.round(r.coverage * 100) + '%' : '—'"></td>
           </tr>
         </template>
         <tr x-show="!d.weekly_series.length"><td colspan="4" class="muted">暂无跑步数据</td></tr>
@@ -316,9 +318,46 @@ export function initDashboard() {
       return { recent_race: '近期比赛', garmin_vo2max: '手表 VO2max',
                threshold_trend: '配速-心率阈值', cruise_ability: '节奏/巡航跑',
                t_intervals: '阈值型间歇', hrr_pace: 'HRR 有氧配速',
-               interval_ability: '间歇能力', year_best: '近一年最佳',
+               interval_ability: '间歇能力', quality_workouts: '近期专项强度课',
+               cap_check: '上限校验', year_best: '近一年最佳',
                hr_trend: '配速-心率趋势',
                plan_execution: '课表完成度' }[src] || src;
+    },
+    weekLoadNote() {
+      const w = (this.d || {}).week_load;
+      if (!w) return '';
+      if (!w.planned_n) {
+        return w.done_n
+          ? '课表周期内还没有计划课——本周已自由跑 ' + w.done_n + ' 次 '
+            + this.fmtKm(w.done_km) + ' km，不计入课表执行率'
+          : '课表周期内还没有计划课（开课前的自由跑不计执行率）';
+      }
+      let t = '已完成 ' + w.done_n + ' 次 / 计划 ' + w.planned_n + ' 次'
+        + ' · 课表执行 ' + w.done_plan + ' 节'
+        + ' · 计划日覆盖 ' + this.fmtKm(w.covered_km) + '/' + this.fmtKm(w.planned_km) + ' km';
+      if (w.done_km > w.covered_km) {
+        t += '（计划日实际 ' + this.fmtKm(w.done_km) + ' km）';
+      }
+      const k = (this.d.kpis || {}).last_week_km;
+      if (k != null) t += ' · 上周 ' + this.fmtKm(k) + ' km';
+      return t;
+    },
+    complHint() {
+      const c = (this.d.kpis || {}).compliance_7d;
+      if (!c) return '';
+      if (c.ratio == null) {
+        return c.planned_km === 0
+          ? '计划窗口内暂无课（课表未开始或已结束）' : '无计划课跑量';
+      }
+      let t = '覆盖 ' + this.fmtKm(c.covered_km) + ' / 计划 '
+        + this.fmtKm(c.planned_km) + ' km';
+      if (c.planned_days) {
+        t += ' · 达成 ' + c.covered_days + '/' + c.planned_days + ' 天';
+      }
+      if (c.done_km != null && c.done_km > c.covered_km) {
+        t += '（计划日实际跑 ' + this.fmtKm(c.done_km) + ' km，超出按计划量封顶）';
+      }
+      return t;
     },
     zoneOf(kind) {
       const z = KIND_ZONES[kind];
@@ -367,7 +406,12 @@ export function initDashboard() {
       if (w.duration_min) parts.push(this.fmtMin(w.duration_min));
       return parts.join(' · ');
     },
-    statusLabel(st) { return { completed: '已完成', skipped: '已跳过', planned: '待完成' }[st] || st; },
+    statusLabel(st, auto) {
+      if (st === 'completed') return '已完成';
+      if (st === 'skipped') return '已跳过';
+      if (auto) return '已跑 ✓（当日跑量自动匹配）';
+      return '待完成';
+    },
     roleLabel(r) { return r === 'coach' ? '教练' : '你'; },
     readyCls(s) { return { good: 'st-good', ok: 'st-warning', low: 'st-critical' }[s] || 'muted'; },
     pillCls(s) { return { good: 'st-good', ok: 'st-warning', low: 'st-critical' }[s] || ''; },

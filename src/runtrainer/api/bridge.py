@@ -183,6 +183,22 @@ class Api:
                 if s.get("type") in ("tempo", "reps") and not s.get("rest_mode"):
                     s["rest_mode"] = "any" if s.get("zone") == "R" else "jog"
             w["segments"] = segs
+        # 完成判定（读取侧自动配对，不写库）：某课当天跑的实际跑量 ≥ 计划量
+        # 一半（且 ≥0.8km）即视为已执行——用户常不手动勾完成。日历 ✓ 标记与
+        # dashboard/进度口径一致；skipped/力量课不参与
+        from ..domain import load_metrics
+        from ..utils import dates as _dates
+        from ..db.repos import activity_repo
+        auto: set[int] = set()
+        if start_date and end_date:
+            runs: dict[str, float] = {}
+            for a in activity_repo.list_activities(start_date, end_date, limit=2000):
+                if a.get("distance_m") and load_metrics.is_running(a.get("sport")):
+                    day = _dates.ts_to_date(a["start_ts"]).isoformat()
+                    runs[day] = runs.get(day, 0.0) + a["distance_m"] / 1000.0
+            auto = load_metrics.workout_auto_done(ws, runs)
+        for w in ws:
+            w["auto_done"] = w["id"] in auto
         return ws
 
     @envelope
@@ -205,7 +221,11 @@ class Api:
         today = dates.today()
         today_s = today.isoformat()
         start = _date.fromisoformat(plan["start_date"])
-        ws = plan_repo.get_workouts(plan["id"])
+        race = _date.fromisoformat(plan["race_date"])
+        # 计划口径只看课表生命周期 [start_date, race_date] 内的课：开课前/比赛
+        # 日之后的旧行、预备课不参与进度与执行率（跟随课表开始/结束）
+        ws = [w for w in plan_repo.get_workouts(plan["id"])
+              if plan["start_date"] <= w["date"] <= plan["race_date"]]
         # 时期时间线（0 周的截断时期不展示）
         phases, cursor = [], start
         for p in PHASE_ORDER:
@@ -216,17 +236,24 @@ class Api:
             phases.append({"phase": p, "weeks": wks, "start_date": cursor.isoformat(),
                            "end_date": end.isoformat(), "current": cursor <= today <= end})
             cursor += timedelta(days=wks * 7)
-        # 完成进度：已过日期的课完成情况
+        from ..domain import load_metrics
+        # 实际跑步按日汇总（只认跑步：跨训练不是执行课表）
+        runs_day: dict[str, float] = {}
+        for a in activity_repo.list_activities(plan["start_date"], today_s, limit=3000):
+            if a.get("distance_m") and load_metrics.is_running(a.get("sport")):
+                day = dates.ts_to_date(a["start_ts"]).isoformat()
+                runs_day[day] = runs_day.get(day, 0.0) + a["distance_m"] / 1000.0
+        # 完成进度：已过日期课 + 自动完成判定（当天跑步 ≥ 半程计划量视为已执行，
+        # 用户不手动勾完成也能推进进度）
         past = [w for w in ws if w["date"] <= today_s]
-        done = sum(1 for w in past if w["status"] == "completed")
-        # 近 4 周计划 vs 实际跑量（窗口不早于计划开始日：新计划前几周课少，
-        # 用 4 周实际跑量对比会把执行率撑爆）
+        auto = load_metrics.workout_auto_done(past, runs_day)
+        done = sum(1 for w in past
+                   if w["status"] == "completed" or w["id"] in auto)
+        # 近 4 周执行覆盖（窗口不早于计划开始日；按计划日配对、逐日封顶，
+        # 计划外自由跑不计——新计划前几周课少时不会用海量自由跑撑爆执行率）
         win_start = max(start, today - timedelta(days=27))
-        win_start_s = win_start.isoformat()
-        planned_km = sum((w.get("distance_km") or 0) for w in ws
-                         if win_start_s <= w["date"] <= today_s)
-        acts = activity_repo.list_activities(win_start_s, today_s, limit=1000)
-        done_km = sum((a.get("distance_m") or 0) for a in acts) / 1000.0
+        win_rows = [w for w in ws if win_start.isoformat() <= w["date"] <= today_s]
+        cov = load_metrics.plan_coverage(win_rows, runs_day)
         weeks_total = int(plan["total_weeks"])
         weeks_elapsed = max(0.0, min(float(weeks_total), (today - start).days / 7.0))
         return {
@@ -234,8 +261,10 @@ class Api:
             "total_weeks": weeks_total, "weeks_elapsed": round(weeks_elapsed, 1),
             "phases": phases,
             "workouts_past": len(past), "workouts_done": done,
-            "planned_km_4w": round(planned_km, 1), "done_km_4w": round(done_km, 1),
-            "compliance_4w": round(done_km / planned_km, 2) if planned_km > 0 else None,
+            "planned_km_4w": cov["planned_km"], "done_km_4w": cov["done_km"],
+            "covered_km_4w": cov["covered_km"],
+            "planned_days_4w": cov["planned_days"], "covered_days_4w": cov["covered_days"],
+            "compliance_4w": cov["ratio"],
         }
 
     # ---- 目标向导与计划生成 ----
