@@ -36,6 +36,40 @@ def _start_web_server() -> str:
     return f"http://127.0.0.1:{server.server_address[1]}/index.html"
 
 
+def _apply_window_icon(title: str) -> None:
+    """把窗口（标题栏/任务栏）图标换成应用图标。
+
+    pywebview 的 icon 参数只支持 GTK/QT（Windows 端窗口图标取 exe 资源，
+    源码运行时是 python.exe 的默认图标），所以对 HWND 直接发 WM_SETICON。
+    ICO 含多尺寸：标题栏/任务栏用小尺寸，Alt-Tab 用 32px 大尺寸。
+    64 位句柄坑：LoadImageW 返回 HICON，restype 不声明 c_void_p 会被截断成
+    野指针（与剪贴板 GlobalLock 同一教训）；SendMessageW 的 wParam/lParam
+    同理要按 ssize_t 声明 argtypes，否则 HICON 传参被截断。
+    """
+    try:
+        import ctypes
+        icon = config.icon_path()
+        if not icon.exists():
+            log.warning("应用图标缺失：%s", icon)
+            return
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                        ctypes.c_ssize_t, ctypes.c_ssize_t]
+        hwnd = user32.FindWindowW(None, title)
+        if not hwnd:
+            log.warning("找不到窗口（%s），无法设置图标", title)
+            return
+        for which, size in ((0, 16), (1, 32)):  # ICON_SMALL / ICON_BIG
+            hic = user32.LoadImageW(None, str(icon), 1, size, size, 0x10)  # IMAGE_ICON + LR_LOADFROMFILE
+            if hic:
+                user32.SendMessageW(hwnd, 0x80, which, hic)  # WM_SETICON
+            else:
+                log.warning("图标加载失败：%s %dpx", icon, size)
+    except Exception:  # noqa: BLE001
+        log.exception("窗口图标设置失败")
+
+
 def _restore_foreground(window) -> None:
     """确保窗口可见并位于前台。
 
@@ -117,8 +151,10 @@ def run() -> None:
     )
 
     def on_loaded() -> None:
-        # 进程被以最小化方式拉起时（如脚本后台启动），延迟恢复窗口到前台
-        threading.Timer(2.5, lambda: _restore_foreground(window)).start()
+        # 窗口就绪后设置自定义图标（WM_SETICON）；进程被以最小化方式拉起时
+        # （如脚本后台启动），延迟恢复窗口到前台
+        threading.Timer(2.5, lambda: (_apply_window_icon(config.APP_TITLE),
+                                      _restore_foreground(window))).start()
 
     window.events.loaded += on_loaded
     try:

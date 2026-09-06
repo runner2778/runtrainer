@@ -28,6 +28,14 @@ def web_dir() -> Path:
     return Path(__file__).resolve().parents[2] / "web"
 
 
+def icon_path() -> Path:
+    """应用图标（黑红闪电，tools/make_icon.py 生成的多尺寸 ICO）。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "assets" / "supertrainer.ico"
+    return Path(__file__).resolve().parents[2] / "assets" / "supertrainer.ico"
+
+
 def ensure_dirs() -> None:
     for d in (DATA_DIR, RAW_DIR, LOG_DIR):
         d.mkdir(parents=True, exist_ok=True)

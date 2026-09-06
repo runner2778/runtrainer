@@ -43,6 +43,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="SuperTrainer",
+    icon="assets/supertrainer.ico",   # exe 资源图标（资源管理器/任务栏）
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
