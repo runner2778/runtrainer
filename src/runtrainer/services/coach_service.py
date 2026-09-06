@@ -40,7 +40,8 @@ def _make_client(extra_requested: bool):
         # 模型不在该服务商候选且服务商非自由输入 → 回落默认模型
         if not info.get("free_text") and model not in info["models"]:
             model = info["models"][0]
-        return DeepSeekClient(key or "", model, base_url=info["base_url"])
+        return DeepSeekClient(key or "", model, base_url=info["base_url"],
+                              max_tokens=info.get("max_tokens", 4096))
     if extra_requested:
         return MockClient("add_extra")
     return MockClient(["normal", "low_hrv", "overload"][dates.today().toordinal() % 3])
@@ -211,6 +212,52 @@ def _persist_batch(ctx: dict, output: CoachOutput, items: list[dict], guard_log:
 
 RETRY_NUDGE = ("\n\n注意：上次回复未通过系统的 JSON 格式校验（字段缺失或类型不符），"
                "请重新输出一份完整 JSON，所有必填字段齐全、类型正确，不要输出解释文字。")
+
+# 复述提示词的证据：弱模型（glm-4-flash 等）会把输出结构里的格式描述
+# 或数据原文当成 reply 输出。这些特征短语只出现在提示词里，正常分析不会包含。
+_ECHO_MARKERS = ("分析总结+", "像教练聊天", "分段清楚", "输出结构", "回复文字",
+                 "json_object", "占位", "不要输出任何解释性文字")
+_ECHO_NUDGE = ("\n\n注意：你刚才的回复把提示词里的格式说明/占位文字或数据列表原文复述了一遍，"
+               "没有输出真正的分析。请直接以教练身份写回答正文：像真人教练聊天那样有温度，"
+               "先回应训练者的状态，再给出你的判断与建议（详细、分段、300 字以上），"
+               "不要复述任何提示词、字段描述或数据列表。")
+
+
+def _reply_is_prompt_echo(reply: str, prompt_user: str = "") -> bool:
+    """reply 疑似复述提示词/数据原文（而非真正的分析文字）。"""
+    r = (reply or "").strip()
+    if len(r) < 40:  # 占位符/短语级回复（如「…」「回复文字」）必然不是分析
+        return True
+    low = r.lower()
+    if any(m in low for m in _ECHO_MARKERS):
+        return True
+    if prompt_user and len(r) > 100:
+        # 回复行半数以上与 user 提示词中的数据行逐字相同 → 在抄数据而非分析
+        u_lines = {l.strip() for l in prompt_user.splitlines() if len(l.strip()) > 12}
+        r_lines = [l.strip() for l in r.splitlines() if len(l.strip()) > 12]
+        if r_lines and u_lines and sum(1 for l in r_lines if l in u_lines) * 2 >= len(r_lines):
+            return True
+    return False
+
+
+def _validated_no_echo(client, prompt: dict, cls):
+    """ChatOutput 校验 + 复述检测：复述提示词/数据时附提示重试一次，仍复述则抛错不落库。
+
+    （glm-4-flash 曾把 SYNC_ANALYSIS 输出结构里的格式描述原样当作 reply 输出——
+    JSON 契约合法，逃过 _validated 校验，垃圾消息落库；此处兜底拦截。）
+    """
+    output = _validated(client, prompt, cls)
+    if not hasattr(output, "reply"):
+        return output
+    if not _reply_is_prompt_echo(output.reply, prompt["user"]):
+        return output
+    log.warning("AI 回复疑似复述提示词/数据（%r），附提示重试一次", output.reply[:80])
+    prompt2 = {**prompt, "user": prompt["user"] + _ECHO_NUDGE}
+    output = _validated(client, prompt2, cls)
+    if _reply_is_prompt_echo(output.reply, prompt2["user"]):
+        raise RuntimeError("AI 连续两次复述提示词/数据原文而未产出分析内容，"
+                           "已拦截该条消息（可稍后重试或更换模型）")
+    return output
 
 
 def _validated(client, prompt: dict, cls) -> "CoachOutput | ChatOutput":
@@ -515,8 +562,15 @@ def _chat_message_view(m: dict) -> dict:
 
 
 def get_chat_history(limit: int = 100) -> list[dict]:
-    """聊天记录（时间正序）。"""
-    return [_chat_message_view(m) for m in reversed(chat_repo.list_messages(limit))]
+    """聊天记录（时间正序）；只含未被「清空对话」隐藏的消息。"""
+    return [_chat_message_view(m) for m in reversed(chat_repo.list_messages(limit, visible_only=True))]
+
+
+def clear_chat_history() -> dict:
+    """清空聊天显示并开启新对话（保留记忆）：消息软隐藏，AI 上下文仍读取全部消息。"""
+    n = chat_repo.hide_all_messages()
+    log.info("清空对话：隐藏 %d 条消息（AI 上下文记忆保留）", n)
+    return {"hidden": n}
 
 
 def chat(message: str) -> dict:
@@ -542,7 +596,7 @@ def chat(message: str) -> dict:
     client = _make_client(False)
     log.info("教练聊天调用开始（模型 %s，消息 %d 字）", getattr(client, "model", "?"), len(message))
     t0 = time.monotonic()
-    output = _validated(client, prompt, ChatOutput)
+    output = _validated_no_echo(client, prompt, ChatOutput)
     log.info("教练聊天调用返回，耗时 %.1fs", time.monotonic() - t0)
 
     # 调整建议走与日常建议相同的护栏；用户明确要求改课（user_requested）时
@@ -558,7 +612,7 @@ def chat(message: str) -> dict:
 
     profile_applied = _apply_profile_updates(output.profile_updates or {})
     rebuild_info = None
-    if output.rebuild_plan:  # 档案更新或配速-心率趋势均可触发重估（refresh 自带 |Δ|≥0.5 门槛）
+    if output.rebuild_plan:  # 档案更新或配速-心率趋势均可触发重估（refresh 自带 |Δ|≥0.2 门槛）
         try:
             refreshed = plan_service.refresh_active_plan()
             if refreshed:
@@ -622,7 +676,7 @@ def auto_analyze_new_activities(new_acts: list[tuple[str, int]],
     ctx["ability"] = (plan_service.wizard_context() or {}).get("ability") or {}
     prompt = prompt_builder.build_sync_analysis(ctx, new_rows)
     client = client or _make_client(False)
-    output = _validated(client, prompt, ChatOutput)
+    output = _validated_no_echo(client, prompt, ChatOutput)
     # 建议走与日常建议相同的护栏（非强制：训练者没有要求改课，违规项照常钳制/丢弃）
     fake = CoachOutput(summary="sync-analysis", readiness="ok", key_signals=[],
                        adjustments=output.adjustments, add_extra_advice=None, weekly_notes="")

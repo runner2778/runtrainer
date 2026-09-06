@@ -203,7 +203,8 @@ def test_validated_retries_once_then_succeeds(monkeypatch, plan):
             calls.append(user)
             if len(calls) == 1:
                 return {"reply": 123, "adjustments": [], "profile_updates": {}, "rebuild_plan": False}
-            return {"reply": "好的，已按你的要求处理。", "adjustments": [], "profile_updates": {},
+            return {"reply": "好的，我已按你的要求把强度课改轻松：换成轻松跑、配速按 E 区执行，"
+                    "时长保持原样，记得充分热身和放松。", "adjustments": [], "profile_updates": {},
                     "rebuild_plan": False}
 
     monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
@@ -211,7 +212,7 @@ def test_validated_retries_once_then_succeeds(monkeypatch, plan):
     res = coach_service.chat("帮我把强度课改轻松")
     assert len(calls) == 2, "首次校验失败应重试一次"
     assert "JSON 格式校验" in calls[1]
-    assert res["reply"]["content"] == "好的，已按你的要求处理。"
+    assert "强度课改轻松" in res["reply"]["content"]
 
 
 def test_validated_both_fail_raises_friendly(monkeypatch, plan):
@@ -271,7 +272,8 @@ def test_chat_adjustment_apply_flow(monkeypatch, plan):
     _patch_today(monkeypatch, dates.date.fromisoformat(d))
     target = next(w for w in ws if w["date"] == d)
     client = _FakeChatClient({
-        "reply": "好的，我把那天的课改轻松一点。",
+        "reply": "好的，我已把那天的课改成轻松跑：按 E 区配速执行，时长保持原样，"
+                 "强度降下来更利于你恢复和积累有氧基础。",
         "adjustments": [{
             "date": d, "planned_workout_id": target["id"], "action": "modify",
             "changes": {"kind": "E", "pace_zone": "E"},
@@ -304,7 +306,8 @@ def test_chat_forced_adjustment_auto_applies(monkeypatch, plan):
     _patch_today(monkeypatch, dates.date.fromisoformat(d))
     target = next(w for w in ws if w["date"] == d)
     client = _FakeChatClient({
-        "reply": "好的，按你的要求改。",
+        "reply": "好的，已按你的要求执行：那天改轻松跑、配速按 E 区，其余课保持不动，"
+                 "注意赛前恢复。",
         "user_requested": True,
         "adjustments": [{
             "date": d, "planned_workout_id": target["id"], "action": "modify",
@@ -339,7 +342,8 @@ def test_chat_forced_failed_apply_stays_pending(monkeypatch, plan):
     _patch_today(monkeypatch, dates.date.fromisoformat(d))
     target = next(w for w in ws if w["date"] == d)
     client = _FakeChatClient({
-        "reply": "好的，按你的要求改。",
+        "reply": "好的，已按你的要求执行：那天改轻松跑、配速按 E 区，其余课保持不动，"
+                 "注意赛前恢复。",
         "user_requested": True,
         "adjustments": [{
             "date": d, "planned_workout_id": target["id"], "action": "modify",
@@ -373,7 +377,8 @@ def test_modify_to_long_run_aligns_title_and_segments(monkeypatch, plan):
     target = next(w for w in ws if w["date"] == d)
     assert target["kind"] in ("T", "I", "R"), "fixture 质量课"
     client = _FakeChatClient({
-        "reply": "好的，把那天的课改成长距离。",
+        "reply": "好的，我已把那天的课改成长距离：距离保持不变，配速按 E 区慢摇，"
+                 "前 10 分钟充分热身再进入主题。",
         "adjustments": [{
             "date": d, "planned_workout_id": target["id"], "action": "modify",
             "changes": {"kind": "LR", "pace_zone": "E"},
@@ -400,7 +405,8 @@ def test_chat_profile_updates_guarded(monkeypatch, plan):
     d = _hard_date(ws)
     _patch_today(monkeypatch, dates.date.fromisoformat(d))
     client = _FakeChatClient({
-        "reply": "收到，已按你的说明更新档案。",
+        "reply": "收到，我已按你的说明更新了档案数据：后续训练配速与强度区间"
+                 "会按新的数值重新计算。",
         "adjustments": [],
         "profile_updates": {"rest_hr": 45, "max_hr": 999, "unknown_key": 1},
         "rebuild_plan": False,
@@ -449,7 +455,8 @@ def test_sync_analysis_creates_coach_message(monkeypatch, plan):
     ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
     _insert_activity(ts)
     client = _FakeChatClient({
-        "reply": "本次训练执行不错，未来几天注意恢复。",
+        "reply": "今天的训练执行得不错：8km 配速 5:38/km，心率 145 稳定在合理区间。"
+                 "未来几天保持轻松跑节奏，注意补足睡眠与碳水，周四的强度课按课表正常执行。",
         "adjustments": [{
             "date": d, "planned_workout_id": target["id"], "action": "modify",
             "changes": {"kind": "E", "pace_zone": "E"},
@@ -488,7 +495,8 @@ def test_sync_analysis_no_adjustments_still_posts(monkeypatch, plan):
     ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
     _insert_activity(ts)
     client = _FakeChatClient({
-        "reply": "跑得很好，继续保持。",
+        "reply": "这次跑得很好：配速与心率都在有氧区间，训练效果符合预期。"
+                 "接下来几天继续保持轻松节奏，注意睡眠恢复，下节课正常执行即可。",
         "adjustments": [],
         "profile_updates": {}, "rebuild_plan": False,
     })
@@ -496,7 +504,7 @@ def test_sync_analysis_no_adjustments_still_posts(monkeypatch, plan):
     res = coach_service.auto_analyze_new_activities([("act-new-1", ts)], client=client)
     assert res and res["adjustment_count"] == 0
     view = coach_service.get_chat_history()[0]
-    assert view["kind"] == "sync_analysis" and view["content"] == "跑得很好，继续保持。"
+    assert view["kind"] == "sync_analysis" and "这次跑得很好" in view["content"]
     assert view["adjustments"] == []
 
 
@@ -519,7 +527,8 @@ def test_chat_context_includes_recent_activity_details(monkeypatch, plan):
     ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 7 * 3600
     _insert_activity(ts, distance_m=12345.0)
     client = _FakeChatClient({
-        "reply": "你今天跑了 12.3 公里。",
+        "reply": "你今天完成了 12.3 公里，配速 5:38/km，心率 145 处于有氧区间，"
+                 "整体执行质量不错，注意拉伸与补水。",
         "adjustments": [],
         "profile_updates": {}, "rebuild_plan": False,
     })
@@ -530,3 +539,103 @@ def test_chat_context_includes_recent_activity_details(monkeypatch, plan):
     assert "12.3" in user and "km" in user and "配速5:38/km" in user
     assert "心率145" in user and "步频178" in user and "训练效果3.2/0.5" in user
     assert "负荷120" in user
+
+
+# ---------------- 第十一批：复述防护 + 清空对话（保留记忆） ----------------
+
+class _SequenceChatClient:
+    """按顺序返回预设输出的假客户端（复述重试场景）。"""
+
+    def __init__(self, outputs: list[dict]):
+        self.outputs = list(outputs)
+        self.calls: list[dict] = []
+        self.model = "glm-4-flash"
+
+    def chat_json(self, system, user, data=None):
+        self.calls.append({"system": system, "user": user, "data": data})
+        return self.outputs.pop(0)
+
+
+_ECHO_REPLY = {"reply": "分析总结+未来几天建议（中文，像教练聊天，分段清楚）",
+               "adjustments": [], "profile_updates": {}, "rebuild_plan": False}
+
+
+def test_sync_analysis_prompt_echo_retried_once(monkeypatch, plan):
+    """glm-4-flash 复述提示词格式描述 → 附反复述提示重试一次 → 正常回复落库。"""
+    from runtrainer.db.repos import chat_repo
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
+    _insert_activity(ts)
+    client = _SequenceChatClient([
+        _ECHO_REPLY,
+        {"reply": "今天完成 8km 轻松跑，配速 5:38/km，心率 145 处于有氧区间，执行到位。"
+                  "近 8 周负荷平稳，接下来几天保持轻松跑节奏，把睡眠补足到 7 小时以上。",
+         "adjustments": [], "profile_updates": {}, "rebuild_plan": False},
+    ])
+    _real_mode(monkeypatch, client)
+    res = coach_service.auto_analyze_new_activities([("act-new-1", ts)], client=client)
+    assert res and res["message_id"]
+    assert len(client.calls) == 2
+    assert "不要复述" in client.calls[1]["user"]   # 重试时附了反复述提示
+    view = coach_service.get_chat_history()[0]
+    assert "5:38" in view["content"]
+    assert chat_repo.list_messages()[0]["kind"] == "sync_analysis"
+
+
+def test_sync_analysis_echo_twice_blocks_message(monkeypatch, plan):
+    """连续两次复述提示词 → 拦截不落库（垃圾消息不再出现），游标不推进可重试。"""
+    from runtrainer.db.repos import chat_repo, sync_repo
+    from runtrainer.utils import jsonutil
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    ts = dates.date_to_ts(dates.date.fromisoformat(d)) + 8 * 3600
+    _insert_activity(ts)
+    client = _SequenceChatClient([_ECHO_REPLY, _ECHO_REPLY])
+    _real_mode(monkeypatch, client)
+    with pytest.raises(RuntimeError, match="复述"):
+        coach_service.auto_analyze_new_activities([("act-new-1", ts)], client=client)
+    assert len(client.calls) == 2
+    assert coach_service.get_chat_history() == []   # 垃圾消息不落库
+    state = sync_repo.get_sync_state("garmin") or {}
+    meta = jsonutil.loads(state.get("meta_json")) if state.get("meta_json") else {}
+    assert meta.get("last_analysis_act_ts") is None  # 游标不推进，下次同步重试
+
+
+def test_chat_prompt_echo_blocked(monkeypatch, plan):
+    """聊天里复述占位文字（如「回复文字」）→ 重试后仍复述 → 拦截，不产生对话记录。"""
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    echo = {"reply": "回复文字", "user_requested": False, "adjustments": [],
+            "profile_updates": {}, "rebuild_plan": False}
+    client = _SequenceChatClient([echo, echo])
+    _real_mode(monkeypatch, client)
+    with pytest.raises(RuntimeError, match="复述"):
+        coach_service.chat("我今天跑得怎么样？")
+    assert coach_service.get_chat_history() == []
+
+
+def test_clear_chat_history_hides_ui_keeps_memory(monkeypatch, plan):
+    """清空对话：UI 不再显示旧消息，但 AI 上下文仍读取（保留教练记忆）。"""
+    from runtrainer.db.repos import chat_repo
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    client = _FakeChatClient({
+        "reply": "这是一条比较详细的教练回复，包含了对今天训练的分析以及未来几天的建议，"
+                 "内容足够长，请继续保持。",
+        "adjustments": [], "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    coach_service.chat("你好，我昨天跑得有点累")
+    assert len(coach_service.get_chat_history()) == 2
+    assert coach_service.clear_chat_history()["hidden"] == 2
+    assert coach_service.get_chat_history() == []          # UI 不再显示
+    assert all(m["hidden"] == 1 for m in chat_repo.list_messages())  # 消息仍在
+    # 清空后继续对话：教练上下文仍包含此前交流（记忆保留）
+    coach_service.chat("还记得我之前说的吗？")
+    assert len(client.calls) == 2
+    assert "跑得有点累" in client.calls[1]["user"]

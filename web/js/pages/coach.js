@@ -133,8 +133,15 @@ const HTML = `
     <div class="card">
       <div class="flex between">
         <h2>教练聊天 <span class="muted">训练感受 · 改课请求 · 身体反馈</span></h2>
+        <button class="btn ghost" @click="clearChat()"
+                title="清空聊天显示并开启新对话（教练仍记得之前的交流与你的训练数据）">
+          <span x-text="_confirmClear ? '再点一次确认清空' : '🗑 清空对话'"></span>
+        </button>
       </div>
-      <div class="chat-log mt8" id="coach-chat-log">
+      <div class="mv-center mt8" x-show="chatHasMore">
+        <button class="btn ghost small" @click="loadEarlier()">↑ 加载更早的消息</button>
+      </div>
+      <div class="chat-log mt8" id="coach-chat-log" @scroll="onChatScroll()">
         <p class="muted mv-center" x-show="!messages.length">和教练聊聊吧：想改哪天的课、最近的身体感觉、出差安排……教练会结合你的健康数据与课表回答，需要改课时会给出可批准的调整。</p>
         <template x-for="m in messages" :key="m.id">
           <div class="chat-row" :class="'chat-' + m.role">
@@ -249,11 +256,15 @@ export function initCoach() {
     advice: null,
     history: [],
     messages: [],
+    chatHasMore: false,
     chatInput: '',
     chatWorking: false,
     loading: true,
     working: false,
     error: '',
+    // 是否吸附在聊天底部：用户向上翻历史时自动取消，发送消息/首载时置回
+    _stickBottom: true,
+    _confirmClear: false,
     ACTION_LABELS,
     KIND_LABELS,
     ZONE_LABELS,
@@ -280,15 +291,50 @@ export function initCoach() {
       this.history = data.history || [];
       await this.loadMessages();
     },
-    async loadMessages() {
-      const { ok, data } = await tryCall('get_chat_history', 100);
-      if (ok) this.messages = data || [];
+    async loadMessages(limit = 60) {
+      // 首屏只取最近 60 条（调整详情重，避免一次渲染上百条）；
+      // 吸附底部时加载后滚到底，向上翻历史时保持视口位置不变
+      const el = document.getElementById('coach-chat-log');
+      const prevH = el ? el.scrollHeight : 0;
+      const { ok, data } = await tryCall('get_chat_history', limit);
+      if (!ok) return;
+      this.messages = data || [];
+      this.chatHasMore = (data || []).length >= limit;
+      await this.$nextTick();
+      if (this._stickBottom) this.scrollChat();
+      else if (el) el.scrollTop += el.scrollHeight - prevH;
+    },
+    async loadEarlier() {
+      this._stickBottom = false;
+      await this.loadMessages(500);
+    },
+    onChatScroll() {
+      const el = document.getElementById('coach-chat-log');
+      if (!el) return;
+      // 距底部超过 40px 视为用户在看历史，暂停自动滚底
+      this._stickBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    },
+    async clearChat() {
+      // 两步确认（WebView2 内 window.confirm 行为不可靠，用按钮二次点击代替）
+      if (!this._confirmClear) {
+        this._confirmClear = true;
+        setTimeout(() => { this._confirmClear = false; }, 4000);
+        return;
+      }
+      this._confirmClear = false;
+      const { ok, error } = await tryCall('clear_chat_history');
+      if (!ok) { this.$dispatch('toast', { text: '清空失败: ' + error }); return; }
+      this.messages = [];
+      this.chatHasMore = false;
+      this._stickBottom = true;
+      this.$dispatch('toast', { text: '已开启新对话（教练保留对你的训练数据和此前交流的记忆）' });
     },
     async send() {
       const text = this.chatInput.trim();
       if (!text || this.chatWorking) return;
       this.chatInput = '';
       this.chatWorking = true;
+      this._stickBottom = true;
       // 真实 API 响应可能数十秒：先乐观显示用户消息 + 思考中占位，避免空白等待
       this.messages.push({ id: 'local-' + Date.now(), role: 'user', content: text,
         adjustments: [], profile_updates: {} });

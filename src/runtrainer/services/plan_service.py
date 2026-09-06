@@ -216,7 +216,7 @@ def create_goal_and_plan(params: dict) -> dict:
 def refresh_active_plan() -> dict | None:
     """真实同步后按最新水平重建 active 课表（VDOT 动态变化入口）。
 
-    触发条件：新的水平依据（比赛/vo2max）与现计划差 ≥0.5，或现计划原本按默认值生成。
+    触发条件：新的水平依据（比赛/vo2max）与现计划差 ≥0.2，或现计划原本按默认值生成。
     沿用原目标与计划参数（比赛日/周数/跑量），保留过去日期的完成状态与关联活动。
     返回新计划 payload；无需重建时返回 None。
     """
@@ -228,7 +228,7 @@ def refresh_active_plan() -> dict | None:
     if new_vdot is None:
         return None
     old_vdot = float(plan["vdot"] or 0)
-    if plan.get("vdot_source") != "default" and abs(new_vdot - old_vdot) < 0.5:
+    if plan.get("vdot_source") != "default" and abs(new_vdot - old_vdot) < 0.2:
         return None
     goal = goal_repo.get_goal(plan["goal_id"])
     if not goal:

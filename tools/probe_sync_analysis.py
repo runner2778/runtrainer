@@ -35,16 +35,14 @@ print("\n".join(l for l in prompt["user"].splitlines()
 print("-- 上下文中的最近训练活动详情块行数 --")
 print(sum(1 for l in prompt["user"].splitlines() if l.startswith("- ")))
 client = coach_service._make_client(False)
-print("client:", type(client).__name__, getattr(client, "model", "?"))
-raw = client.chat_json(prompt["system"], prompt["user"], prompt["data"])
-print("-- 模型原始返回(前 800 字) --")
-print((raw if isinstance(raw, str) else repr(raw))[:800])
-
-out = ChatOutput.model_validate(raw) if isinstance(raw, dict) else None
-print("-- 契约校验 --")
+print("client:", type(client).__name__, getattr(client, "model", "?"),
+      "| max_tokens:", getattr(client, "max_tokens", "?"))
+# 走与生产相同的新链路：契约校验 + 复述检测（复述附提示重试一次，仍复述抛错）
+out = coach_service._validated_no_echo(client, prompt, ChatOutput)
+print("-- 契约校验 + 复述防护（_validated_no_echo 通过）--")
 print("user_requested:", out.user_requested, "| adjustments:", len(out.adjustments))
-print("reply 前 500 字:")
-print(out.reply[:500])
+print("reply（%d 字，全文）:" % len(out.reply))
+print(out.reply)
 fake = CoachOutput(summary="sync-analysis", readiness="ok", key_signals=[],
                    adjustments=out.adjustments, add_extra_advice=None, weekly_notes="")
 items, glog = guardrails.validate(fake, guardrails.GuardContext(**ctx["guard"]))

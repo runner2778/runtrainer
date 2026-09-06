@@ -285,6 +285,11 @@ class Api:
         return coach_service.get_chat_history(limit)
 
     @envelope
+    def clear_chat_history(self):
+        from ..services import coach_service
+        return coach_service.clear_chat_history()
+
+    @envelope
     def decide_chat_adjustments(self, message_id: int, approve: bool):
         from ..services import coach_service
         return coach_service.decide_chat_adjustments(message_id, approve)

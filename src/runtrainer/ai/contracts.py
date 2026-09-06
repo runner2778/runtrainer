@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # 加练建议的允许类型
 EXTRA_KINDS = ("E", "RECOVERY", "CROSS")
@@ -23,13 +23,25 @@ class ChangeSet(BaseModel):
     slot: int | None = None      # 一天两练时段（1/2）；add_easy 落在已有课当日时用 2
     note: str | None = None
 
+    @field_validator("slot", mode="before")
+    @classmethod
+    def _coerce_slot(cls, v):
+        # 弱模型（glm-4-flash 等）偶尔把 slot 写成字符串（如与 pace_zone 混淆
+        # 写成 "E"）：能转数字就转，语义不对按缺省处理（护栏已按 slot∈{1,2} 防御）
+        if isinstance(v, str):
+            try:
+                return int(v)
+            except ValueError:
+                return None
+        return v
+
 
 class AdjustmentItem(BaseModel):
     date: str = Field(description="调整生效日期 yyyy-mm-dd")
     planned_workout_id: int | None = Field(default=None, description="指向的课表 ID；add_easy 为 null")
     action: Literal["keep", "modify", "decrease", "rest", "add_easy", "shift", "skip"]
     changes: ChangeSet | None = None
-    reason: str = Field(min_length=1)
+    reason: str = Field(default="", description="调整理由（弱模型偶尔漏写，允许为空）")
 
 
 class ExtraSuggestion(BaseModel):

@@ -173,12 +173,18 @@ function boot() {
       await pasteInto(e.target);
     }
   });
-  // 同步完成（可能重建课表）→ 刷新当前页；仪表盘无视 2s 防双载强制刷新
+  // 同步完成（可能重建课表/新增活动/自动分析）→ 当前页全盘刷新：
+  // 有 syncRefresh 的页面（仪表盘/训练目标）无视 2s 防双载强制刷新；
+  // 其余页面清零 _lastLoad 后再 shown()，保证健康/活动/日历页在
+  // 同步刚结束（<2s 内）也能拿到最新数据
   window.addEventListener('sync-done', () => {
     const sec = document.getElementById('page-' + store.page);
     const data = sec && window.Alpine && window.Alpine.$data(sec);
     if (data && typeof data.syncRefresh === 'function') data.syncRefresh();
-    else if (data && typeof data.shown === 'function') data.shown();
+    else if (data && typeof data.shown === 'function') {
+      if (data._lastLoad) data._lastLoad = 0;
+      data.shown();
+    }
   });
   window.Alpine.start();
   loadBackendPrefs(store);

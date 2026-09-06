@@ -13,6 +13,9 @@ import webview  # noqa: E402
 
 from runtrainer.api.bridge import Api  # noqa: E402
 from runtrainer.app import _start_web_server  # noqa: E402
+from runtrainer.db import database  # noqa: E402
+
+database.migrate()  # 直接起 web 服务不经过 app 启动流程，探针自行执行迁移
 
 url = _start_web_server()
 print("加载:", url, flush=True)
@@ -204,28 +207,27 @@ def loaded():
         except Exception as e:  # noqa: BLE001
             out["clipboard"] = {"ok": False, "error": repr(e)}
 
-        # 8) 教练聊天：面板渲染 + 发送一条消息看回复
+        # 8) 教练聊天：面板渲染 + 滚动停留在最后对话 + 清空对话按钮（只读验证，
+        # 不真实发送消息——回复链路已由 tools/probe_chat_echo.py 只读探针覆盖）
         js("location.hash = '#/coach'")
         settle(3)
         out["coach_chat"] = json.loads(js(
             "JSON.stringify({log: !!document.querySelector('#coach-chat-log'),"
             " input: !!document.querySelector('#page-coach textarea.chat-input'),"
-            " sendBtn: [...document.querySelectorAll('#page-coach button')].some(b=>b.textContent.includes('发送'))})"))
-        js("(() => { const t = document.querySelector('#page-coach textarea.chat-input');"
-           " t.value = '你好教练，今天状态不错'; t.dispatchEvent(new Event('input'));"
-           " [...document.querySelectorAll('#page-coach button')].find(b=>b.textContent.includes('发送')).click(); })()")
-        probe = ("JSON.stringify({bubbles: document.querySelectorAll('#coach-chat-log .chat-row').length,"
-                 " coachTxt: (document.querySelector('#coach-chat-log .chat-coach .chat-text')||{textContent:''})"
-                 "  .textContent.slice(0,60),"
-                 " toast: (document.querySelector('#toast')||{textContent:''}).textContent.trim().slice(0,80)})")
-        out["chat_reply"] = json.loads(js(probe))
-        # 真实 DeepSeek 响应可达数十秒：轮询等待教练回复气泡或失败 toast
-        for _ in range(50):
-            settle(2)
-            res = json.loads(js(probe))
-            out["chat_reply"] = res
-            if res["toast"] or (res["coachTxt"] and "思考中" not in res["coachTxt"]):
-                break
+            " sendBtn: [...document.querySelectorAll('#page-coach button')].some(b=>b.textContent.includes('发送')),"
+            " clearBtn: !!([...document.querySelectorAll('#page-coach button')]"
+            "  .find(b => b.textContent.includes('清空对话'))),"
+            " bubbles: document.querySelectorAll('#coach-chat-log .chat-row').length,"
+            " stick: (() => { const el = document.getElementById('coach-chat-log');"
+            "  return el && el.scrollHeight > el.clientHeight"
+            "  ? el.scrollHeight - el.scrollTop - el.clientHeight < 20 : null; })()})"))
+        # 清空按钮两步确认：第一次点击只改变文案，不触发清空
+        js("[...document.querySelectorAll('#page-coach button')]"
+           ".find(b=>b.textContent.includes('清空对话')).click()")
+        settle(0.6)
+        out["clear_confirm"] = json.loads(js(
+            "JSON.stringify({twoStep: [...document.querySelectorAll('#page-coach button')]"
+            "  .some(b => b.textContent.includes('再点一次确认清空'))})"))
 
         # 9) 同步横幅（启动自动同步结果）
         out["banner"] = json.loads(js(

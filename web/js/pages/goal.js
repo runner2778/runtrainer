@@ -316,6 +316,12 @@ export function initGoal() {
       const plan = await tryCall('get_active_plan');
       this.hasPlan = !!plan.data;
     },
+    async syncRefresh() {
+      // 同步完成 → 当前水平预估（VDOT/成绩预估）实时更新；
+      // 只替换 ctx 展示数据，不动用户正在填写的表单
+      const { ok, data } = await tryCall('get_goal_wizard_context');
+      if (ok) this.ctx = data;
+    },
 
     next1() {
       if (!this.form.race_date) this.form.race_date = addDays(this.today, this.minWeeks * 7);

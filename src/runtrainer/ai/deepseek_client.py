@@ -22,11 +22,14 @@ TEMPERATURE = 0.3
 TIMEOUT_S = 120
 
 # 教练 AI 服务商注册表（全部 OpenAI 兼容）。models 含 free_text 标记时允许用户自定义。
+# max_tokens 按各模型输出上限设置（超过会被 API 拒绝）：教练回复要求详细，
+# 输出越长越能展开分析（glm-4-flash 上限 4K，DeepSeek/Ollama 给 8K）。
 PROVIDERS: dict[str, dict] = {
     "deepseek": {
         "label": "DeepSeek（按量付费）",
         "base_url": BASE_URL,
         "models": ["deepseek-v4-pro", "deepseek-v4-flash"],
+        "max_tokens": 8192,
         "needs_key": True,
         "hint": "Key 在 platform.deepseek.com 注册后获取，按 token 计费。",
     },
@@ -34,6 +37,7 @@ PROVIDERS: dict[str, dict] = {
         "label": "智谱 GLM-4-Flash（免费）",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "models": ["glm-4-flash"],
+        "max_tokens": 4096,
         "needs_key": True,
         "hint": "在 open.bigmodel.cn 注册即送 Key；glm-4-flash 模型永久免费，不消耗任何 API 费用。",
     },
@@ -41,6 +45,7 @@ PROVIDERS: dict[str, dict] = {
         "label": "Ollama 本地模型（免费离线）",
         "base_url": "http://127.0.0.1:11434/v1",
         "models": ["qwen2.5:7b", "qwen2.5:14b", "deepseek-r1:8b", "llama3.2"],
+        "max_tokens": 8192,
         "needs_key": False,
         "free_text": True,
         "hint": "安装 ollama.com 后运行 `ollama pull qwen2.5:7b`；全程本地运行无需联网与 Key。",
@@ -64,8 +69,10 @@ def _clean_json_text(text: str) -> str:
 class DeepSeekClient:
     """任意 OpenAI 兼容端点客户端（DeepSeek/智谱/Ollama 通用）。"""
 
-    def __init__(self, api_key: str, model: str | None = None, base_url: str | None = None):
+    def __init__(self, api_key: str, model: str | None = None, base_url: str | None = None,
+                 max_tokens: int = MAX_TOKENS):
         self.model = model or DEFAULT_MODEL
+        self.max_tokens = max_tokens
         self._client = OpenAI(api_key=api_key or "none",
                               base_url=base_url or BASE_URL, timeout=TIMEOUT_S)
 
@@ -77,7 +84,7 @@ class DeepSeekClient:
                 {"role": "user", "content": user},
             ],
             temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
+            max_tokens=self.max_tokens,
             response_format={"type": "json_object"},
         )
         last: Exception | None = None
