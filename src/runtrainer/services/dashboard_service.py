@@ -140,8 +140,20 @@ def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
             (today - timedelta(days=30)).isoformat()) if r.get("resting_hr")]
         if rhrs:
             rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
+    # 课表质量课完成度（近 8 周计划内 T/I/R/TUNEUP 完成比例）：完成情况
+    # 参与「现在水平」——计划执行差说明估计应更保守（防高估生成跑不动的课）；
+    # 首轮就并入，调整不依赖 PB 等其它证据在场
+    plan_exec = None
+    if plan_vdot is not None:
+        ap = plan_repo.get_active_plan()
+        if ap:
+            plan_exec = ab.quality_execution(
+                plan_repo.get_workouts(ap["id"],
+                                       (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
+                                       today.isoformat()),
+                today=today)
     est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
-                             rest_hr=rest_hr, as_of=today)
+                             rest_hr=rest_hr, as_of=today, plan_exec=plan_exec)
     # 近一年各距离最佳成绩 + 训练保持度：与「现在水平」互相印证
     # （最近没跑比赛时，回答「现在能跑多少」要引用这些数字）
     year_bests = ab.distance_bests(
@@ -154,7 +166,8 @@ def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
     # 新 PB 同步进来 → 本卡与下方预测随每次 get_dashboard 自动刷新
     if year_bests and est.get("vdot") is not None:
         est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
-                                 rest_hr=rest_hr, as_of=today, year_bests=year_bests)
+                                 rest_hr=rest_hr, as_of=today, year_bests=year_bests,
+                                 plan_exec=plan_exec)
     return {
         "window_days": 30,
         "plan_vdot": plan_vdot,  # 对照用：课表训练按目标页定的 VDOT 配速

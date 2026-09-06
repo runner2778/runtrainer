@@ -168,7 +168,8 @@ export function initActivities() {
       const r = await tryCall('import_files', data);
       if (!r.ok) { this.$dispatch('toast', { text: '导入失败: ' + r.error }); return; }
       const m = `导入完成：新增 ${r.data.imported} 条，跳过 ${r.data.skipped} 条` +
-        (r.data.errors.length ? `，失败 ${r.data.errors.length} 条` : '');
+        (r.data.errors.length ? `，失败 ${r.data.errors.length} 条` : '') +
+        (r.data.plan_rebuilt ? `；水平已更新，课表已按新 VDOT ${r.data.plan_vdot} 自动重建` : '');
       this.$dispatch('toast', { text: m });
       await this.load();
     },

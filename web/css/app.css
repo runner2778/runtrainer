@@ -282,8 +282,32 @@ tbody tr:hover { background: var(--bg-hover); }
   margin-top: 4px;
   font-size: 11px;
   border-radius: 4px;
-  padding: 3px 5px;
+  padding: 2px 5px;
   color: #fff;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  text-align: left;
+  line-height: 1.35;
+  width: 100%;
+}
+/* 计划按钮两行结构：强度字母芯片 + 课名 / 强度区间带（%VDOT） */
+.calendar .day .wk .wk-line { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.calendar .day .wk .wkz {
+  font-size: 8.5px;
+  line-height: 1.1;
+  font-weight: 800;
+  background: rgba(255, 255, 255, 0.35);
+  border-radius: 2px;
+  padding: 1px 3px;
+  flex: none;
+  letter-spacing: 0;
+}
+.calendar .day .wk .wkt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.calendar .day .wk .wks {
+  font-size: 9px;
+  opacity: 0.85;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -293,20 +317,32 @@ tbody tr:hover { background: var(--bg-hover); }
 .calendar .day .wk.skipped { opacity: 0.4; filter: grayscale(0.8); text-decoration: line-through; }
 .calendar .day .wk.ai { box-shadow: inset 3px 0 0 rgba(0, 0, 0, 0.35); }
 .calendar .day .wk.rest { background: var(--bg-hover); color: var(--text-muted); }
+/* 当日实际跑步：按心率六带/结构分类着色（hrz-* = 该强度带色，浅底描边，
+   hover 变为全色块，与活动详情徽章同一色系） */
 .calendar .day .act-tag {
   margin-top: 3px;
-  font-size: 11px;
+  font-size: 10.5px;
   border-radius: 4px;
-  padding: 2px 5px;
+  padding: 1px 5px;
   color: var(--text);
-  background: var(--accent-soft);
-  border: 1px dashed var(--accent);
+  background: var(--atbg, var(--bg-hover));
+  border: 1px solid var(--atc, var(--border));
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
 }
-.calendar .day .act-tag:hover { background: var(--accent); color: #fff; }
+.calendar .day .act-tag b { margin-right: 3px; font-weight: 800; }
+.calendar .day .act-tag:hover { background: var(--atc); color: #fff; border-color: var(--atc); }
+.calendar .day .act-tag.hrz-easy { --atc: var(--kind-e); --atbg: color-mix(in srgb, var(--kind-e) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-recovery { --atc: var(--kind-recovery); --atbg: color-mix(in srgb, var(--kind-recovery) 18%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-aerobic { --atc: var(--kind-m); --atbg: color-mix(in srgb, var(--kind-m) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-high_aerobic { --atc: var(--kind-hi); --atbg: color-mix(in srgb, var(--kind-hi) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-tempo { --atc: var(--kind-t); --atbg: color-mix(in srgb, var(--kind-t) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-anaerobic { --atc: var(--kind-i); --atbg: color-mix(in srgb, var(--kind-i) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-interval { --atc: var(--kind-i); --atbg: color-mix(in srgb, var(--kind-i) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-repeats { --atc: var(--kind-r); --atbg: color-mix(in srgb, var(--kind-r) 14%, var(--bg-card)); }
+.calendar .day .act-tag.hrz-unknown { --atc: var(--text-muted); --atbg: var(--bg-hover); }
 
 /* 训练类型色块（与 domain/models.py KIND_COLORS 保持一致） */
 .kind-E, .kind-LR { background: var(--kind-e); }

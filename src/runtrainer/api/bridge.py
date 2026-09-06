@@ -321,7 +321,19 @@ class Api:
     @envelope
     def import_files(self, paths: list):
         from ..garmin import import_service
-        return import_service.import_files(paths)
+        from ..services import plan_service
+        from ..db.repos import plan_repo
+        res = import_service.import_files(paths)
+        out = dict(res or {})
+        # 手动导入同样走「同步/导入 → 读取数据 → 成绩估计 → 各强度速度区间
+        # → 调整计划配速」联动链：新水平与现计划 VDOT 差 ≥0.2 时自动重建课表
+        # （与 Garmin 同步路径同入口，保留过去日期的完成状态与关联活动）
+        if out.get("imported", 0) > 0 and plan_repo.get_active_plan():
+            rebuilt = plan_service.refresh_active_plan()
+            if rebuilt:
+                out["plan_rebuilt"] = True
+                out["plan_vdot"] = rebuilt.get("vdot")
+        return out
 
     @envelope
     def open_file_dialog(self):

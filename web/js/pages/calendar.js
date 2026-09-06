@@ -19,6 +19,14 @@ const KIND_ZONES = {
 // 实际跑步分类 kind（后端 classify_workout）→ 无心率区档位的简名；带档位的
 // kind（recovery/easy/aerobic/high_aerobic/tempo/anaerobic）直接用其 label
 const ACT_HZ = { interval: '间歇跑', repeats: '重复跑', unknown: '匀速跑' };
+// 实际跑步的六带/结构中文短名（日历格上随色块显示；结构课显间歇/重复，
+// 有氧档显对应带位名——与活动详情徽章 hrz-* 同一套颜色）
+const ACT_ZN = {
+  recovery: '恢复', easy: '轻松', aerobic: '有氧', high_aerobic: '高有氧',
+  tempo: '阈值', anaerobic: '无氧', interval: '间歇', repeats: '重复', unknown: '匀速',
+};
+// 计划课型 → 单元格字母芯片（与课型色一体：E/M/T/I/R + 长距离 L，其余无）
+const WK_MARK = { E: 'E', M: 'M', T: 'T', I: 'I', R: 'R', LR: 'L' };
 const DOW = ['一', '二', '三', '四', '五', '六', '日'];
 
 function fmtPace(s) {
@@ -87,14 +95,22 @@ const HTML = `
             <template x-for="w in (byDate[d.date] || [])" :key="w.id">
               <button class="wk" :class="'kind-' + w.kind + (w.status === 'completed' ? ' done' : '') + (w.status === 'skipped' ? ' skipped' : '') + (w.source === 'ai' || w.adjustment_id ? ' ai' : '')"
                       :data-wid="w.id">
-                <span x-text="(w.status === 'completed' ? '✓ ' : '') + (w.slot === 2 ? '② ' : '') + shortTitle(w)"></span>
+                <span class="wk-line">
+                  <b class="wkz" x-show="WK_MARK[w.kind]" x-text="WK_MARK[w.kind]"></b>
+                  <span class="wkt" x-text="(w.status === 'completed' ? '✓ ' : '') + (w.slot === 2 ? '② ' : '') + shortTitle(w)"></span>
+                </span>
+                <span class="wks" x-show="zoneBand(w.kind)" x-text="zoneBand(w.kind)"
+                      :title="'强度区间：' + (zoneOf(w.kind) || '')"></span>
               </button>
             </template>
             <div class="wk rest" x-show="d.isRest && !(byDate[d.date] || []).length">休息</div>
-            <!-- 当日实际跑步标注：点击查看活动详情（原生委托分发 data-aid） -->
+            <!-- 当日实际跑步标注（六带/结构分类色块，同活动详情徽章）：
+                 点击查看活动详情（原生委托分发 data-aid） -->
             <template x-for="a in (actsByDate[d.date] || [])" :key="'a' + a.id">
-              <div class="act-tag" :data-aid="a.id" :title="a.name">
-                🏃 <span x-text="(a.distance_m / 1000).toFixed(1) + 'km'"></span>
+              <div class="act-tag" :class="'hrz-' + actKindOf(a)" :data-aid="a.id"
+                   :title="a.name + (actKindName(a) ? ' · ' + actKindName(a) : '')">
+                <b x-text="ACT_ZN[actKindOf(a)]"></b>
+                <span x-text="(a.distance_m / 1000).toFixed(1) + 'km'"></span>
               </div>
             </template>
           </div>
@@ -247,6 +263,8 @@ export function initCalendar() {
     KIND_ZONES,
     PHASE_LABELS,
     DOW,
+    WK_MARK,
+    ACT_ZN,
     plan: null,
     planTitle: '',
     paces: {},
@@ -367,6 +385,20 @@ export function initCalendar() {
       const z = KIND_ZONES[kind];
       if (!z) return '';
       return z.band ? z.label + ' · ' + z.band : z.label;
+    },
+    // 格内副行只显示 %VDOT 带（短、不折行；全名见 hover 提示）
+    zoneBand(kind) {
+      const z = KIND_ZONES[kind];
+      return z && z.band ? z.band : '';
+    },
+    // 实际跑步分类 → 色块 class 后缀（hrz-*，与活动详情徽章同色系）
+    actKindOf(a) {
+      const w = a.workout;
+      return w && w.kind ? w.kind : 'unknown';
+    },
+    actKindName(a) {
+      const w = a.workout;
+      return w ? (ACT_ZN[w.kind] || w.label || '') : '';
     },
 
     moveMonth(n) {

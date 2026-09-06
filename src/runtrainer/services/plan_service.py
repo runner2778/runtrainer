@@ -54,8 +54,18 @@ def wizard_context() -> dict:
                 if r.get("resting_hr")]
         if rhrs:
             rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
+    # 课表质量课完成度（课程内容 + 完成情况参与预估）：近 8 周计划内
+    # T/I/R/TUNEUP 完成比例，由计划行直接统计（无需等手表同步）；
+    # 在首轮就并入——完成度调整不依赖 PB/比赛等其它证据是否在场
+    plan_exec = None
+    plan = plan_repo.get_active_plan()
+    if plan:
+        plan_exec = ab.quality_execution(
+            plan_repo.get_workouts(plan["id"],
+                                   (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
+                                   today.isoformat()))
     est = ab.compute_ability(acts180, prof.get("vo2max"), prof.get("max_hr"),
-                             rest_hr=rest_hr)
+                             rest_hr=rest_hr, plan_exec=plan_exec)
     # 近一年各距离最佳成绩（比赛硬证据 + 长跑最快分段）+ 训练保持度：
     # 供 AI 教练「预估水平/今年状态」类提问引用，并参与水平预估（PB 加成）
     year_bests = ab.distance_bests(
@@ -65,10 +75,11 @@ def wizard_context() -> dict:
         max_hr=est.get("max_hr"))
     consistency = ab.training_consistency(acts_year, today)
     # 近一年 PB 参与预估：显著快于估计时给保守加分（时间衰减/封顶）——
-    # 重算一次让 evidence 与 recent_vdot 反映 PB；无 PB 时保持首轮结果
+    # 重算一次让 evidence 与 recent_vdot 反映 PB 与完成度；无 PB 时保持首轮结果
     if year_bests and est.get("vdot") is not None:
         est = ab.compute_ability(acts180, prof.get("vo2max"), prof.get("max_hr"),
-                                 rest_hr=rest_hr, year_bests=year_bests)
+                                 rest_hr=rest_hr, year_bests=year_bests,
+                                 plan_exec=plan_exec)
 
     recent_vdot = est.get("vdot")
     recent_vdot_source = "ability" if recent_vdot is not None else None

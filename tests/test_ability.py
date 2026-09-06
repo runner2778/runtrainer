@@ -378,3 +378,66 @@ def test_zones_table_in_result_and_anchors():
     assert by_key["easy"]["pace_fast_s_km"] == tbl["E"]["fast_s_km"]
     # 无依据时不返回配速表
     assert ab.compute_ability([], None)["zones"] is None
+
+
+# ---- 第十六批：最近训练数据（课程内容/配速/心率/完成情况）主导预估 ----
+
+def _plan_w(days_ago, kind="T", status="completed"):
+    """构造计划课行（date 为距今天数，kind/status 关键字段）。"""
+    d = dates.today() - timedelta(days=days_ago)
+    return {"kind": kind, "date": d.isoformat(), "status": status}
+
+
+def test_quality_execution_counts_quality_kinds_in_window():
+    """只统计近 8 周已到训练日的质量课（T/I/R/TUNEUP）；轻松跑/未来/
+    超窗不算，completed 计入完成。"""
+    ws = [_plan_w(7, "T"), _plan_w(10, "I"), _plan_w(3, "R", "skipped"),
+          _plan_w(4, "E"),            # 轻松跑不是质量课
+          _plan_w(2, "TUNEUP", "skipped"),
+          _plan_w(80, "T"),           # 超出 8 周窗口
+          _plan_w(-2, "I")]           # 未来课（还没到训练日）
+    r = ab.quality_execution(ws)
+    # 窗口内质量课：T(✓)/I(✓)/R(✗)/TUNEUP(✗) → 2/4 = 0.5
+    assert r == {"done": 2, "total": 4, "ratio": 0.5}
+    # 样本不足 → None（不参与调整）
+    assert ab.quality_execution([]) is None
+    assert ab.quality_execution([_plan_w(3, "I")]) is None
+
+
+def test_plan_execution_poor_compliance_lowers_estimate():
+    """完成情况参与预估：质量课完成率 1/4 → 估计下调 0.7 VDOT + 证据入列。"""
+    est = ab.compute_ability([], 50.0,
+                             plan_exec={"done": 1, "total": 4, "ratio": 0.25})
+    # (0.25 − 0.7) × 1.6 = −0.72 → round(−0.72, 1) 后 49.3
+    assert est["vdot"] == round(50.0 + (0.25 - 0.7) * ab.QUALITY_K, 1)
+    ev = next(e for e in est["evidence"] if e["source"] == "plan_execution")
+    assert "1/4" in ev["detail"] and "25%" in ev["detail"]
+    assert ev["vdot"] == est["vdot"]
+
+
+def test_plan_execution_full_compliance_boosts_slightly():
+    """质量课全部完成 → 小幅上调（0.7×1.6=1.12 超出封顶，按封顶 +0.6）。"""
+    est = ab.compute_ability([], 50.0,
+                             plan_exec={"done": 5, "total": 5, "ratio": 1.0})
+    # 1.0 → 未超上限前 (1−0.7)×1.6=0.48 ≤0.6 不触发钳制
+    assert est["vdot"] == round(50.0 + (1.0 - 0.7) * ab.QUALITY_K, 1)
+    assert any(e["source"] == "plan_execution" for e in est["evidence"])
+
+
+def test_training_components_dominate_without_race():
+    """无比赛时训练分量主导：明显偏弱的阈值训练（回归 vdot≈41）会把虚高的
+    手表读数（55）大幅拉低——而不是旧逻辑的读数占大头只微调。"""
+    # hr = −0.4×pace + 302：88%×193=169.84 → 阈值配速 ≈ 330 s/km（5:30，VDOT≈41）
+    acts = []
+    for i, (pace, hr) in enumerate([(410, 138), (400, 142), (390, 146), (380, 150),
+                                    (370, 154), (360, 158), (350, 162), (340, 166)]):
+        acts.append(_act(80 - i * 5, pace, hr, 210, 9000, 3600, name=f"跑 {i}"))
+    est = ab.compute_ability(acts, 55.0, profile_max_hr=193)
+    thr = next(ev for ev in est["evidence"] if ev["source"] == "threshold_trend")
+    assert thr["vdot"] < 45  # 训练端确实弱（对照物：手表虚高 55）
+    # 结果贴住训练端而非读数端：(36.3×0.40 + 55×0.16)/0.56 ≈ 41.6——
+    # 距训练端 5 分、距读数 13 分；旧权重（读数 0.40 vs 阈值 0.28）下
+    # 结果 ≈49，距读数端仅 6 分，此断言可把新旧权重区分开
+    assert est["vdot"] is not None
+    assert est["vdot"] < 45.0
+    assert abs(est["vdot"] - thr["vdot"]) < abs(55.0 - est["vdot"])

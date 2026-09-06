@@ -22,6 +22,13 @@ class _QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, *args) -> None:
         pass
 
+    def end_headers(self) -> None:
+        # WebView2 对无缓存头的响应按启发式缓存（Last-Modified），导致升级
+        # 后 UI「还是老样子」——本地资源量小，直接禁止一切缓存，重启即新
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        super().end_headers()
+
 
 def _start_web_server() -> str:
     """在 127.0.0.1 随机端口起静态服务，返回 index.html 的 http URL。

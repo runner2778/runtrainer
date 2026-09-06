@@ -317,7 +317,8 @@ export function initDashboard() {
                threshold_trend: '配速-心率阈值', cruise_ability: '节奏/巡航跑',
                t_intervals: '阈值型间歇', hrr_pace: 'HRR 有氧配速',
                interval_ability: '间歇能力', year_best: '近一年最佳',
-               hr_trend: '配速-心率趋势' }[src] || src;
+               hr_trend: '配速-心率趋势',
+               plan_execution: '课表完成度' }[src] || src;
     },
     zoneOf(kind) {
       const z = KIND_ZONES[kind];

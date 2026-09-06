@@ -58,6 +58,16 @@ PB_BOOST_CAP = 1.5
 PB_FULL_RECENT_DAYS = 180        # 半年内 PB 全额计权
 PB_DECAY_DAYS = 364              # 一年前衰减到权重下限
 PB_DECAY_FLOOR = 0.35
+# ---- 课表完成度参与预估（第十六批）：课表按 VDOT 生成了质量课却没执行，
+# 说明「按计划训练」在现实没发生，估计应更保守；反之计划跑得动，配速区间
+# 就有人撑。统计近 8 周计划内质量课（T/I/R/TUNEUP）的完成比例——
+# 由服务层从 plan_repo 取行、本层只做纯计算。
+QUALITY_KINDS = ("T", "I", "R", "TUNEUP")
+QUALITY_WINDOW_DAYS = 56         # 近 8 周计划内质量课
+QUALITY_MIN_TOTAL = 2            # 计划质量课 <2 堂 → 样本不足，不参与调整
+QUALITY_K = 1.6                  # 完成率 → VDOT 线性系数（r=1→+0.48，r=0→−1.12）
+QUALITY_ADJ_MAX = 0.6            # 全额完成只小幅加分（配速本就是按该水平生成的）
+QUALITY_ADJ_MIN = -1.2           # 全缺勤大幅下调，防按「没练成的水平」生成课表
 # 储备心率(HRR)配速分量
 HRR_TARGET = 0.70        # 用 70% HRR 对应配速反推（有氧区代表强度）
 HRR_MIN = 0.40           # 过低 HRR 样本（慢走/热身）剔除
@@ -582,7 +592,8 @@ def _weighted(components: list[dict]) -> float | None:
 def compute_ability(activities: list[dict], vo2max: float | None,
                     profile_max_hr=None, rest_hr: float | None = None,
                     as_of: date | None = None,
-                    year_bests: list[dict] | None = None) -> dict:
+                    year_bests: list[dict] | None = None,
+                    plan_exec: dict | None = None) -> dict:
     """综合各数据源输出水平预估。
 
     activities: 近 180 天活动（含 avg_pace_s_km/avg_hr/max_hr/distance_m/
@@ -590,6 +601,10 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     rest_hr: 静息心率（HRR 分量必需）；缺省时该分量跳过。
     year_bests: distance_bests() 的近一年各距离最佳（含 vdot/date/distance/
                 best_seconds/source）；显著快于当前估计时给保守加分（带时间衰减）。
+    plan_exec: quality_execution() 输出（课表质量课 done/total/ratio）；
+               代表「课程内容 + 完成情况」——训练分量（阈值趋势/HRR/间歇/
+               完成度）合计权重占大头，近期训练主导估计；该调整在趋势之后、
+               PB 加分之前施加（缺勤多 → 下调，完成好 → 小幅上调）。
     返回 {"vdot", "predictions", "zones", "evidence", "max_hr", "as_of"}；
     无任何依据时 vdot=None。
     """
@@ -612,10 +627,16 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                          "n_runs": t_typed["n_workouts"]}
             threshold_src = "t_intervals"
 
+    # 第十六批权重重排：近期训练数据（课程内容/配速/心率/完成情况）占大头。
+    # 训练分量 = 阈值趋势（近 90 天配速-心率回归，课程配速+心率）+ HRR 配速
+    # + 间歇能力 + 课表完成度，有比赛时合计 0.48+ > 比赛单源 0.32；
+    # 手表 VO2max 降至底数位，但与比赛保持 1.6 比例（有比赛在场时读数
+    # 仍是有效旁证）；无比赛时训练分量合计 0.84 绝对主导。
+    # _weighted 按权重占比归一化——缺失分量自动放大剩余占比。
     evidence: list[dict] = []
     components: list[dict] = []
     if race:
-        components.append({"vdot": race["vdot"], "weight": 0.40, "kind": "race"})
+        components.append({"vdot": race["vdot"], "weight": 0.32, "kind": "race"})
         evidence.append({
             "source": "recent_race",
             "vdot": race["vdot"],
@@ -623,11 +644,11 @@ def compute_ability(activities: list[dict], vo2max: float | None,
             "race": race,
         })
     if vo2max:
-        components.append({"vdot": round(float(vo2max), 1), "weight": 0.25, "kind": "vo2max"})
+        components.append({"vdot": round(float(vo2max), 1), "weight": 0.20, "kind": "vo2max"})
         evidence.append({"source": "garmin_vo2max", "vdot": round(float(vo2max), 1),
                          "detail": "手表 VO2max 读数"})
     if threshold:
-        components.append({"vdot": threshold["vdot"], "weight": 0.15, "kind": "threshold"})
+        components.append({"vdot": threshold["vdot"], "weight": 0.24, "kind": "threshold"})
         if threshold_src == "cruise":
             evidence.append({"source": "cruise_ability", "vdot": threshold["vdot"],
                              "detail": f"节奏/巡航跑中位配速 {_fmt_pace(threshold['pace_s_km'])}/km"
@@ -645,14 +666,14 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                                        f"（{threshold['n_runs']} 次心率-配速回归）",
                              "pace_s_km": threshold["pace_s_km"]})
     if hrr:
-        components.append({"vdot": hrr["vdot"], "weight": 0.10, "kind": "hrr"})
+        components.append({"vdot": hrr["vdot"], "weight": 0.12, "kind": "hrr"})
         evidence.append({"source": "hrr_pace", "vdot": hrr["vdot"],
                          "detail": f"{int(hrr['hrr_pct'] * 100)}% HRR 对应配速 "
                                    f"{_fmt_pace(hrr['pace_s_km'])}/km"
                                    f"（{hrr['n_runs']} 次有氧样本，静息心率 {hrr['rest_hr']}）",
                          "pace_s_km": hrr["pace_s_km"]})
     if intervals:
-        components.append({"vdot": intervals["vdot"], "weight": 0.10, "kind": "interval"})
+        components.append({"vdot": intervals["vdot"], "weight": 0.12, "kind": "interval"})
         detail = (f"间歇 {_fmt_pace(intervals['pace_s_km'])}/km"
                   f"（{intervals['n_workouts']} 课 {intervals['n_segments']} 段")
         if intervals.get("rest_ratio") is not None:
@@ -665,10 +686,11 @@ def compute_ability(activities: list[dict], vo2max: float | None,
         evidence.append({"source": "interval_ability", "vdot": intervals["vdot"],
                          "detail": detail + "）",
                          "pace_s_km": intervals["pace_s_km"]})
-    # 缺比赛时重新分配权重（表盘读数权重最高，趋势与 HRR 其次）
+    # 缺比赛时重新分配权重：训练分量（阈值趋势/HRR/间歇）占大头绝对主导，
+    # 手表 VO2max 只作底数（无比赛在场时读数的「上限」属性最值得怀疑）
     if not race and components:
-        weights = {"vo2max": 0.40, "threshold": 0.28, "hrr": 0.16,
-                   "interval": 0.16, "race": 0.40}
+        weights = {"vo2max": 0.16, "threshold": 0.40, "hrr": 0.20,
+                   "interval": 0.24, "race": 0.40}
         for c in components:
             c["weight"] = weights[c["kind"]]
     vdot_val = _weighted(components)
@@ -685,6 +707,26 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                       f"{up_down} {abs(trend['drop_bpm']):.0f} bpm → "
                       f"调整 {'+' if trend['adj_vdot'] >= 0 else ''}{trend['adj_vdot']} VDOT",
         })
+    # 课表质量课完成度调整（完成情况参与预估）：按计划把质量课跑下来了，
+    # 说明当前估计的配速区间训练端撑得住；大量缺勤 → 现有估计整体下调，
+    # 否则会按「安排了但没跑」的虚拟水平继续生成更快的课。
+    # 放在心率趋势之后、PB 加分之前（执行差时 PB 是过去式，不应覆盖执行证据）
+    if plan_exec and vdot_val and plan_exec.get("total"):
+        ratio = plan_exec.get("ratio")
+        if ratio is None:
+            ratio = plan_exec["done"] / plan_exec["total"]
+        adj = max(QUALITY_ADJ_MIN, min(QUALITY_ADJ_MAX,
+                                       (ratio - 0.7) * QUALITY_K))
+        if abs(adj) >= 0.1:
+            vdot_val = round(vdot_val + adj, 1)
+            evidence.append({
+                "source": "plan_execution",
+                "vdot": vdot_val,
+                "detail": f"近 {QUALITY_WINDOW_DAYS // 7} 周课表质量课完成 "
+                          f"{plan_exec['done']}/{plan_exec['total']}"
+                          f"（{int(round(ratio * 100))}%）→ 执行校验 "
+                          f"{'+' if adj >= 0 else ''}{adj:.1f} VDOT",
+            })
     # 近一年 PB 加分：PB 是「曾经跑出过」的证据——比当前估计快时按差距的
     # 一部分加分（0.35×），随距今时间衰减（180 天内全值 → 一年衰减到 35%），
     # 单次封顶 1.5 VDOT；与近期比赛同为一条记录（等效 VDOT 相同）时不重复计。
@@ -727,6 +769,26 @@ def compute_ability(activities: list[dict], vo2max: float | None,
         "as_of": (as_of or date.today()).isoformat(),
     }
     return result
+
+
+def quality_execution(workouts: list[dict], today: date | None = None) -> dict | None:
+    """近 8 周课表内质量课完成比例（课程内容 + 完成情况的硬证据）。
+
+    workouts: plan_repo.get_workouts() 行（需含 date/kind/status），可为空；
+    本函数按 [today−QUALITY_WINDOW_DAYS, today] 再滤一次。质量课之外的
+    轻松跑/休息日不算（那些缺勤不代表强度水平）；completed 计入完成，
+    skipped/planned 计入未完成。样本 <QUALITY_MIN_TOTAL 返回 None。
+    """
+    end = today or date.today()
+    start = end - timedelta(days=QUALITY_WINDOW_DAYS)
+    qs = [w for w in workouts
+          if w.get("kind") in QUALITY_KINDS
+          and isinstance(w.get("date"), str)
+          and start.isoformat() <= w["date"] <= end.isoformat()]
+    if len(qs) < QUALITY_MIN_TOTAL:
+        return None
+    done = sum(1 for w in qs if w.get("status") == "completed")
+    return {"done": done, "total": len(qs), "ratio": done / len(qs)}
 
 
 def _days_old(value, as_of: date | None) -> int:
