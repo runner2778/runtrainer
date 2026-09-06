@@ -172,6 +172,9 @@ export function initActivities() {
         (r.data.plan_rebuilt ? `；水平已更新，课表已按新 VDOT ${r.data.plan_vdot} 自动重建` : '');
       this.$dispatch('toast', { text: m });
       await this.load();
+      // 新活动/新 PB 会改水平预估与课表 → 通知其余页面（仪表盘/日历/目标…）
+      // 立即重拉，返回那些页面时数据就是新的
+      window.dispatchEvent(new Event('data-changed'));
     },
     async openDetail(id) {
       const { ok, data, error } = await tryCall('get_activity', id);

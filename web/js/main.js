@@ -173,18 +173,27 @@ function boot() {
       await pasteInto(e.target);
     }
   });
-  // 同步完成（可能重建课表/新增活动/自动分析）→ 当前页全盘刷新：
+  // 后端数据（水平预估/成绩预估/最佳成绩/课表）都是「每次拉取即现算」——
+  // 没有任何缓存，所以陈旧只可能来自「没触发重拉」。数据变动一律广播：
+  // 同步完成（可能重建课表/新增活动/自动分析）→ 全部页面刷新；
   // 有 syncRefresh 的页面（仪表盘/训练目标）无视 2s 防双载强制刷新；
-  // 其余页面清零 _lastLoad 后再 shown()，保证健康/活动/日历页在
-  // 同步刚结束（<2s 内）也能拿到最新数据
-  window.addEventListener('sync-done', () => {
-    const sec = document.getElementById('page-' + store.page);
+  // 其余页面清零 _lastLoad 后再 shown()，保证 2s 内完成的数据变动也被拉取
+  const refreshPage = (p) => {
+    const sec = document.getElementById('page-' + p);
     const data = sec && window.Alpine && window.Alpine.$data(sec);
-    if (data && typeof data.syncRefresh === 'function') data.syncRefresh();
-    else if (data && typeof data.shown === 'function') {
+    if (!data) return;
+    if (typeof data.syncRefresh === 'function') data.syncRefresh();
+    else if (typeof data.shown === 'function') {
       if (data._lastLoad) data._lastLoad = 0;
       data.shown();
     }
+  };
+  window.addEventListener('sync-done', () => PAGES.forEach(refreshPage));
+  // 页面内动作（手动导入文件/教练改课生效/打卡完成）也会改课表与能力数据：
+  // 当前页已自行刷新（跳过避免双拉），其余数据页全部重拉，切回即新
+  window.addEventListener('data-changed', () => {
+    const cur = store.page;
+    PAGES.forEach((p) => { if (p !== cur) refreshPage(p); });
   });
   window.Alpine.start();
   loadBackendPrefs(store);

@@ -385,6 +385,8 @@ export function initCoach() {
       }
       await this.loadMessages();
       this.scrollChat();
+      // 改课/重建可能已直接生效 → 其余页面（日历/仪表盘）立即重拉
+      window.dispatchEvent(new Event('data-changed'));
     },
     async chatDecide(mid, approve) {
       const { ok, data, error } = await tryCall('decide_chat_adjustments', mid, approve);
@@ -396,6 +398,7 @@ export function initCoach() {
       });
       await this.loadMessages();
       await this.refresh();
+      window.dispatchEvent(new Event('data-changed'));
     },
     profileUpdatesText(u) {
       const labels = { max_hr: '最大心率', rest_hr: '静息心率', weight_kg: '体重', run_experience: '跑步经验' };
@@ -435,6 +438,7 @@ export function initCoach() {
           : '已拒绝，维持原计划',
       });
       await this.refresh();
+      window.dispatchEvent(new Event('data-changed'));
     },
 
     fmtDate, fmtKm, fmtMin,

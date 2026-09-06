@@ -437,6 +437,8 @@ export function initCalendar() {
       this.modal = null;
       this.showLink = false;
       await this.load();
+      // 完成情况参与水平预估（课表完成度分量）→ 仪表盘/目标页等立即重算
+      window.dispatchEvent(new Event('data-changed'));
     },
     // 段落目标配速：E 区间显示范围，其余区间显示单值
     paceLabel(zone) {
