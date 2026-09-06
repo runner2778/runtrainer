@@ -26,7 +26,7 @@ ADJUSTED_STATUS = {"rest": "skipped", "skip": "skipped"}
 
 
 def _make_client(extra_requested: bool):
-    """按设置的服务商构造 AI 客户端：DeepSeek（付费）/ 智谱 GLM-4-Flash（免费）/ Ollama（本地免费）。"""
+    """按设置的服务商构造 AI 客户端：DeepSeek（付费）/ 智谱 GLM-4.7-Flash（免费）/ Ollama（本地免费）。"""
     from . import settings_service
     if not settings_service.is_mock_mode():
         provider = settings_service.get_ai_provider()
@@ -35,13 +35,14 @@ def _make_client(extra_requested: bool):
         if info.get("needs_key") and not key:
             raise RuntimeError(
                 f"未配置 {info['label']} 的 API Key，请在设置页配置；"
-                "或改选「智谱 GLM-4-Flash（免费）」/「Ollama 本地」不消耗 DeepSeek 费用")
+                "或改选「智谱 GLM-4.7-Flash（免费）」/「Ollama 本地」不消耗 DeepSeek 费用")
         model = settings_service.get_ai_model()
         # 模型不在该服务商候选且服务商非自由输入 → 回落默认模型
         if not info.get("free_text") and model not in info["models"]:
             model = info["models"][0]
         return DeepSeekClient(key or "", model, base_url=info["base_url"],
-                              max_tokens=info.get("max_tokens", 4096))
+                              max_tokens=info.get("max_tokens", 4096),
+                              extra_body=info.get("extra_body"))
     if extra_requested:
         return MockClient("add_extra")
     return MockClient(["normal", "low_hrv", "overload"][dates.today().toordinal() % 3])

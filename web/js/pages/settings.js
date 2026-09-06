@@ -279,7 +279,7 @@ export function initSettings() {
       const d = {
         'deepseek-v4-pro': 'deepseek-v4-pro（推理更强，推荐）',
         'deepseek-v4-flash': 'deepseek-v4-flash（便宜快速）',
-        'glm-4-flash': 'glm-4-flash（永久免费）',
+        'glm-4.7-flash': 'glm-4.7-flash（永久免费，已关思考提速）',
       };
       return d[m] || m;
     },

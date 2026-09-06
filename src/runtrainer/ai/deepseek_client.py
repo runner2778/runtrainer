@@ -1,6 +1,6 @@
 """AI 客户端（OpenAI 兼容协议多提供商）与 Mock 客户端。
 
-可插拔服务商：DeepSeek（付费）/ 智谱 GLM-4-Flash（免费）/ 本地 Ollama（免费离线）。
+可插拔服务商：DeepSeek（付费）/ 智谱 GLM-4.7-Flash（免费）/ 本地 Ollama（免费离线）。
 接口约定：chat_json(system, user, data) → dict
 - data 为机器可读的课表快照（真实 AI 从 user 文本读同一份信息；Mock 直接用它构造回应）。
 - 返回 dict 需能通过 contracts.CoachOutput 校验。
@@ -23,7 +23,9 @@ TIMEOUT_S = 120
 
 # 教练 AI 服务商注册表（全部 OpenAI 兼容）。models 含 free_text 标记时允许用户自定义。
 # max_tokens 按各模型输出上限设置（超过会被 API 拒绝）：教练回复要求详细，
-# 输出越长越能展开分析（glm-4-flash 上限 4K，DeepSeek/Ollama 给 8K）。
+# 输出越长越能展开分析（DeepSeek/Ollama/GLM-4.7-Flash 输出上限高，给 8K）。
+# extra_body：随请求附带的厂商扩展参数（GLM-4.7 系列默认强制深度思考——
+# 先输出 reasoning_content 再给正文，单条回复耗时 1~2 分钟；显式关掉思考后秒级返回）。
 PROVIDERS: dict[str, dict] = {
     "deepseek": {
         "label": "DeepSeek（按量付费）",
@@ -34,12 +36,13 @@ PROVIDERS: dict[str, dict] = {
         "hint": "Key 在 platform.deepseek.com 注册后获取，按 token 计费。",
     },
     "zhipu": {
-        "label": "智谱 GLM-4-Flash（免费）",
+        "label": "智谱 GLM-4.7-Flash（免费）",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "models": ["glm-4-flash"],
-        "max_tokens": 4096,
+        "models": ["glm-4.7-flash"],
+        "max_tokens": 8192,
         "needs_key": True,
-        "hint": "在 open.bigmodel.cn 注册即送 Key；glm-4-flash 模型永久免费，不消耗任何 API 费用。",
+        "extra_body": {"thinking": {"type": "disabled"}},
+        "hint": "在 open.bigmodel.cn 注册即送 Key；glm-4.7-flash 永久免费。已按官方建议关闭深度思考换取秒级响应，回复质量仍远超旧 glm-4-flash。",
     },
     "ollama": {
         "label": "Ollama 本地模型（免费离线）",
@@ -70,9 +73,10 @@ class DeepSeekClient:
     """任意 OpenAI 兼容端点客户端（DeepSeek/智谱/Ollama 通用）。"""
 
     def __init__(self, api_key: str, model: str | None = None, base_url: str | None = None,
-                 max_tokens: int = MAX_TOKENS):
+                 max_tokens: int = MAX_TOKENS, extra_body: dict | None = None):
         self.model = model or DEFAULT_MODEL
         self.max_tokens = max_tokens
+        self.extra_body = extra_body
         self._client = OpenAI(api_key=api_key or "none",
                               base_url=base_url or BASE_URL, timeout=TIMEOUT_S)
 
@@ -87,6 +91,8 @@ class DeepSeekClient:
             max_tokens=self.max_tokens,
             response_format={"type": "json_object"},
         )
+        if self.extra_body:
+            kwargs["extra_body"] = self.extra_body
         last: Exception | None = None
         for attempt in range(2):  # 偶发截断/围栏：同参重试一次再放弃
             resp = self._client.chat.completions.create(**kwargs)

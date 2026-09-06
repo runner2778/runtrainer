@@ -181,15 +181,17 @@ def test_provider_ollama_no_key_allowed(monkeypatch, plan):
 
 
 def test_provider_zhipu_fallback_model(monkeypatch, plan):
-    """切换服务商后旧模型名不在候选列表 → 回落该服务商默认模型。"""
+    """切换服务商后旧模型名不在候选列表 → 回落该服务商默认模型（glm-4.7-flash）。"""
     from runtrainer.services import settings_service
     monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
     monkeypatch.setattr(settings_service, "get_ai_provider", lambda: "zhipu")
     monkeypatch.setattr(settings_service, "get_ai_key", lambda provider: "fake-key")
     monkeypatch.setattr(settings_service, "get_ai_model", lambda: "deepseek-v4-pro")
     client = coach_service._make_client(False)
-    assert client.model == "glm-4-flash"
+    assert client.model == "glm-4.7-flash"
     assert "bigmodel.cn" in str(client._client.base_url)
+    # GLM-4.7 系列默认强制深度思考，单条回复 1~2 分钟——生产配置显式关闭换取秒级响应
+    assert client.extra_body == {"thinking": {"type": "disabled"}}
 
 
 def test_validated_retries_once_then_succeeds(monkeypatch, plan):
