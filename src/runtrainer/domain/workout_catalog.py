@@ -15,7 +15,7 @@ class Template:
     kind: str                       # E/M/T/I/R/LR/RECOVERY/TUNEUP
     name: str
     description: str
-    pace_zone: str | None = None    # E/M/T/I/R；TUNEUP/RACE 为 None
+    pace_zone: str | None = None    # 目标带：E/RECOVERY 存区间，M/T/I/R 存单值；TUNEUP/RACE/STRENGTH 为 None
     is_quality: bool = True
     easy_min: int = 0               # 主体轻松跑时长（E/RECOVERY）
     strides: int = 0                # 跨步跑组数（100m/组）
@@ -43,9 +43,9 @@ E_40 = _t("e40", "E", "轻松跑 40 分钟", "保持轻松有氧，可对话强�
           easy_min=40, wu_min=0, cd_min=0, is_quality=False)
 E_50 = _t("e50", "E", "轻松跑 50 分钟", "保持轻松有氧，可对话强度，用于恢复与有氧基础。", "E",
           easy_min=50, wu_min=0, cd_min=0, is_quality=False)
-REC_30 = _t("rec30", "RECOVERY", "恢复跑 30 分钟", "非常轻松，比 E 更慢；放松跑姿，促进恢复。", "E",
+REC_30 = _t("rec30", "RECOVERY", "恢复跑 30 分钟", "非常轻松，比 E 更慢；放松跑姿，促进恢复。", "RECOVERY",
              easy_min=30, wu_min=0, cd_min=0, is_quality=False)
-REC_35 = _t("rec35", "RECOVERY", "恢复跑 35 分钟", "非常轻松，比 E 更慢；放松跑姿，促进恢复。", "E",
+REC_35 = _t("rec35", "RECOVERY", "恢复跑 35 分钟", "非常轻松，比 E 更慢；放松跑姿，促进恢复。", "RECOVERY",
              easy_min=35, wu_min=0, cd_min=0, is_quality=False)
 
 
@@ -103,7 +103,7 @@ SUBT_PM = _t("subt_pm", "T", "双阈值·下（5×5' 亚阈）",
              "T", tempo_sets=((5, 5),), tempo_rest_min=1, wu_min=10, cd_min=10)
 DBL_EASY = _t("dbl_easy", "RECOVERY", "放松晚跑 30 分钟（二练）",
               "高强度课后的放松晚跑：非常轻松，帮助代谢清除、促进恢复。与第一练间隔 ≥5 小时。",
-              "E", easy_min=30, wu_min=0, cd_min=0, is_quality=False)
+              "RECOVERY", easy_min=30, wu_min=0, cd_min=0, is_quality=False)
 STRENGTH = _t("strength", "STRENGTH", "力量训练 40 分钟",
               "跑步专项力量：核心 + 臀腿（深蹲、弓步、单腿硬拉、提踵、臀桥、平板支撑），"
               "每个动作 8–12 次 × 3 组，动作稳定优先于重量。",
@@ -146,7 +146,8 @@ def easy_pace(vdot_val: float) -> float:
 
 def zone_pace(zone: str, vdot_val: float) -> float:
     table = vd.pace_table(vdot_val)
-    return {"E": easy_pace(vdot_val), "M": table["M"], "T": table["T"],
+    return {"RECOVERY": vd.pace_s_km(vdot_val, (vd.REC_LOW + vd.REC_HIGH) / 2),
+            "E": easy_pace(vdot_val), "M": table["M"], "T": table["T"],
             "I": table["I"], "R": table["R"]}[zone]
 
 
@@ -196,6 +197,11 @@ def session_stats(t: Template, vdot_val: float, *, lr_km: float = 0.0,
     return {"hard_km": hard, "total_km": total, "duration_min": duration}
 
 
+def _body_zone(t: Template) -> str:
+    """主体轻松段的目标带：恢复课（kind=RECOVERY）落恢复带，其余落 E 带。"""
+    return "RECOVERY" if t.kind == "RECOVERY" else "E"
+
+
 def build_segments(t: Template, *, lr_km: float = 0.0, m_block_km: float = 0.0,
                    tuneup_km: float = 0.0, easy_min: float | None = None,
                    filler_km: float | None = None) -> list[dict]:
@@ -216,13 +222,13 @@ def build_segments(t: Template, *, lr_km: float = 0.0, m_block_km: float = 0.0,
         segs.append({"type": "continuous", "zone": "race", "distance_km": round(tuneup_km, 1)})
     elif easy_min is not None:
         # 引擎动态时长覆盖（填充跑），优先于模板自带时长
-        segs.append({"type": "continuous", "zone": "E", "duration_min": easy_min})
+        segs.append({"type": "continuous", "zone": _body_zone(t), "duration_min": easy_min})
     elif filler_km is not None:
-        segs.append({"type": "continuous", "zone": "E", "distance_km": round(filler_km, 1)})
+        segs.append({"type": "continuous", "zone": _body_zone(t), "distance_km": round(filler_km, 1)})
     elif t.minutes:
         segs.append({"type": "continuous", "zone": "strength", "duration_min": t.minutes})
     elif t.easy_min:
-        segs.append({"type": "continuous", "zone": "E", "duration_min": t.easy_min})
+        segs.append({"type": "continuous", "zone": _body_zone(t), "duration_min": t.easy_min})
     for sets, minutes in t.tempo_sets:
         segs.append({"type": "tempo", "zone": "T", "duration_min": minutes, "reps": sets,
                      "rest_min": t.tempo_rest_min if sets > 1 else 0,

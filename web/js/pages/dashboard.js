@@ -10,7 +10,7 @@ const KIND_ZONES = {
   I: { label: '最大摄氧量区', band: '92–100%' },
   R: { label: '无氧冲刺区', band: '100–105%' },
   LR: { label: '有氧区（长距离）', band: '59–82%' },
-  RECOVERY: { label: '恢复区', band: '<59%' },
+  RECOVERY: { label: '恢复区', band: '50–59%' },
   TUNEUP: { label: '测试赛强度', band: '' },
   RACE: { label: '比赛强度', band: '' },
 };

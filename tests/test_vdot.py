@@ -96,3 +96,16 @@ def test_invalid_inputs():
         vdot.pace_table(0)
     with pytest.raises(ValueError):
         vdot.predict_time(10000, -5)
+
+
+def test_pace_table_recovery_band_matches_six_zone_row():
+    """pace_table 附 RECOVERY 恢复带区间（50–59%VDOT），与六区表 recovery 行同源。"""
+    t = vdot.pace_table(50.0)
+    rec = t["RECOVERY"]
+    rows = vdot.intensity_zones(50.0)
+    rrow = next(r for r in rows if r["key"] == "recovery")
+    assert (rec["slow_s_km"], rec["fast_s_km"]) == (
+        rrow["pace_slow_s_km"], rrow["pace_fast_s_km"])
+    # 与 E 带分化：恢复带慢端更慢，快端 ≤ E 慢端（59% 为两带共享边界）
+    assert rec["slow_s_km"] > t["E"]["slow_s_km"]
+    assert rec["fast_s_km"] <= t["E"]["slow_s_km"] + 1

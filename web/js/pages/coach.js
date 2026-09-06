@@ -8,7 +8,7 @@ const KIND_LABELS = {
   E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑',
   LR: '长距离', RECOVERY: '恢复跑', TUNEUP: '测试赛', RACE: '比赛', CROSS: '交叉训练',
 };
-const ZONE_LABELS = { E: '轻松配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速' };
+const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速' };
 const STATUS_LABELS = { pending: '待处理', approved: '已批准', rejected: '已拒绝', applied: '已生效' };
 const READINESS = {
   good: { label: '状态良好', cls: 'ok' },

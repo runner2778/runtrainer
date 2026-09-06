@@ -477,3 +477,33 @@ def test_pro_mode_strength_day_double_with_evening_run():
         ws = by_date[w.date]
         assert len(ws) == 2 and ws[0].slot == 1 and ws[1].slot == 2
         assert ws[1].kind == "RECOVERY"
+
+
+# ---------- 恢复/轻松课目标配速带（六区接入） ----------
+
+def test_recovery_workouts_land_in_recovery_band_not_easy():
+    """恢复跑（kind=RECOVERY）目标带应为 50–59%VDOT 恢复带，不再共用 E 带
+    （旧引擎误按 59–74% 落库致配速过快）；轻松跑仍落 E 带，各强度分化明确。"""
+    from runtrainer.domain import vdot as vd
+    v = 50.0
+    t = vd.pace_table(v)
+    res = generate_plan(_spec(vdot=v, double_days=1))
+    recs = [w for w in res.workouts if w.kind == "RECOVERY"]
+    es = [w for w in res.workouts if w.kind == "E"]
+    assert recs and es, "双练计划应含恢复跑与轻松跑"
+    for w in recs:
+        assert w.pace_zone == "RECOVERY"
+        assert w.pace_slow_s_km == t["RECOVERY"]["slow_s_km"]
+        assert w.pace_fast_s_km == t["RECOVERY"]["fast_s_km"]
+        # 主体段标注恢复带（恢复晚跑不再显示为 E 段）
+        assert any(s["zone"] == "RECOVERY" for s in w.segments), w.title
+    for w in es:
+        assert w.pace_zone == "E"
+        assert w.pace_slow_s_km == t["E"]["slow_s_km"]
+        assert w.pace_fast_s_km == t["E"]["fast_s_km"]
+    # 分化：恢复带整体慢于 E 带（慢端慢一档；59% 为两带共享边界）
+    assert t["RECOVERY"]["slow_s_km"] > t["E"]["slow_s_km"]
+    assert t["RECOVERY"]["fast_s_km"] <= t["E"]["slow_s_km"] + 1
+    # 质量课不受影响：T 仍单锚点
+    ts = [w for w in res.workouts if w.kind == "T"]
+    assert ts and all(w.pace_zone == "T" and w.pace_slow_s_km == t["T"] for w in ts)

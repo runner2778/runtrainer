@@ -41,6 +41,10 @@ PACE_ZONES = (
      "use": "短冲重复跑（R 1.05）"},
 )
 
+# 恢复带 %VDOT（PACE_ZONES[0] 即 recovery 行；计划内 kind=RECOVERY 的目标带，
+# 旧引擎把恢复课按 E 带（59–74%）落库导致配速过快，已按本带修正）
+REC_LOW, REC_HIGH = PACE_ZONES[0]["pct_lo"], PACE_ZONES[0]["pct_hi"]
+
 
 def intensity_zones(vdot: float) -> list[dict] | None:
     """给定 VDOT 的各强度区间配速表（配速随 %VDOT 升高而变快）。
@@ -115,14 +119,17 @@ def pace_s_km(vdot: float, pct: float) -> float:
 
 
 def pace_table(vdot: float) -> dict:
-    """E/M/T/I/R 配速表（s/km）。
+    """E/M/T/I/R 配速表（s/km），并附 RECOVERY 恢复带区间。
 
-    E 为区间 [slow, fast]，其余为单值；均四舍五入到整数秒。
+    RECOVERY/E 为区间 [slow, fast]（slow 慢端），M/T/I/R 为单值；
+    均四舍五入到整数秒。
     """
     if vdot <= 0:
         raise ValueError("vdot 必须为正")
     return {
         "vdot": round(vdot, 1),
+        "RECOVERY": {"slow_s_km": round(pace_s_km(vdot, REC_LOW)),
+                     "fast_s_km": round(pace_s_km(vdot, REC_HIGH))},
         "E": {"slow_s_km": round(pace_s_km(vdot, E_LOW)),
               "fast_s_km": round(pace_s_km(vdot, E_HIGH))},
         "M": round(pace_s_km(vdot, M_PCT)),

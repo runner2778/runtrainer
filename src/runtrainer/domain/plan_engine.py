@@ -532,8 +532,10 @@ def _mk_draft(d: date, w: int, phase: str, tpl: Template, title: str, descriptio
               slot: int = 1) -> WorkoutDraft:
     slow = fast = None
     if tpl.pace_zone:
-        if tpl.pace_zone == "E":
-            slow, fast = paces["E"]["slow_s_km"], paces["E"]["fast_s_km"]
+        if tpl.pace_zone in ("E", "RECOVERY"):
+            # 区间课：轻松跑 E 带 59–74%、恢复跑 RECOVERY 带 50–59%，
+            # 慢/快两端分别落带（低 % 端慢）；其余 M/T/I/R 为单值课
+            slow, fast = paces[tpl.pace_zone]["slow_s_km"], paces[tpl.pace_zone]["fast_s_km"]
         else:
             slow = fast = paces[tpl.pace_zone]
     return WorkoutDraft(

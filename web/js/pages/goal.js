@@ -8,7 +8,7 @@ const DISTANCES = [
 ];
 const PHASE_LABELS = { base: '基础期', early: '早期强度', transition: '过渡期', final: '最终强度', taper: '减量期' };
 const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
-const ZONE_LABELS = { E: '轻松配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速' };
+const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速' };
 // 课型 → 强度区间（与仪表盘/日历一致：vdot.PACE_ZONES 的区间与 % 带）——
 // 制定出的课表在日历上按此标注「该课属于哪一档强度区间」
 const KIND_ZONES = {
@@ -18,7 +18,7 @@ const KIND_ZONES = {
   I: { label: '最大摄氧量区', band: '92–100%' },
   R: { label: '无氧冲刺区', band: '100–105%' },
   LR: { label: '有氧区（长距离）', band: '59–82%' },
-  RECOVERY: { label: '恢复区', band: '<59%' },
+  RECOVERY: { label: '恢复区', band: '50–59%' },
   TUNEUP: { label: '测试赛强度', band: '' },
   RACE: { label: '比赛强度', band: '' },
 };

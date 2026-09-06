@@ -170,6 +170,10 @@ class Api:
     def get_plan_workouts(self, plan_id: int, start_date: str | None = None,
                           end_date: str | None = None):
         from ..utils import jsonutil
+        # 恢复课配速带自愈（旧引擎误按 E 带落库 → 50–59% 恢复带）：
+        # 日历每次拉课表即对齐，既有计划无需等重建即时更新
+        from ..services.plan_service import ensure_recovery_pace
+        ensure_recovery_pace(plan_repo.get_plan(plan_id))
         ws = plan_repo.get_workouts(plan_id, start_date, end_date)
         for w in ws:
             segs = jsonutil.loads(w.pop("segments_json", None)) or []

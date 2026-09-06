@@ -262,3 +262,35 @@ def test_new_race_input_reflects_on_next_dashboard_call(monkeypatch, plan):
     assert ab2["vdot"] > ab1["vdot"]
     race_ev = next(e for e in ab2["evidence"] if e["source"] == "recent_race")
     assert race_ev["detail"]                 # 标注带出新成绩说明
+
+
+def test_recovery_pace_selfheals_to_recovery_band_on_read(monkeypatch, plan):
+    """恢复课配速带自愈：旧引擎把恢复跑按 E 带（59–74%）落库显过快 →
+    日历/仪表盘每次读取即按计划 VDOT 对齐到 50–59% 恢复带（幂等，不重建课表）。"""
+    from runtrainer.domain import vdot as vd
+    p, ws = plan
+    t = vd.pace_table(float(p["vdot"]))
+    rec_rows = [w for w in ws if w["kind"] == "RECOVERY"]
+    assert rec_rows, "计划应含恢复课"
+    # 新引擎生成的计划本身已落恢复带
+    for w in rec_rows:
+        assert w["pace_zone"] == "RECOVERY"
+        assert w["pace_slow_s_km"] == t["RECOVERY"]["slow_s_km"]
+    # 模拟旧引擎产物：恢复课误按 E 带落库
+    legacy = dict(rec_rows[0])
+    legacy.update({"pace_zone": "E", "pace_slow_s_km": t["E"]["slow_s_km"],
+                   "pace_fast_s_km": t["E"]["fast_s_km"]})
+    plan_repo.update_workout(legacy["id"], legacy)
+    # 读取自愈：bridge.get_plan_workouts 入口即修复
+    Api().get_plan_workouts(p["id"])
+    rows = {w["id"]: w for w in plan_repo.get_workouts(p["id"])}
+    for wid, w in rows.items():
+        if w["kind"] == "RECOVERY":
+            assert w["pace_zone"] == "RECOVERY"
+            assert w["pace_slow_s_km"] == t["RECOVERY"]["slow_s_km"]
+            assert w["pace_fast_s_km"] == t["RECOVERY"]["fast_s_km"]
+    # 幂等：全部对齐后再次调用为空操作（E 课与其它字段不受影响）
+    n = plan_service.ensure_recovery_pace(plan_repo.get_plan(p["id"]))
+    assert n == 0
+    es = [w for w in plan_repo.get_workouts(p["id"]) if w["kind"] == "E"]
+    assert es and all(w["pace_zone"] == "E" for w in es)

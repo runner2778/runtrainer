@@ -242,6 +242,23 @@ def create_goal_and_plan(params: dict) -> dict:
     return payload
 
 
+def ensure_recovery_pace(plan: dict | None) -> int:
+    """计划恢复课配速带自愈（读取侧幂等调用）。
+
+    旧引擎把恢复跑/放松晚跑（kind=RECOVERY）按 E 带 59–74%VDOT 落库，
+    配速明显偏快；六区体系下恢复课应在 50–59% 恢复带。按计划 VDOT 把这类
+    课的 pace_zone/配速区间原地修正（不重建课表、不丢 AI 调整），已对齐
+    时是空操作。日历/仪表盘每次加载即触发 → 既有计划无需等同步重建即时更新。
+    """
+    if not plan or not plan.get("vdot"):
+        return 0
+    try:
+        rec = vd.pace_table(float(plan["vdot"]))["RECOVERY"]
+    except (TypeError, ValueError):
+        return 0
+    return plan_repo.repair_recovery_paces(plan["id"], rec["slow_s_km"], rec["fast_s_km"])
+
+
 def refresh_active_plan() -> dict | None:
     """真实同步后按最新水平重建 active 课表（VDOT 动态变化入口）。
 

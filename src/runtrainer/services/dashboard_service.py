@@ -184,6 +184,11 @@ def get_dashboard() -> dict:
     """首页聚合数据。无计划时除 today/has_plan 外各块为空结构，前端只显引导。"""
     today = dates.today()
     plan = plan_repo.get_active_plan()
+    if plan:
+        # 恢复课配速带自愈（旧引擎误按 E 带落库 → 50–59% 恢复带）：
+        # 读侧即对齐，日历/仪表盘每次加载即时生效，无需等课表重建
+        from .plan_service import ensure_recovery_pace
+        ensure_recovery_pace(plan)
     profile = profile_repo.get_profile() or {}
     ws = today - timedelta(days=today.weekday())
     out: dict = {"today": today.isoformat(), "has_plan": bool(plan)}

@@ -156,6 +156,28 @@ def update_workout(workout_id: int, w: dict) -> None:
         )
 
 
+def repair_recovery_paces(plan_id: int, slow_s_km: float, fast_s_km: float) -> int:
+    """把计划内 kind=RECOVERY 的课原地对齐到恢复带（50–59%VDOT）。
+
+    旧引擎把恢复课按 E 带（59–74%）落库导致配速过快；kind 是强度语义的
+    权威，此处只更动这些行的配速字段（pace_zone/慢快两端），不触碰距离/
+    时长/分段/状态/AI 调整。幂等：已对齐的行不重复写。返回修复行数。
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT id FROM planned_workouts WHERE plan_id = ? AND kind = 'RECOVERY'"
+            " AND (pace_zone != 'RECOVERY' OR pace_slow_s_km != ? OR pace_fast_s_km != ?)",
+            (plan_id, slow_s_km, fast_s_km))
+        ids = [r[0] for r in cur.fetchall()]
+        if ids:
+            marks = ", ".join("?" * len(ids))
+            conn.execute(
+                f"UPDATE planned_workouts SET pace_zone = 'RECOVERY',"
+                f" pace_slow_s_km = ?, pace_fast_s_km = ? WHERE id IN ({marks})",
+                (slow_s_km, fast_s_km, *ids))
+    return len(ids)
+
+
 def get_phase_weeks(plan: dict) -> dict:
     """phase_weeks JSON 列 → dict。"""
     return jsonutil.loads(plan["phase_weeks"]) or {}
