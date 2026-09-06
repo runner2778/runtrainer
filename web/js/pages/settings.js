@@ -260,7 +260,11 @@ export function initSettings() {
 
     async saveProfile() {
       const { ok, error } = await tryCall('save_profile', this.profile);
-      ok ? this.$dispatch('toast', { text: '档案已保存' }) : this.$dispatch('toast', { text: '保存失败: ' + error });
+      if (!ok) { this.$dispatch('toast', { text: '保存失败: ' + error }); return; }
+      this.$dispatch('toast', { text: '档案已保存' });
+      // 静息心率/最大心率/体重等参与 HRR 分量、心率区、恢复度与教练上下文
+      // → 其余页面（仪表盘水平预估/日历活动分类）立即用新档案重算
+      window.dispatchEvent(new Event('data-changed'));
     },
     async saveGarmin() {
       const { ok, error } = await tryCall('save_garmin_credentials', this.garminUsername, this.garminPassword);

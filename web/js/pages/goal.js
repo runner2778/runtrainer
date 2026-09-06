@@ -402,6 +402,8 @@ export function initGoal() {
       this.creating = false;
       if (!ok) { this.$dispatch('toast', { text: '生成失败: ' + error }); return; }
       this.$dispatch('toast', { text: `课表已生成（${data.total_weeks} 周，${data.workouts.length} 节课）` });
+      // 新计划影响仪表盘今日课/负荷/倒计时与健康页对照 → 其余页立即刷新
+      window.dispatchEvent(new Event('data-changed'));
       setTimeout(() => { location.hash = '#/calendar'; }, 600);
     },
 

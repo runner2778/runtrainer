@@ -216,3 +216,49 @@ def test_bridge_get_dashboard(monkeypatch, plan):
     assert res["ok"] is True
     assert res["data"]["has_plan"] is True
     assert res["data"]["race"]["name"] == "半马"
+
+
+def _insert_race(day, minutes: float, external_id: str,
+                 name: str = "10K 测试赛") -> None:
+    """插入一场 9.8km 的近似 10K 比赛（心率 185/195 ≥88%，名称带比赛标记）。"""
+    dist = 9800.0
+    dur = int(minutes * 60)
+    activity_repo.upsert_activity({
+        "source": "garmin", "external_id": external_id, "file_path": None,
+        "name": name, "sport": "跑步",
+        "start_ts": dates.date_to_ts(day) + 18 * 3600, "tz_offset_min": 0,
+        "duration_s": dur, "distance_m": dist,
+        "avg_pace_s_km": round(dur * 1000 / dist, 1), "avg_hr": 185.0,
+        "max_hr": 195.0, "laps_json": None, "has_samples": 0,
+    })
+
+
+def test_new_race_input_reflects_on_next_dashboard_call(monkeypatch, plan):
+    """数据输入 → 下一次 get_dashboard 立即重算体现（UI 刷新广播的数据侧保证）：
+    只有轻松跑无比赛证据 → 插入比赛成绩 → 水平预估出现 recent_race 证据与等效
+    成绩 → 再插入更快成绩 → 水平随之再升；全程取即算、无缓存滞留。"""
+    today = REAL_TODAY + timedelta(days=1)
+    _patch_today(monkeypatch, today)
+    _insert_activity(today - timedelta(days=7), 5.0, "easy-7d")
+
+    d0 = dashboard_service.get_dashboard()
+    ab0 = d0["ability_30d"]
+    assert ab0["plan_vdot"] == 45.0          # 有课表对照
+    assert not any(e["source"] == "recent_race" for e in ab0["evidence"])
+    assert ab0["vdot"] is None               # 无比赛/强度证据 → 水平未定
+
+    # 插入 9.8km ~42:00 比赛 → 下一次读取即带出证据与等效成绩
+    _insert_race(today - timedelta(days=5), 42.0, "race-1")
+    d1 = dashboard_service.get_dashboard()
+    ab1 = d1["ability_30d"]
+    assert any(e["source"] == "recent_race" for e in ab1["evidence"])
+    assert ab1["vdot"] and ab1["vdot"] > 0
+    assert ab1["predictions"] and ab1["predictions"]["5K"] > 0
+
+    # 跑得更快（~40:30）→ 下一次读取即用新成绩，水平再升
+    _insert_race(today - timedelta(days=2), 40.5, "race-2")
+    d2 = dashboard_service.get_dashboard()
+    ab2 = d2["ability_30d"]
+    assert ab2["vdot"] > ab1["vdot"]
+    race_ev = next(e for e in ab2["evidence"] if e["source"] == "recent_race")
+    assert race_ev["detail"]                 # 标注带出新成绩说明
