@@ -75,6 +75,7 @@ class Api:
             "ai_model": settings_service.get_ai_model(),
             "theme": settings_service.get_theme(),
             "mock_mode": settings_service.is_mock_mode(),
+            "ai_web_search": settings_service.get_ai_web_search(),
             "garmin_cn": settings_service.is_garmin_cn(),
             "sync_states": _sync_states_with_meta(),
         }
@@ -130,6 +131,8 @@ class Api:
             settings_service.set_theme(value)
         elif key == "mock_mode":
             settings_service.set_mock_mode(value == "1")
+        elif key == "ai_web_search":
+            settings_service.set_ai_web_search(value == "1")
         elif key == "garmin_cn":
             settings_service.set_garmin_cn(value == "1")
         else:

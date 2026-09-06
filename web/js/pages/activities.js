@@ -75,8 +75,15 @@ const HTML = `
     <p class="mb8" x-show="detail && detail.workout && detail.workout.label">
       <span class="badge" :class="kindClass(detail.workout)" x-text="detail.workout.label"></span>
       <span class="muted" x-show="detail.workout && detail.workout.hr_pct != null"
-            x-text="'（平均心率 ' + (detail.workout.hr_pct * 100).toFixed(0) + '% HRmax）'"></span>
+            x-text="zoneStatText()"></span>
     </p>
+    <!-- 强度定位条：本次训练平均强度相对 LT1/LT2 的位置（仅连续强度课有意义） -->
+    <template x-if="detail && detail.workout && zoneKindOf(detail.workout) && detail.workout.hr_pct != null">
+      <div class="mt8">
+        <div x-html="zoneStripHtml(detail.workout)"></div>
+        <p class="muted mt4" style="font-size:12px" x-text="zoneDotText(detail.workout)"></p>
+      </div>
+    </template>
     <template x-if="detail && detail.structure && detail.structure.length > 1">
       <table class="mb8">
         <thead><tr><th>分段</th><th class="num">距离(m)</th><th class="num">用时</th><th class="num">配速</th><th class="num">平均心率</th></tr></thead>
@@ -288,6 +295,54 @@ export function initActivities() {
     },
     kindClass(w) {
       return w && w.kind ? `kind-${w.kind}` : '';
+    },
+    // ---- 强度定位（LT1/LT2 条带，第十四批）----
+    zoneKindOf(w) {
+      return w && ['recovery', 'easy', 'aerobic', 'high_aerobic', 'tempo', 'anaerobic'].includes(w.kind);
+    },
+    _zoneCol(k) {
+      return { recovery: 'var(--kind-recovery)', easy: 'var(--kind-e)', aerobic: 'var(--kind-m)',
+        high_aerobic: 'var(--kind-hi)', tempo: 'var(--kind-t)', anaerobic: 'var(--kind-i)' }[k] || 'var(--bg-hover)';
+    },
+    metricName() {
+      const w = this.detail.workout;
+      return w && w.hr_metric === 'hrr' ? '储备心率 %HRR' : '%HRmax';
+    },
+    zoneStatText() {
+      const w = this.detail.workout;
+      if (!w || w.hr_pct == null) return '';
+      const bpm = this.detail && this.detail.avg_hr ? this.detail.avg_hr.toFixed(0) + ' bpm = ' : '';
+      return '（平均心率 ' + bpm + (w.hr_pct * 100).toFixed(0) + '% ' + this.metricName() + '）';
+    },
+    zoneStripHtml(w) {
+      // 横向条带：各区带按宽度比例着色，LT1/LT2 竖虚线 + 本次强度圆点定位
+      const names = { recovery: '恢复', easy: '低有氧', aerobic: '中有氧',
+        high_aerobic: '高有氧', tempo: '阈值', anaerobic: '无氧' };
+      let segs = '', keys = '', acc = 0;
+      for (const z of (w.zones || [])) {
+        const wdt = Math.max(0.02, z.hi - z.lo);
+        segs += `<div class="istrip-seg" style="flex:${wdt.toFixed(4)};background:${this._zoneCol(z.key)}"`
+          + ` title="${z.name} ${Math.round(z.lo * 100)}–${Math.round(Math.min(z.hi, 1) * 100)}%"></div>`;
+        const prev = acc; acc += wdt;
+        keys += `<span class="istrip-ck" style="background:${this._zoneCol(z.key)}"></span>${names[z.key] || z.name}`;
+        if (w.lt1 && prev <= w.lt1 + 0.001 && acc >= w.lt1) keys += `<span class="istrip-lt">LT1</span>`;
+        if (w.lt2 && prev <= w.lt2 + 0.001 && acc >= w.lt2) keys += `<span class="istrip-lt">LT2</span>`;
+      }
+      const p = Math.max(0, Math.min(100, (w.hr_pct || 0) * 100));
+      const mk = (v, t) => `<div class="istrip-mk" style="left:${(v * 100).toFixed(1)}%" title="${t}"></div>`;
+      const marksHtml = mk(w.lt1, 'LT1 有氧阈（一区上沿）') + mk(w.lt2, 'LT2 乳酸阈（二区上沿）');
+      return `<div class="istrip">${segs}${marksHtml}`
+        + `<div class="istrip-dot" style="left:calc(${p.toFixed(1)}% - 6px)" title="本次 ${p.toFixed(0)}%"></div></div>`
+        + `<div class="istrip-keys">${keys}</div>`;
+    },
+    zoneDotText(w) {
+      const p = w.hr_pct;
+      if (p == null) return '';
+      const pct = (p * 100).toFixed(0) + '% ' + this.metricName();
+      if (p < w.lt1) return `本次平均强度 ${pct}，位于 LT1 以下——纯有氧基础区`;
+      if (p < w.lt2) return `本次平均强度 ${pct}，落在 LT1 与 LT2 之间——高强度有氧（节奏建设）区`;
+      if (p < 0.96) return `本次平均强度 ${pct}，已在 LT2（乳酸阈）之上——阈值强度，质量课区间`;
+      return `本次平均强度 ${pct}，远超 LT2——无氧强度区，注意累积疲劳`;
     },
     segLabel(detail, i) {
       const labels = { sprint: '冲刺段', fast: '快跑段', walk: '休息·走路', jog: '休息·慢跑',

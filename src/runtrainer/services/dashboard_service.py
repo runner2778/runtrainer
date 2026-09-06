@@ -125,11 +125,14 @@ def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
     重算，天然满足「随每一次同步自动读取并调整」。
     """
     from ..domain import ability as ab
-    acts30 = [_decode_activity(a) for a in activity_repo.list_activities(
-        (today - timedelta(days=30)).isoformat(), limit=2000)]
-    for a in acts30:
+    # 一次拉近一年：30 天切片作「现在水平」，全年行供近一年最佳成绩/保持度
+    acts_year = [_decode_activity(a) for a in activity_repo.list_activities(
+        (today - timedelta(days=364)).isoformat(), limit=3000)]
+    for a in acts_year:
         if a.get("start_ts"):
             a["date"] = dates.ts_to_date(a["start_ts"]).isoformat()
+    acts30 = [a for a in acts_year
+              if a.get("date", "") >= (today - timedelta(days=30)).isoformat()]
     # 静息心率：档案优先；否则取近 30 天健康数据中位数（HRR 分量必需）
     rest_hr = profile.get("rest_hr")
     if not rest_hr:
@@ -139,11 +142,21 @@ def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
             rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
     est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
                              rest_hr=rest_hr, as_of=today)
+    # 近一年各距离最佳成绩 + 训练保持度：与「现在水平」互相印证
+    # （最近没跑比赛时，回答「现在能跑多少」要引用这些数字）
+    year_bests = ab.distance_bests(
+        acts_year,
+        get_samples=(lambda aid: activity_repo.get_samples(aid)) if any(
+            a.get("has_samples") for a in acts_year) else None,
+        max_hr=est.get("max_hr"))
+    consistency = ab.training_consistency(acts_year, today)
     return {
         "window_days": 30,
         "plan_vdot": plan_vdot,  # 对照用：课表训练按目标页定的 VDOT 配速
         **{k: est.get(k) for k in ("vdot", "predictions", "evidence",
                                    "max_hr", "as_of")},
+        "year_bests": year_bests,
+        "consistency": consistency,
         "note": ("近 30 天跑步数据不足，无法综合预估；跑几次后会自动更新。"
                  if not est.get("vdot") else None),
     }

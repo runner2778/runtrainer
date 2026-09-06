@@ -12,6 +12,7 @@
   --kind-tuneup: #9b6dd6;
   --kind-race: #0ca30c;
   --kind-strength: #c2703d;
+  --kind-hi: #9acd32;   /* 高有氧（LT1~LT2 之间）：介于 M 绿与 T 黄之间的黄绿 */
 
   /* 状态色（仅状态，永不作序列色） */
   --st-good: #0ca30c;
@@ -178,10 +179,37 @@ tbody tr:hover { background: var(--bg-hover); }
 .badge.kind-repeats { background: var(--kind-r); }
 .badge.kind-tempo { background: var(--kind-t); }
 .badge.kind-aerobic { background: var(--kind-m); }
+.badge.kind-high_aerobic { background: var(--kind-hi); }
 .badge.kind-easy { background: var(--kind-e); }
 .badge.kind-recovery { background: var(--kind-recovery); }
-.badge.kind-anaerobic { background: var(--accent); }
+.badge.kind-anaerobic { background: var(--kind-i); }
 .badge.kind-unknown { background: var(--bg-hover); }
+
+/* 强度定位条：本次训练平均强度相对 LT1/LT2 的位置 */
+.istrip {
+  position: relative; display: flex; height: 14px; border-radius: 7px;
+  overflow: visible; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+}
+.istrip-seg { height: 100%; }
+.istrip-seg:first-child { border-radius: 7px 0 0 7px; }
+.istrip-seg:last-child { border-radius: 0 7px 7px 0; }
+.istrip-mk {
+  position: absolute; top: -2px; bottom: -2px; width: 0;
+  border-left: 1.5px dashed var(--text); opacity: 0.75; z-index: 1;
+}
+.istrip-dot {
+  position: absolute; top: 50%; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--bg-card);
+  box-shadow: 0 0 0 1.5px rgba(0, 0, 0, 0.35);
+  transform: translate(-50%, -50%); z-index: 2;
+}
+.istrip-keys {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center;
+  margin-top: 5px; font-size: 11px; color: var(--text-muted);
+}
+.istrip-ck { width: 8px; height: 8px; border-radius: 2px; display: inline-block; margin-right: 3px; }
+.istrip-lt { font-weight: 700; color: var(--text); }
+.istrip-lt::after { content: "▼"; margin-left: 2px; font-size: 9px; color: var(--text-muted); }
 
 .banner {
   background: var(--accent-soft);

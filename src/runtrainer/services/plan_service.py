@@ -37,11 +37,15 @@ def wizard_context() -> dict:
     from ..domain import ability as ab
     from ..utils import jsonutil
     today = dates.today()
-    acts180 = [_decode_activity(a) for a in
-               activity_repo.list_activities((today - timedelta(days=180)).isoformat(), limit=2000)]
-    for a in acts180:
+    # 一次拉近一年：180 天切片供水平预估分量，全年供近一年最佳成绩/保持度
+    acts_year = [_decode_activity(a) for a in
+                 activity_repo.list_activities((today - timedelta(days=364)).isoformat(),
+                                               limit=3000)]
+    for a in acts_year:
         if a.get("start_ts"):
             a["date"] = dates.ts_to_date(a["start_ts"]).isoformat()
+    acts180 = [a for a in acts_year
+               if a.get("date", "") >= (today - timedelta(days=180)).isoformat()]
     prof = profile_repo.get_profile() or {}
     # 静息心率：档案优先；否则取近 30 天健康数据静息心率中位数（HRR 分量）
     rest_hr = prof.get("rest_hr")
@@ -75,10 +79,19 @@ def wizard_context() -> dict:
     max_hr = prof.get("max_hr") or estimate_max_hr(prof.get("birth_year"))
     phase_suggestion = suggest_phase(acts180, today, max_hr=max_hr,
                                      rest_hr=prof.get("rest_hr"))
+    # 近一年各距离最佳成绩（比赛硬证据 + 长跑最快分段）+ 训练保持度：
+    # 供 AI 教练「预估水平/今年状态」类提问引用（build_chat 输出块）。
+    year_bests = ab.distance_bests(
+        acts_year,
+        get_samples=(lambda aid: activity_repo.get_samples(aid)) if any(
+            a.get("has_samples") for a in acts_year) else None,
+        max_hr=est.get("max_hr"))
+    consistency = ab.training_consistency(acts_year, today)
     return {"today": today.isoformat(), "recent_vdot": recent_vdot,
             "recent_vdot_source": recent_vdot_source, "recent_race": recent_race,
             "ability": {k: est.get(k) for k in
-                        ("vdot", "predictions", "evidence", "max_hr", "as_of")},
+                        ("vdot", "predictions", "evidence", "max_hr", "as_of")}
+            | {"year_bests": year_bests, "consistency": consistency},
             "avg_weekly_km_4w": avg_km_4w, "min_weeks": MIN_WEEKS,
             "phase_suggestion": phase_suggestion}
 

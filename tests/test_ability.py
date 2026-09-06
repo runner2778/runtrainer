@@ -1,4 +1,4 @@
-"""能力预估：综合手表 VO2max / 配速-心率趋势 / 间歇能力 / 比赛成绩。"""
+﻿"""能力预估：综合手表 VO2max / 配速-心率趋势 / 间歇能力 / 比赛成绩。"""
 from __future__ import annotations
 
 from datetime import timedelta
@@ -195,3 +195,83 @@ def test_hr_trend_skips_without_comparable_periods():
     est = ab.compute_ability(acts, 50.0)
     assert not any(ev["source"] == "hr_trend" for ev in est["evidence"])
     assert est["vdot"] == 50.0
+
+# ---- 近一年最佳成绩 / 训练保持度（第十四批）----
+def _samples_km(km, pace_s_km, hr=160):
+    """匀速跑：每 1 秒一个样本（距离≈km*1000 m）。"""
+    spd = 1000.0 / pace_s_km
+    # 每样本 1 秒、覆盖 spd 米 → 共需 km*1000/spd = km*pace_s_km 个样本
+    return [{"t_offset_s": float(i), "hr": hr, "speed_mps": spd}
+            for i in range(int(km * pace_s_km))]
+
+
+def _yr_act(days_ago, dist_m, dur_s, avg_hr=None, max_hr=None,
+            name="训练", aid=1, has_samples=False):
+    d = dates.today() - timedelta(days=days_ago)
+    return {"id": aid, "name": name, "start_ts": dates.date_to_ts(d),
+            "date": d.isoformat(), "distance_m": dist_m, "duration_s": dur_s,
+            "avg_pace_s_km": dur_s / dist_m * 1000 if dist_m else None,
+            "avg_hr": avg_hr, "max_hr": max_hr, "has_samples": has_samples}
+
+
+def test_year_bests_race_whole_run():
+    """整场近似比赛（名称含 10k + 心率 0.89）→ 直接折算。"""
+    acts = [_yr_act(20, 10000, 40 * 60, avg_hr=170, max_hr=190,
+                    name="10K 比赛", aid=1)]
+    out = ab.distance_bests(acts, None, max_hr=190)
+    assert len(out) == 1 and out[0]["distance"] == "10K"
+    assert out[0]["source"] == "race"
+    assert abs(out[0]["best_seconds"] - 2400) < 5
+    assert abs(out[0]["vdot"] - round(vd.estimate_vdot(10000, 2400), 1)) < 0.01
+
+
+def test_year_bests_segment_from_long_run():
+    """长跑滑窗切最快分段：10K@4:00 → 5K 最快 = 20:00、10K = 40:00。"""
+    acts = [_yr_act(10, 10000, 40 * 60, name="长距离", aid=1, has_samples=True)]
+    out = ab.distance_bests(acts, lambda aid: _samples_km(10, 240), max_hr=190)
+    assert [b["distance"] for b in out] == ["5K", "10K"]
+    assert out[0]["source"] == "effort"
+    assert abs(out[0]["best_seconds"] - 1200) < 15  # 20:00 折算 5K
+    assert abs(out[1]["best_seconds"] - 2400) < 15
+    # 折算成绩与 VDOT 一致性：5K 20:00 等效 VDOT
+    assert abs(out[0]["vdot"] - round(vd.estimate_vdot(5000, 1200), 1)) < 0.01
+
+
+def test_year_bests_hr_gate_excludes_easy_segments():
+    """低强度分段的平均心率 <82% 最大心率 → 不当最佳成绩。"""
+    acts = [_yr_act(10, 10000, 40 * 60, avg_hr=130, max_hr=190,
+                    name="放松跑", aid=1, has_samples=True)]
+    samples = _samples_km(10, 240, hr=130)
+    assert ab.distance_bests(acts, lambda aid: samples, max_hr=190) == []
+    # 无最大心率参考时不设心率门（纯配速信息给最低限参考）
+    assert len(ab.distance_bests(acts, lambda aid: samples, max_hr=None)) == 2
+
+
+def test_year_bests_effort_beats_race_when_faster():
+    """同日段证据取等效 VDOT 更高者：快分段覆盖慢比赛。"""
+    races = [_yr_act(5, 10000, 43 * 60, avg_hr=175, max_hr=190,
+                     name="10K 比赛", aid=1)]
+    fast = _yr_act(3, 12000, 50 * 60, name="节奏跑", aid=2, has_samples=True)
+    loader = {1: None, 2: _samples_km(12, 235, hr=165)}
+    out = ab.distance_bests(races + [fast],
+                            lambda aid: loader[aid], max_hr=190)
+    ten = next(b for b in out if b["distance"] == "10K")
+    assert ten["source"] == "effort"
+    assert ten["best_seconds"] < 43 * 60
+
+
+def test_consistency_weeks_and_recent_vs_year():
+    """保持度：近 7 天天天跑（10km）+ 40/90 天前各一次 → 周活跃率 & 跑量对比。"""
+    acts = []
+    for days_ago in range(7):
+        acts.append(_yr_act(days_ago, 10000, 3000, aid=100 + days_ago))
+    acts.append(_yr_act(40, 8000, 2400, aid=200))
+    acts.append(_yr_act(90, 5000, 1500, aid=201))
+    c = ab.training_consistency(acts)
+    span = 90 // 7 + 1  # 首次跑步到今天的周数
+    assert c["total_weeks"] == span
+    assert c["run_weeks"] == 3  # 最近 1 周 + 40 天周 + 90 天周
+    assert c["run_week_pct"] == round(3 / span * 100)
+    year_avg = (7 * 10 + 8 + 5) / span
+    assert abs(c["recent_4w_avg_km"] - 7 * 10 / 4) < 0.01
+    assert c["recent_vs_year_pct"] == round(7 * 10 / 4 / year_avg * 100)

@@ -339,17 +339,27 @@ SPRINT_MAX_DIST_M = 500.0    # ≤500m 的跑段才可能算冲刺段（R 距离
 SPRINT_PACE_FACTOR = 0.85    # 快于整体配速 15% 才算冲刺（相对强度）
 WALK_MIN_PACE_S_KM = 480.0   # 休息段慢于 8:00/km = 走路，否则慢跑
 # 心率区 → 课程类别；由轻到重。有静息心率时按 %HRR（储备心率）解释，
-# 否则按 %HRmax。区间用 Garmin 区习惯（Z1<60/Z2 60-70/Z3 70-80/Z4 80-90），
-# 切到 HRR 后对训练有素者即等价于「基础=Z2、有氧=Z3」等常识归类。
+# 否则按 %HRmax。区带以两个乳酸阈值为生理界标（第十四批整改细化）：
+#   LT1（≈78% HRR）以下 = 纯有氧（恢复 + 低/中有氧）；
+#   LT1 ~ LT2（≈88% HRR）= 高强度有氧（耐力上限建设区）；
+#   ≥ LT2 = 阈值与无氧（质量训练区）。
+# 低/中/高有氧的细分依据：LT1 线下是「轻松跑得动」的基础有氧，线上到
+# LT2 是高强度有氧（长时间维持会快速累积疲劳的顶格有氧）。
 # recovery 线取 60%（Z1 顶）：训练有素者恢复跑通常压在 65%HRmax 以下，
 # 62%HRR 会把轻松慢跑（用户实测 121-137）误划成恢复。
+LT1_HRR = 0.78
+LT2_HRR = 0.88
 HR_ZONE_KINDS = [
     ("recovery", 0.0, 0.60, "恢复跑"),
-    ("easy", 0.60, 0.72, "轻松跑"),
-    ("aerobic", 0.72, 0.82, "有氧跑"),
-    ("tempo", 0.82, 0.92, "节奏持续跑"),
-    ("anaerobic", 0.92, 10.0, "高强度持续跑"),
+    ("easy", 0.60, 0.70, "低有氧跑"),
+    ("aerobic", 0.70, LT1_HRR, "中有氧跑"),
+    ("high_aerobic", LT1_HRR, LT2_HRR, "高有氧跑"),
+    ("tempo", LT2_HRR, 0.96, "阈值跑"),
+    ("anaerobic", 0.96, 1.0, "无氧/冲刺"),
 ]
+# 区带公开元数据（供前端画「本次训练相对 LT1/LT2 的位置」条带图）
+ZONE_META = [{"key": k, "name": n, "lo": lo, "hi": hi}
+             for k, lo, hi, n in HR_ZONE_KINDS]
 SEG_KIND_LABELS = {
     "sprint": "冲刺段", "fast": "快跑段", "walk": "休息·走路",
     "jog": "休息·慢跑", "stand": "休息·静止", "warmup": "热身/冷身",
@@ -533,13 +543,16 @@ def classify_workout(segments: list[dict], duration_s=None, distance_m=None,
     """课程级识别（不止单一平均配速）：
     - 间歇跑：跑段细分快跑段/冲刺段，休息段细分走路/慢跑/静止
     - 重复跑：只有跑段没有可识别休息段（自动暂停切掉了休息圈）
-    - 匀速跑按心率区归类：恢复跑/轻松跑/有氧跑/节奏持续跑/高强度持续跑。
+    - 匀速跑按心率区归类：恢复/低有氧/中有氧/高有氧（LT1 界）/阈值（LT2 界）/
+      无氧冲刺 六带（HR_ZONE_KINDS，带 LT1/LT2 生理锚点）。
       静息心率已知时用 Karvonen 储备心率（%HRR）——训练有素者储备大，
       用 %HRmax 会把「基础有氧」课（实测 73-77%HRmax）整体误升一档；
       rest_hr 缺失时回退 %HRmax。
 
     返回 {kind, label, work: {fast, sprint}, rest: {walk, jog, stand},
-          hr_pct, seg_kinds: [每段细分]（与 segments 对齐）}。
+          hr_pct, hr_metric: "hrr"|"hrmax"|None, lt1, lt2,
+          zones: [区带元数据（前端画强度条带）],
+          seg_kinds: [每段细分]（与 segments 对齐）}。
     """
     segs = segments or []
     whole_pace = _overall(duration_s, distance_m, segs).get("pace_s_km")
@@ -554,12 +567,15 @@ def classify_workout(segments: list[dict], duration_s=None, distance_m=None,
     if max_hr and (max_hr < 120 or (avg_hr and max_hr < avg_hr)):
         avg_hr = None
     hr_pct = None
+    hr_metric = None
     if avg_hr and max_hr:
         if rest_hr and max_hr > rest_hr and avg_hr > rest_hr:
             # Karvonen 储备心率
             hr_pct = round((avg_hr - rest_hr) / (max_hr - rest_hr), 3)
+            hr_metric = "hrr"
         else:
             hr_pct = round(avg_hr / max_hr, 3)
+            hr_metric = "hrmax"
 
     def _counts(kinds):
         return {k: kinds.count(k) for k in dict.fromkeys(kinds)}
@@ -580,7 +596,9 @@ def classify_workout(segments: list[dict], duration_s=None, distance_m=None,
                 "work": {"fast": wc.get("fast", 0), "sprint": wc.get("sprint", 0)},
                 "rest": {"walk": rc.get("walk", 0), "jog": rc.get("jog", 0),
                          "stand": rc.get("stand", 0)},
-                "hr_pct": hr_pct, "seg_kinds": seg_kinds}
+                "hr_pct": hr_pct, "hr_metric": hr_metric,
+                "lt1": LT1_HRR, "lt2": LT2_HRR, "zones": ZONE_META,
+                "seg_kinds": seg_kinds}
 
     if work_n >= 2:
         # 只有快段没有休息段：间歇课但休息圈被自动暂停吞掉（Garmin 常见）
@@ -594,7 +612,9 @@ def classify_workout(segments: list[dict], duration_s=None, distance_m=None,
         return {"kind": "repeats", "label": label,
                 "work": {"fast": wc.get("fast", 0), "sprint": wc.get("sprint", 0)},
                 "rest": {"walk": 0, "jog": 0, "stand": 0},
-                "hr_pct": hr_pct, "seg_kinds": seg_kinds}
+                "hr_pct": hr_pct, "hr_metric": hr_metric,
+                "lt1": LT1_HRR, "lt2": LT2_HRR, "zones": ZONE_META,
+                "seg_kinds": seg_kinds}
 
     # 匀速跑：按心率区归类；缺心率/缺 max_hr 时无法归类
     kind, label = "unknown", "匀速跑（缺心率数据）"
@@ -606,4 +626,6 @@ def classify_workout(segments: list[dict], duration_s=None, distance_m=None,
     return {"kind": kind, "label": label,
             "work": {"fast": 0, "sprint": 0},
             "rest": {"walk": 0, "jog": 0, "stand": 0},
-            "hr_pct": hr_pct, "seg_kinds": seg_kinds}
+            "hr_pct": hr_pct, "hr_metric": hr_metric,
+            "lt1": LT1_HRR, "lt2": LT2_HRR, "zones": ZONE_META,
+            "seg_kinds": seg_kinds}

@@ -168,6 +168,189 @@ def best_recent_race(activities: list[dict]) -> dict | None:
     return best
 
 
+# ---- 近一年各距离最佳成绩 + 训练保持度（第十四批）----
+# 水平预估此前只看近 180 天（30 天卡/180 天向导）；用户要求把「近一年各项
+# 距离最好成绩、训练保持度」也读进来：比赛/近似距离整场活动是硬证据，平日
+# 长跑里滑窗切出的最快分段（Garmin Best Effort 思路）补足没跑过正式比赛
+# 的距离；保持度用「周活跃率 + 近 4 周跑量 vs 全年周均」量化。
+YEAR_BEST_DISTANCES = (("5K", 5000), ("10K", 10000), ("半马", 21097), ("全马", 42195))
+YEAR_BEST_TOL = 0.06        # 整场活动距离与标准距离容差（≈近似全程的比赛）
+SEG_RANGE = (0.97, 1.12)    # 滑窗覆盖距离相对标准距离的下/上界
+SEG_MIN_HR_RATIO = 0.82     # 分段平均心率 ≥82% 最大心率才认（防散步/轻松段）
+YEAR_SAMPLE_RUN_CAP = 40    # 参与分段扫描的活动上限（防超大库拖慢聊天/看板）
+CONSISTENCY_YEAR_DAYS = 364
+
+
+def distance_bests(activities: list[dict], get_samples=None,
+                   max_hr: float | None = None) -> list[dict]:
+    """近一年（调用方给窗口内活动）各标准距离最佳成绩。
+
+    - 整场近似比赛：距离在容差带内且（平均心率 ≥88% 活动最高心率 或 名称含
+      比赛标记）→ 直接折算 VDOT；
+    - 最长分段（Best Effort）：带样本的更长跑中，按时间滑窗找覆盖距离在
+      [0.97, 1.12]×标准距离、最快的最短耗时窗口；窗口平均心率 ≥82% 最大心率
+      才认（无心率样本的窗口不参与——配速可能被下坡/漂移虚高）。
+    get_samples(activity_id) -> 按时间序的样本 dict 列表（t_offset_s/hr/speed_mps）。
+    返回按距离升序的 [{distance, best_seconds(按最快分段配速折算标准距离), date,
+    vdot, name, source: race|effort, pace_s_km, avg_hr}]；无依据的距离不出现。
+    """
+    best: dict[str, dict] = {}
+    scanned = 0
+    for a in activities:
+        dist = a.get("distance_m") or 0
+        dur = a.get("duration_s") or 0
+        if not dist or not dur:
+            continue
+        name = (a.get("name") or "").lower()
+        a_hr_ratio = ((a.get("avg_hr") or 0) / (a.get("max_hr") or 0)
+                      if a.get("avg_hr") and a.get("max_hr") else None)
+        name_ok = any(h in name for h in RACE_NAME_HINTS)
+        whole_ok = (a_hr_ratio is not None and a_hr_ratio >= 0.88) or name_ok
+        for label, std in YEAR_BEST_DISTANCES:
+            if whole_ok and abs(dist - std) / std <= YEAR_BEST_TOL and dur > 0:
+                v = vd.estimate_vdot(dist, dur)
+                rec = {"distance": label, "best_seconds": round(dur),
+                       "date": a.get("date"), "vdot": round(v, 1),
+                       "name": a.get("name") or "", "source": "race",
+                       "pace_s_km": round(dur / dist * 1000, 1),
+                       "avg_hr": a.get("avg_hr")}
+                _keep_best(best, label, rec)
+        # 分段扫描：仅处理带样本、距离够长到能切出最小标准距离的跑；
+        # 心率样本缺失的不切（配速可能虚高，宁缺毋滥）
+        if not get_samples or scanned >= YEAR_SAMPLE_RUN_CAP:
+            continue
+        if not a.get("has_samples") or dist < YEAR_BEST_DISTANCES[0][1] * SEG_RANGE[0]:
+            continue
+        if a.get("id") is None:
+            continue
+        scanned += 1
+        try:
+            samples = get_samples(a["id"]) or []
+        except Exception:
+            continue
+        seg_bests = _best_effort_windows(samples, max_hr)
+        if not seg_bests:
+            continue
+        for label, (pace_s_m, hr_avg) in seg_bests.items():
+            std_m = dict(YEAR_BEST_DISTANCES)[label]  # 外层循环结束后 std 已失效
+            proj_s = pace_s_m * std_m  # 以最快分段配速折算整段标准距离
+            rec = {"distance": label, "best_seconds": round(proj_s),
+                   "date": a.get("date"),
+                   "vdot": round(vd.estimate_vdot(std_m, proj_s), 1),
+                   "name": f"{a.get('name') or '跑步'}·{label}最快段",
+                   "source": "effort",
+                   "pace_s_km": round(pace_s_m * 1000, 1),
+                   "avg_hr": round(hr_avg) if hr_avg else None}
+            _keep_best(best, label, rec)
+    return [best[l] for l, _ in YEAR_BEST_DISTANCES if l in best]
+
+
+def _keep_best(best: dict, label: str, rec: dict) -> None:
+    """同距离多证据取等效 VDOT 最高者（比赛硬证据自带权重，无需特殊处理）。"""
+    if label not in best or rec["vdot"] > best[label]["vdot"]:
+        best[label] = rec
+
+
+def _best_effort_windows(samples: list[dict], max_hr: float | None,
+                         ) -> dict[str, tuple[float, float | None]]:
+    """一次活动内，为每个标准距离滑窗求最快分段。
+
+    返回 {label: (最快分段配速 s/m, 窗口平均心率 | None)}。窗口覆盖距离在
+    [0.97, 1.12]×标准之间时按「每米用时」比较——直接比总耗时会让刚好
+    压到区间下沿的短窗口假快。前缀和 O(n) 双指针：覆盖 <0.97×标准时右端
+    前进，>1.12×标准时左端前进直到窗口重新落回区间或右端到头。
+    """
+    n = len(samples)
+    if n < 2:
+        return {}
+    # 前缀：pd[k]/pt[k] = 前 k 个样本累计距离/时间；ph/pc 为累计心率与样本数
+    pd = [0.0] * (n + 1)
+    pt = [0.0] * (n + 1)
+    ph = [0.0] * (n + 1)
+    pc = [0] * (n + 1)
+    t_prev = None
+    for i, s in enumerate(samples):
+        t = float(s.get("t_offset_s") or 0)
+        spd = float(s.get("speed_mps") or 0)
+        dt = (t - t_prev) if t_prev is not None else 0
+        if dt < 0:  # 异常时间戳回退视为 0
+            dt = 0
+        pd[i + 1] = pd[i] + (max(spd, 0) * dt if t_prev is not None else 0)
+        pt[i + 1] = t
+        hr = s.get("hr")
+        ph[i + 1] = ph[i] + (float(hr) if hr else 0)
+        pc[i + 1] = pc[i] + (1 if hr else 0)
+        t_prev = t
+    out: dict[str, tuple[float, float, float | None]] = {}
+    for label, std in YEAR_BEST_DISTANCES:
+        lo, hi = std * SEG_RANGE[0], std * SEG_RANGE[1]
+        j = 0
+        for i in range(n + 1):
+            if j <= i:
+                j = i + 1
+            while j <= n and pd[j] - pd[i] < lo:
+                j += 1
+            if j > n:
+                break
+            d = pd[j] - pd[i]
+            if d > hi:
+                continue  # 距离越长耗时未必更长，左端继续前进找更短覆盖
+            t = pt[j] - pt[i]
+            if t <= 0:
+                continue
+            hr_n = pc[j] - pc[i]
+            hr_avg = (ph[j] - ph[i]) / hr_n if hr_n > 0 else None
+            # 有最大心率可依时，无心率样本的窗口不参与（配速可能被下坡/漂移虚高）
+            if max_hr and (hr_avg is None or hr_avg < max_hr * SEG_MIN_HR_RATIO):
+                continue
+            pace_s_m = t / d if d > 0 else 0  # 每米用时：公平跨窗口长度比较
+            cur = out.get(label)
+            if cur is None or pace_s_m < cur[0]:
+                out[label] = (pace_s_m, hr_avg)
+    return out
+
+
+def training_consistency(activities: list[dict], today: date | None = None) -> dict:
+    """近一年训练保持度：周活跃率 + 近 4 周跑量相对全年周均。
+
+    activities 为近一年活动（含 date 或 start_ts）。返回
+    {run_weeks, total_weeks, run_week_pct, recent_4w_avg_km, recent_vs_year_pct}；
+    无任何跑步时 total_weeks=1、各值 0（避免除零）。
+    """
+    today = today or date.today()
+    runs = []
+    for a in activities:
+        d = a.get("date") or a.get("start_ts")
+        if not d:
+            continue
+        try:
+            day = date.fromisoformat(d[:10]) if isinstance(d, str) else date.fromisoformat(d)
+        except (ValueError, TypeError):
+            continue
+        km = (a.get("distance_m") or 0) / 1000
+        if day > today or day < today - timedelta(days=CONSISTENCY_YEAR_DAYS):
+            continue
+        runs.append((day, km))
+    if not runs:
+        return {"run_weeks": 0, "total_weeks": 1, "run_week_pct": 0,
+                "recent_4w_avg_km": 0, "recent_vs_year_pct": 0}
+    first_day = min(day for day, _ in runs)
+    week_span = (today - first_day).days // 7 + 1   # 覆盖周数（从首次跑步起）
+    run_weeks = {((today - day).days // 7) for day, _ in runs}
+    run_weeks = {i for i in run_weeks if 0 <= i < week_span}
+    year_km = sum(km for _, km in runs)
+    year_avg = year_km / week_span if week_span else 0
+    recent_km = sum(km for day, km in runs if day >= today - timedelta(days=27))
+    recent_avg = recent_km / 4
+    return {
+        "run_weeks": len(run_weeks),
+        "total_weeks": week_span,
+        "run_week_pct": round(len(run_weeks) / week_span * 100),
+        "recent_4w_avg_km": round(recent_avg, 1),
+        "recent_vs_year_pct": round(recent_avg / year_avg * 100) if year_avg > 0 else 0,
+    }
+
+
 def interval_ability(activities: list[dict]) -> dict | None:
     """间歇能力（含恢复时间变量）：按课聚合 work 段配速，短段（≤500m）按
     冲刺强度 R 反算、长段按间歇强度 I 反算；再按该课「休息时长/快跑时长」

@@ -10,17 +10,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from runtrainer.ai.deepseek_client import PROVIDERS, DeepSeekClient  # noqa: E402
+from runtrainer.ai.deepseek_client import (  # noqa: E402
+    PROVIDERS, DeepSeekClient, resolve_extra_body)
 from runtrainer.services import settings_service  # noqa: E402
 
 info = PROVIDERS["zhipu"]
 model = sys.argv[1] if len(sys.argv) > 1 else info["models"][0]
 key = settings_service.get_ai_key("zhipu")
 print("zhipu key present:", bool(key), "| model:", model)
+extra_body = resolve_extra_body("zhipu", model)
 client = DeepSeekClient(key or "", model, base_url=info["base_url"],
                         max_tokens=info.get("max_tokens", 8192),
-                        extra_body=info.get("extra_body"))
-print("extra_body:", info.get("extra_body"))
+                        extra_body=extra_body)
+print("extra_body:", extra_body)
 t0 = time.monotonic()
 out = client.chat_json(
     "你是测试助手", '只输出一个 JSON 对象：{"ping": "pong"}，不要输出其他内容')

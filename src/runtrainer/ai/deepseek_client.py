@@ -23,9 +23,12 @@ TIMEOUT_S = 120
 
 # 教练 AI 服务商注册表（全部 OpenAI 兼容）。models 含 free_text 标记时允许用户自定义。
 # max_tokens 按各模型输出上限设置（超过会被 API 拒绝）：教练回复要求详细，
-# 输出越长越能展开分析（DeepSeek/Ollama/GLM-4.7-Flash 输出上限高，给 8K）。
+# 输出越长越能展开分析（DeepSeek/Ollama/GLM 输出上限高，给 8K）。
 # extra_body：随请求附带的厂商扩展参数（GLM-4.7 系列默认强制深度思考——
 # 先输出 reasoning_content 再给正文，单条回复耗时 1~2 分钟；显式关掉思考后秒级返回）。
+# extra_body_by_model：按模型覆盖（GLM-5.x 起「始终思考」，不允许关闭（error 1210，
+# 提示用 low/high/max）——4.7-flash 必须带 thinking.type=disabled、5.3-flash 不能带，
+# 故按模型区分，默认走 resolve_extra_body()）。
 PROVIDERS: dict[str, dict] = {
     "deepseek": {
         "label": "DeepSeek（按量付费）",
@@ -36,13 +39,13 @@ PROVIDERS: dict[str, dict] = {
         "hint": "Key 在 platform.deepseek.com 注册后获取，按 token 计费。",
     },
     "zhipu": {
-        "label": "智谱 GLM-4.7-Flash（免费）",
+        "label": "智谱 GLM-5.3-Flash（免费）",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
-        "models": ["glm-4.7-flash"],
+        "models": ["glm-5.3-flash", "glm-4.7-flash"],
         "max_tokens": 8192,
         "needs_key": True,
-        "extra_body": {"thinking": {"type": "disabled"}},
-        "hint": "在 open.bigmodel.cn 注册即送 Key；glm-4.7-flash 永久免费。已按官方建议关闭深度思考换取秒级响应，回复质量仍远超旧 glm-4-flash。",
+        "extra_body_by_model": {"glm-4.7-flash": {"thinking": {"type": "disabled"}}},
+        "hint": "在 open.bigmodel.cn 注册即送 Key；glm-5.3-flash 为现役免费主力（思考常开但秒级返回、回复更聪明），glm-4.7-flash 备用免费。",
     },
     "ollama": {
         "label": "Ollama 本地模型（免费离线）",
@@ -57,6 +60,20 @@ PROVIDERS: dict[str, dict] = {
 
 DEFAULT_MODELS = {p: (info["models"][0] if info.get("models") else DEFAULT_MODEL)
                   for p, info in PROVIDERS.items()}
+
+
+def resolve_extra_body(provider: str, model: str) -> dict | None:
+    """该 (服务商, 模型) 的扩展请求参数：按模型覆盖优先，其次服务商默认。
+
+    GLM-4.7-flash 需 thinking.type=disabled（否则深度思考 1~2 分钟）；
+    GLM-5.x 系列始终思考、传 disabled 会报 1210——因此 4.7 的关闭思考只能
+    挂在 extra_body_by_model 下，新模型（默认 5.3-flash）不带任何 extra_body。
+    """
+    info = PROVIDERS.get(provider) or {}
+    by_model = info.get("extra_body_by_model") or {}
+    if model in by_model:
+        return by_model[model]
+    return info.get("extra_body")
 
 
 def _clean_json_text(text: str) -> str:

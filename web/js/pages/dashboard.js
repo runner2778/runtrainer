@@ -129,6 +129,19 @@ const HTML = `
             </ul>
           </div>
         </div>
+        <!-- 近一年最佳成绩 + 训练保持度：数据窗口 30 天时不够「现在能跑多少」
+             的参考，这里补上全年硬证据 -->
+        <div class="mt8">
+          <div class="flex" style="flex-wrap:wrap;gap:6px;align-items:center">
+            <span class="muted">近一年最佳</span>
+            <template x-for="b in d.ability_30d.year_bests" :key="b.distance">
+              <span class="badge soft" :title="yearBestTitle(b)"
+                    x-text="b.distance + ' ' + fmtRace(b.best_seconds)"></span>
+            </template>
+            <span class="muted" x-show="!(d.ability_30d.year_bests || []).length">尚无达标记录</span>
+          </div>
+          <p class="muted mt8" x-text="keepUpNote()"></p>
+        </div>
       </div>
     </template>
     <p class="muted mt8" x-show="!d.ability_30d.vdot" x-text="d.ability_30d.note || '数据不足，暂无法预估'"></p>
@@ -269,6 +282,20 @@ export function initDashboard() {
       return { recent_race: '近期比赛', garmin_vo2max: '手表 VO2max',
                threshold_trend: '配速-心率阈值', hrr_pace: 'HRR 有氧配速',
                interval_ability: '间歇能力', hr_trend: '配速-心率趋势' }[src] || src;
+    },
+    yearBestTitle(b) {
+      const src = b.source === 'race' ? '比赛/近似全程' : '长跑中切出的最快分段';
+      return (b.distance || '') + ' 最佳 ' + this.fmtRace(b.best_seconds)
+        + '（' + String(b.date || '').slice(0, 10) + ' · ' + src
+        + (b.vdot ? ' · 等效 VDOT ' + b.vdot : '') + '）';
+    },
+    keepUpNote() {
+      const c = (this.d.ability_30d || {}).consistency;
+      if (!c || !c.total_weeks || c.run_weeks === undefined) return '';
+      if (!c.run_weeks) return '近一年暂无跑步记录，无法评估训练保持度';
+      return '训练保持度：近一年 ' + c.run_weeks + '/' + c.total_weeks + ' 周有跑步'
+        + '（' + c.run_week_pct + '%）；近 4 周周均 ' + c.recent_4w_avg_km + ' km'
+        + '，约为全年周均的 ' + c.recent_vs_year_pct + '%';
     },
     planVdotNote() {
       const a = this.d.ability_30d;

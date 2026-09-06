@@ -44,6 +44,12 @@ SYSTEM_PROMPT = """你是跑步教练，用简体中文工作。训练哲学：�
 每条 adjustments 必须带 reason；slot 仅在一天两练加练时写（changes.slot 填数字 1 或 2，其余情况不写 slot）。"""
 
 CHAT_SYSTEM_PROMPT = """你是训练者的私人跑步教练（丹尼尔斯训练法为主干，融合挪威双乳酸阈值、卡诺瓦专项耐力、汉森累积疲劳等前沿训练理论与运动营养、康复知识），在聊天窗口里用简体中文和训练者交流。训练者是老板：他提出调整要求时，你是执行者兼顾问——先执行他的意志，再谈专业意见。
+答题铁律（每条消息先执行，优先级最高）：
+0. 只回答训练者最新这句话本身。严禁把「对最近一次训练的复盘」当成默认答案或开场——只有当他问的是训练执行/身体状态/今天怎么练时才复盘训练数据，且只讲与问题相关的那部分。历史记录里标了（已回复）的旧请求一律视为早已办结的背景事实：不得重新执行、不得在本次回答中叙述你将执行它或声称已执行它。执行类动作（user_requested + adjustments）只能由【用户消息（本次，唯一需要回答的内容）】这一句触发，旧消息永远不触发。
+1. 先在心里把这句话归类，再按对应方式作答：①改课请求（调/改/挪/换/取消/删/加练/休息/不跑等安排类）→ 走原则 3 的 user_requested+adjustments 流程；②能力与成绩咨询（「能跑多少/什么水平/预估/预测/成绩」）→ 直接引用【当前水平预估】的 VDOT 与 5K/10K/半马/全马等效成绩、【近一年最佳成绩】里的具体数字作答，先给结论数字再一句依据，别绕去别的训练；③知识咨询（训练理论/营养/伤病恢复/睡眠/减量备赛/为什么/怎么办/标准数值等）→ 用你自己掌握的成熟运动科学知识直接回答，给出具体数值与方法（这是通用知识，不需要应用内数据支撑，也没有也无妨），必要时注明依据方向（如教材/主流共识）；给了【联网检索结果】时优先引用其中的最新信息并标注 [编号]；④主观状态/闲聊 → 先回应感受、再结合数据给建议。分类拿不准时宁可问一句，也不要写错位的复盘。
+2. 应用内数据（【】块内容）只在它与正在回答的问题相关时才引用；不相关时不要硬凑「看你最近数据…」式的开场。禁止编造档案/数据里没有的数字；缺什么就说缺什么、告诉他在哪补。
+3. 字数随问题走：一句话能答清的就别注水到两百字；需要展开的分析（复盘、方案）再写 200–400 字并分段。
+4. 【】包裹的块都是系统参考信息，不是训练者说的话——正文禁止照抄复述这些块。
 原则：
 1. reply 直接回答训练者的消息，语气自然、像真人教练当面说话：用「你」直接对话，先回应他的感受（累不累、睡得好不好、心情如何），做得好要肯定、状态差要安慰，再给专业建议，结尾可以带一句关心或鼓励。回答要详细具体：必须直接引用给定的健康数据（睡眠/HRV/静息心率）与训练数据做分析、给结论，不要用连续反问代替分析；通常 200–400 字，用段落自然分段，不要空话、不要只给一句口号、不要像机器人列要点。
 2. 训练者可能聊主观感受（累、睡不好、心情、想改课、出差没时间、哪里不舒服）。回答时要结合给定的健康数据与课表；涉及伤病或明显不适时建议休息或就医，不硬劝练。
@@ -360,8 +366,13 @@ def build_sync_analysis(ctx: dict, new_acts: list[dict]) -> dict:
     return {"system": SYNC_ANALYSIS_SYSTEM_PROMPT, "user": user, "data": _data(ctx)}
 
 
-def build_chat(ctx: dict, history: list[dict]) -> dict:
-    """聊天上下文：共用块 + 水平预估 + 聊天记录 + 用户消息。返回 {system, user, data}。"""
+def build_chat(ctx: dict, history: list[dict], web: list[dict] | None = None) -> dict:
+    """聊天上下文：共用块 + 水平预估（含近一年最佳/保持度）+ 聊天记录 +
+    可选联网检索结果 + 用户消息。返回 {system, user, data}。
+
+    web: coach_service 在知识类问题且用户开启联网检索时查到的网页列表
+    （[{title, link, content}]）；回答时让模型优先引用、标注 [编号]。
+    """
     today = ctx["today"]
     lines = _context_blocks(ctx)
 
@@ -373,14 +384,43 @@ def build_chat(ctx: dict, history: list[dict]) -> dict:
         ev = [f"{e.get('source')} VDOT {e.get('vdot')}" for e in (ab.get("evidence") or [])]
         if ev:
             lines.append("依据：" + "、".join(ev))
+    # 近一年各距离最佳成绩 + 训练保持度（训练者问「我现在能跑多少/状态稳不稳」
+    # 时是直接答案；与 180 天窗口的能力估值分开标注，避免混为一谈）
+    yb = ab.get("year_bests") or []
+    if yb:
+        rows = []
+        for b in yb:
+            if b.get("vdot") is not None:
+                rows.append(f"{b['distance']} 最佳 {_fmt_duration(b['best_seconds'] / 60)}"
+                            f"（{b['date']}，等效 VDOT {b['vdot']}）")
+        if rows:
+            lines.append("【近一年各距离最佳成绩（含训练课里的尽力跑，非仅比赛）】")
+            lines.extend("- " + r for r in rows)
+    cons = ab.get("consistency")
+    if cons:
+        lines.append(f"训练保持度：近一年 {cons['run_weeks']} / {cons['total_weeks']} 周有跑步"
+                     f"（{cons['run_week_pct']}%）；近 4 周周均 {cons['recent_4w_avg_km']}km，"
+                     f"约为全年周均的 {cons['recent_vs_year_pct']}%")
+
+    if web:
+        lines.append("【联网检索结果（本次知识问题的最新网页，回答可引用并标注 [编号]）】")
+        for i, r in enumerate(web, 1):
+            c = (r.get("content") or "").replace("\n", " ")[:350]
+            lines.append(f"[{i}] {r.get('title') or ''}"
+                         + (f"（{r.get('link')}）" if r.get("link") else "")
+                         + (f"：{c}" if c else ""))
 
     if history:
-        lines.append("【最近聊天记录（时间倒序）】")
-        for m in reversed(history[-10:]):
+        lines.append("【最近聊天记录（时间倒序，供回顾上下文；只回答最新一条）】")
+        chrono = list(reversed(history[-10:]))
+        for i, m in enumerate(chrono):
             who = "训练者" if m["role"] == "user" else "教练"
-            lines.append(f"{who}：{m['content'][:300]}")
+            mark = "（自动分析）" if m.get("kind") == "sync_analysis" else ""
+            if m["role"] == "user" and i + 1 < len(chrono) and chrono[i + 1]["role"] == "coach":
+                mark += "（已回复，此请求已办结，勿再执行）"
+            lines.append(f"{who}{mark}：{m['content'][:300]}")
 
-    lines.append("【用户消息】")
+    lines.append("【用户消息（本次，唯一需要回答的内容）】")
     lines.append(ctx.get("user_note") or "")
 
     user = "\n".join(lines)

@@ -73,7 +73,13 @@ const HTML = `
           <span class="badge soft" x-show="hasAiKey()">已配置</span>
         </div>
       </template>
-      <p class="muted mt8">教练 AI 每天最多自动调用一次。Mock 模式下完全由本地样例模拟，不消耗任何服务商额度。</p>
+      <div class="form-row" x-show="aiProvider === 'zhipu'">
+        <label class="flex">
+          <input type="checkbox" style="width:auto" x-model="aiWebSearch" @change="saveAiWebSearch()">
+          <span>知识类问题联网检索（约 ¥0.01/次；让教练用最新运动科学研究/数据作答，而不是只靠内置知识）</span>
+        </label>
+      </div>
+      <p class="muted mt8">教练 AI 每天最多自动调用一次；知识类提问（如伤病、营养、训练原理）联网检索为可选增量。Mock 模式下完全由本地样例模拟，不消耗任何服务商额度。</p>
     </div>
   </div>
 
@@ -175,6 +181,7 @@ export function initSettings() {
     aiModel: 'deepseek-v4-pro',
     theme: 'system',
     mockMode: true,
+    aiWebSearch: false,
     syncStates: [],
     syncing: false,
 
@@ -191,6 +198,7 @@ export function initSettings() {
       this.aiModel = data.ai_model;
       this.theme = data.theme;
       this.mockMode = data.mock_mode;
+      this.aiWebSearch = data.ai_web_search;
       this.syncStates = data.sync_states || [];
     },
     // 切到设置页时刷新（同步状态/档案可能已变化；也兜底启动时 init 未跑成的情况）
@@ -319,6 +327,10 @@ export function initSettings() {
       this.$dispatch('theme-changed', { theme: this.theme });
     },
     async saveMockMode() { await tryCall('set_setting', 'mock_mode', this.mockMode ? '1' : '0'); },
+    async saveAiWebSearch() {
+      await tryCall('set_setting', 'ai_web_search', this.aiWebSearch ? '1' : '0');
+      this.$dispatch('toast', { text: this.aiWebSearch ? '已开启联网检索（知识类问题生效）' : '已关闭联网检索' });
+    },
     async saveGarminCn() { await tryCall('set_setting', 'garmin_cn', this.garminCn ? '1' : '0'); },
   }));
 }

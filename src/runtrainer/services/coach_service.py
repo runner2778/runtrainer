@@ -11,7 +11,8 @@ from datetime import date, timedelta
 from pydantic import ValidationError
 
 from ..ai.contracts import ChatOutput, CoachOutput
-from ..ai.deepseek_client import PROVIDERS, DeepSeekClient, MockClient
+from ..ai.deepseek_client import (PROVIDERS, DeepSeekClient, MockClient,
+                                  resolve_extra_body)
 from ..ai import guardrails, prompt_builder
 from ..db.repos import (adjustment_repo, activity_repo, chat_repo, goal_repo, health_repo,
                         kv_repo, plan_repo, profile_repo)
@@ -42,7 +43,7 @@ def _make_client(extra_requested: bool):
             model = info["models"][0]
         return DeepSeekClient(key or "", model, base_url=info["base_url"],
                               max_tokens=info.get("max_tokens", 4096),
-                              extra_body=info.get("extra_body"))
+                              extra_body=resolve_extra_body(provider, model))
     if extra_requested:
         return MockClient("add_extra")
     return MockClient(["normal", "low_hrv", "overload"][dates.today().toordinal() % 3])
@@ -652,6 +653,88 @@ def clear_chat_history() -> dict:
     return {"hidden": n}
 
 
+# ---- 聊天质量门控（第十四批） ----
+# 真实用户反馈「每轮对话都有一点牛头不对马嘴」：模型常把「最近一次训练复盘」
+# 当默认答案——用户问水平/成绩/改课，它却长篇分析今天那堂跑。对策：
+# 1) 提示词「答题铁律」（prompt_builder CHAT_SYSTEM_PROMPT）按意图分类作答；
+# 2) 这里做服务端意图判定，回复明显没接住问题时附针对性提示重试一次。
+_ESTIMATE_WORDS = ("能跑多少", "预估", "估计", "水平", "成绩", "预测", "等效",
+                   "现在跑", "跑多少", "评估", "vdot", "VDOT")
+_PLAN_WORDS = ("调整", "改成", "换成", "挪", "移到", "推到", "提前到", "延后",
+               "取消", "删除", "删掉", "去掉", "加练", "多跑", "不跑", "休息一天",
+               "别排", "暂停", "这周不跑", "课表安排", "力量训练", "长距离", "放掉")
+_QUESTION_WORDS = ("怎么", "如何", "什么", "为什么", "需要注意")
+_KNOWLEDGE_WORDS = ("为什么", "怎么", "如何", "什么", "营养", "碳水", "蛋白质",
+                    "伤病", "受伤", "酸痛", "恢复期", "恢复多久", "睡多久", "多久",
+                    "标准", "研究", "最新", "备赛", "减量", "能量胶", "补给",
+                    "拉伸", "跑姿", "热身", "比赛策略", "心率区", "阈值", "间歇",
+                    "配速训练", "该怎么", "该不该", "能不能", "吃多少")
+
+
+def _chat_intent(text: str) -> set[str]:
+    """用户消息粗意图（供门控与联网检索决策；不追求精确，宁缺勿乱）。"""
+    intent: set[str] = set()
+    if any(w in text for w in _ESTIMATE_WORDS):
+        intent.add("estimate")
+    if any(w in text for w in _PLAN_WORDS):
+        intent.add("plan")
+    if any(w in text for w in _KNOWLEDGE_WORDS):
+        intent.add("knowledge")
+    return intent
+
+
+def _chat_answer_nudge(text: str, output: ChatOutput) -> str | None:
+    """回复没接住问题的针对性提示；返回 None 表示接住了。"""
+    intent = _chat_intent(text)
+    reply = output.reply or ""
+    # 问水平/成绩：reply 必须给具体成绩/VDOT/明确说数据不足，否则是跑题复盘
+    if "estimate" in intent:
+        import re as _re
+        has_number = bool(_re.search(r"\d{1,2}[:：]\d{2}", reply)) or "VDOT" in reply
+        has_decline = any(w in reply for w in ("不足", "无法", "缺少", "样本"))
+        if not (has_number or has_decline):
+            return ("\n\n注意：训练者刚才问的是他现在的成绩/水平（如「5K 能跑多少、"
+                    "各项成绩水平、预估 VDOT」）。请直接引用【当前水平预估】与"
+                    "【近一年各距离最佳成绩】里的具体数字作答（先给结论，例如"
+                    "「你现在 5K 大约 20:30，等效 VDOT 50」），依据一两句即可；"
+                    "不要再写当天训练复盘，也不要给模糊话。若数据确实不足，明说"
+                    "缺什么、跑几次后能补。")
+    # 改课请求（非「怎么/如何」疑问句）：必须 user_requested=true 且有落地动作
+    if ("plan" in intent and not any(w in text for w in _QUESTION_WORDS)
+            and not (output.user_requested and output.adjustments)):
+        return ("\n\n注意：训练者这条消息看起来是在要求调整课表/训练安排"
+                "（改/挪/取消/增减课或休息等）。请按改课请求处理：user_requested=true"
+                " 并给出具体 adjustments（含每条 reason）；做不到的部分用 reason 说明"
+                "并给替代安排。若你判断他其实是在咨询而非要求改课，就直接回答咨询"
+                "本身、user_requested=false。两种情况都不许写与问题无关的训练复盘。")
+    return None
+
+
+def _maybe_web_search(text: str) -> list[dict] | None:
+    """知识类问题且用户开启联网检索（智谱 search_std ≈0.01 元/次）→ 检索。
+
+    失败返回 None 并记日志（降级为纯知识回答，不阻断对话）。
+    """
+    from . import settings_service
+    if not settings_service.get_ai_web_search():
+        return None
+    if settings_service.is_mock_mode():
+        return None
+    if settings_service.get_ai_provider() != "zhipu":
+        return None
+    intent = _chat_intent(text)
+    if "knowledge" not in intent:
+        return None
+    try:
+        from ..ai.web_search import zhipu_search
+        results = zhipu_search(text, settings_service.get_ai_key("zhipu") or "")
+        log.info("联网检索「%s」→ %d 条结果", text[:50], len(results))
+        return results or None
+    except Exception as e:
+        log.warning("联网检索失败，降级为知识回答：%s", e)
+        return None
+
+
 def chat(message: str) -> dict:
     """教练聊天：主观意愿/健康数据 → 回复 + 可批准的调整 + 档案更新。"""
     from . import settings_service
@@ -665,7 +748,8 @@ def chat(message: str) -> dict:
         raise RuntimeError("尚未创建训练计划，请先到“训练目标”页生成课表")
     ctx["ability"] = (plan_service.wizard_context() or {}).get("ability") or {}
 
-    prompt = prompt_builder.build_chat(ctx, chat_repo.list_messages(limit=50))
+    web = _maybe_web_search(message)
+    prompt = prompt_builder.build_chat(ctx, chat_repo.list_messages(limit=50), web=web)
     if settings_service.is_mock_mode():
         user_row = chat_repo.create_message("user", message)
         coach_row = chat_repo.create_message(
@@ -673,9 +757,17 @@ def chat(message: str) -> dict:
         return {"user_message": user_row, "reply": _chat_message_view(coach_row)}
 
     client = _make_client(False)
-    log.info("教练聊天调用开始（模型 %s，消息 %d 字）", getattr(client, "model", "?"), len(message))
+    log.info("教练聊天调用开始（模型 %s，消息 %d 字%s）",
+             getattr(client, "model", "?"), len(message),
+             "，联网检索已开启" if web else "")
     t0 = time.monotonic()
     output = _validated_no_echo(client, prompt, ChatOutput)
+    # 质量门控：没接住问题（答成跑题复盘）→ 针对性提示重试一次
+    nudge = _chat_answer_nudge(message, output)
+    if nudge:
+        log.warning("聊天回复疑似跑题（意图门控），附提示重试一次")
+        output = _validated_no_echo(
+            client, {**prompt, "user": prompt["user"] + nudge}, ChatOutput)
     log.info("教练聊天调用返回，耗时 %.1fs", time.monotonic() - t0)
 
     # 调整建议走与日常建议相同的护栏；用户明确要求改课（user_requested）时
@@ -700,6 +792,8 @@ def chat(message: str) -> dict:
             log.warning("聊天触发课表重建失败: %s", e)
 
     reply = output.reply
+    if web:
+        reply += "\n\n（部分内容基于联网检索的最新信息，来源见正文 [编号]。联网检索按次计费，设置里可关。）"
     dropped = len(output.adjustments) - len(items)
     if dropped:
         reply += f"\n\n⚠️ 其中 {dropped} 条调整未通过安全护栏被忽略。"

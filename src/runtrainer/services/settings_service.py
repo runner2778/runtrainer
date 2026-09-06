@@ -22,6 +22,7 @@ S_AI_MODEL = "ai_model"
 S_AI_PROVIDER = "ai_provider"
 S_MOCK_MODE = "mock_mode"
 S_GARMIN_CN = "garmin_cn"
+S_AI_WEB_SEARCH = "ai_web_search"  # 教练知识类问题联网检索开关（智谱 search_std 约 0.01 元/次）
 S_GARMIN_USERNAME_VISIBLE = "garmin_username_visible"  # 账号名非敏感，明文存便于回显
 
 
@@ -131,6 +132,15 @@ def is_mock_mode() -> bool:
 
 def set_mock_mode(enabled: bool) -> None:
     kv_repo.set_setting(S_MOCK_MODE, "1" if enabled else "0")
+
+
+def get_ai_web_search() -> bool:
+    """知识类问题联网检索开关（智谱 web_search search_std ≈0.01 元/次，默认关）。"""
+    return kv_repo.get_setting(S_AI_WEB_SEARCH, "0") == "1"
+
+
+def set_ai_web_search(enabled: bool) -> None:
+    kv_repo.set_setting(S_AI_WEB_SEARCH, "1" if enabled else "0")
 
 
 def is_garmin_cn() -> bool:

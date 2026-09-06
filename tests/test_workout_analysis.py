@@ -257,12 +257,25 @@ def test_classify_repeats_when_rest_laps_missing():
 
 
 def test_classify_continuous_by_hr_zone():
-    """匀速跑按 心率/最大心率 归类；缺心率时无法归类。"""
-    assert classify_workout([], 1800, 5000, avg_hr=115, max_hr=200)["kind"] == "recovery"
-    assert classify_workout([], 1800, 5000, avg_hr=130, max_hr=200)["kind"] == "easy"
-    assert classify_workout([], 1800, 5000, avg_hr=150, max_hr=200)["kind"] == "aerobic"
-    assert classify_workout([], 1800, 5000, avg_hr=170, max_hr=200)["kind"] == "tempo"
-    assert classify_workout([], 1800, 5000, avg_hr=190, max_hr=200)["kind"] == "anaerobic"
+    """匀速跑按 心率/最大心率 六带归类（LT1/LT2 锚点，第十四批整改）；
+    缺心率时无法归类。"""
+    cases = [  # %HRmax → 带：115=58%恢复 130=65%低有氧 150=75%中有氧
+        (115, "recovery"), (130, "easy"), (150, "aerobic"),
+        # 165=83% 高有氧（LT1~LT2 之间）、180=90% 阈值（LT2 上）、196=98% 无氧
+        (165, "high_aerobic"), (180, "tempo"), (196, "anaerobic"),
+    ]
+    for avg, kind in cases:
+        w = classify_workout([], 1800, 5000, avg_hr=avg, max_hr=200)
+        assert w["kind"] == kind
+    # LT 锚点与区带元数据随分类输出（前端定位条用）
+    w = classify_workout([], 1800, 5000, avg_hr=165, max_hr=200)
+    assert w["lt1"] == 0.78 and w["lt2"] == 0.88 and w["hr_metric"] == "hrmax"
+    assert [z["key"] for z in w["zones"]] == [
+        "recovery", "easy", "aerobic", "high_aerobic", "tempo", "anaerobic"]
+    assert "高有氧跑" in w["label"]
+    # HRR 口径（静息心率已知）时标注 hrr
+    w = classify_workout([], 1800, 5000, avg_hr=150, max_hr=200, rest_hr=50)
+    assert w["hr_metric"] == "hrr"
     w = classify_workout([], 1800, 5000, avg_hr=None, max_hr=200)
     assert w["kind"] == "unknown" and "缺心率" in w["label"]
     w = classify_workout([], 1800, 5000, avg_hr=150, max_hr=None)
@@ -277,7 +290,8 @@ def test_classify_continuous_by_hr_zone():
 def test_classify_karvonen_hrr():
     """静息心率已知 → Karvonen 储备心率区（训练有素者不再整体升档）。
 
-    max=200 rest=42：HRR=158。60%HRR=136.8、72%=155.8、82%=171.6、92%=187.4。
+    max=200 rest=42：HRR=158。60%=136.8 / 70%=152.6 / 78%=165.2(LT1) /
+    88%=181(LT2) / 96%=193.7。
     真实案例：基础有氧课 avg 145-155（73-77%HRmax，%HRmax 会误判 aerobic）
     → %HRR 65-72% 落 easy。
     """
@@ -289,8 +303,10 @@ def test_classify_karvonen_hrr():
     # 恢复跑 134 = 58%HRR → recovery（%HRmax 67% 会判 easy）
     w = classify_workout([], 1800, 5000, avg_hr=134, max_hr=200, rest_hr=42)
     assert w["kind"] == "recovery"
-    # 高强度：190 → 94%HRR → anaerobic
+    # 高强度：190 → 94%HRR → 阈值（LT2 上沿，<96%）；194+ 才是无氧
     w = classify_workout([], 1800, 5000, avg_hr=190, max_hr=200, rest_hr=42)
+    assert w["kind"] == "tempo"
+    w = classify_workout([], 1800, 5000, avg_hr=194, max_hr=200, rest_hr=42)
     assert w["kind"] == "anaerobic"
     # avg <= rest（不可能但防除零/负值）→ 回退 %HRmax
     w = classify_workout([], 1800, 5000, avg_hr=40, max_hr=200, rest_hr=42)
