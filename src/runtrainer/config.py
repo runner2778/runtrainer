@@ -9,7 +9,7 @@ from pathlib import Path
 
 APP_NAME = "RunTrainer"  # 数据目录/凭据服务名保持不变（改名会丢数据）
 APP_TITLE = "SuperTrainer"
-ENGINE_VERSION = "1.3.0"  # 批19：双阈值形态按文献菜单轮换/按跑力缩量 + 距离专项菜单（5K/10K 速度、HM/FM 长巡航、FM LR-M 每周） + 休息科学（I 等时长慢跑/T 巡航组间 1/4–1/3）
+ENGINE_VERSION = "1.4.0"  # 批20：10 位大师理论结晶落地——LT1 术语操作义统一为巡航阈、FM final LR-M M 段前/中/后位置轮换（Canova 调制）、双阈值/恢复等引注纠偏（数值锚与 1.3.0 相同）
 
 DATA_DIR = Path(os.environ.get("RUNTRAINER_DATA_DIR")
                 or os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME
