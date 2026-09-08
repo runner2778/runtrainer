@@ -6,10 +6,13 @@
 即持续运动 t 分钟时可维持的 VO2max 比例；VDOT = VO2cost / fraction。
 
 强度区间的 %VDOT 已对照公开 VDOT 配速表校准（VDOT 45/50/55 三档锚点误差 ≤2 s/km）：
-  E: 59–74%    M: 82%    LT1(有氧阈): 84%    T(LT2 乳酸阈): 88%    I: 98%    R: 105%
-LT1 为挪威双阈值法上午段（≈2 mmol 有氧阈，75–80% HRmax，略快于马拉松配速、
-比 T 慢 5–10 秒/公里）；T 即 LT2（≈4 mmol 乳酸阈）。二者同为阈值带内强度，
-LT1 靠时长建立有氧阈，T 靠强度打磨乳酸阈。
+  E: 59–74%    M: 82%    T1(LT1 巡航阈): 84%    T(LT2 乳酸阈): 88%    I: 98%    R: 105%
+2026-09 文献复核（见 docs/training-science-3000m-hm.md）：% 锚与群体实测同构——
+大样本实测 VT2 速度均值 ≈87.6±3.9% vVO2peak（Estéve-Lanao 等，n=1411）对应 T=88%；
+VT1 速度均值仅 ≈73.9±5.5%，远低于 84%，故 T1/LT1 的操作义是「低于 LT2 的阈下
+巡航带」（挪威双阈值日上午段、比 T 慢 5–10 秒/公里），不是 VT1/有氧阈。血乳酸
+绝对值（上午段 ≈2–2.5 mmol 量级）与 HRmax% 随个体/疲劳漂移，不写死为锚点定义。
+% 锚均为群体均值，个体可能整档偏离（心率-配速失配实验）——体感+配速裁决。
 """
 from __future__ import annotations
 
@@ -18,7 +21,7 @@ import math
 # 强度区间的 %VDOT（校准值，勿随意改动——test_vdot 锚点依赖）
 E_LOW, E_HIGH = 0.59, 0.74
 M_PCT = 0.82
-LT1_PCT = 0.84            # 有氧阈（亚乳酸阈，双阈值日上午段）
+LT1_PCT = 0.84            # T1=LT1 巡航阈（双阈值日上午段；低于 LT2 的阈下带，非 VT1/有氧阈）
 T_PCT = 0.88              # 乳酸阈 LT2（双阈值日下午段）
 I_PCT = 0.98
 R_PCT = 1.05
@@ -126,7 +129,7 @@ def pace_table(vdot: float) -> dict:
     """E/M/T1/T/I/R 配速表（s/km），并附 RECOVERY 恢复带区间。
 
     RECOVERY/E 为区间 [slow, fast]（slow 慢端），M/T1/T/I/R 为单值
-    （T1 = LT1 有氧阈，双阈值日上段配速）；均四舍五入到整数秒。
+    （T1 = LT1 巡航阈，双阈值日上段配速）；均四舍五入到整数秒。
     """
     if vdot <= 0:
         raise ValueError("vdot 必须为正")
@@ -137,7 +140,7 @@ def pace_table(vdot: float) -> dict:
         "E": {"slow_s_km": round(pace_s_km(vdot, E_LOW)),
               "fast_s_km": round(pace_s_km(vdot, E_HIGH))},
         "M": round(pace_s_km(vdot, M_PCT)),
-        "T1": round(pace_s_km(vdot, LT1_PCT)),   # LT1 有氧阈（双阈值日上段）
+        "T1": round(pace_s_km(vdot, LT1_PCT)),   # LT1 巡航阈（双阈值日上段）
         "T": round(pace_s_km(vdot, T_PCT)),      # LT2 乳酸阈
         "I": round(pace_s_km(vdot, I_PCT)),
         "R": round(pace_s_km(vdot, R_PCT)),

@@ -7,14 +7,14 @@ const DISTANCES = [
   { value: 42195, label: '全马', full: '全程马拉松 42.195km' },
 ];
 const PHASE_LABELS = { base: '基础期', early: '早期强度', transition: '过渡期', final: '最终强度', taper: '减量期' };
-const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T1: '有氧阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
-const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T1: 'LT1 有氧阈配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速' };
+const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T1: '巡航阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
+const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T1: 'LT1 巡航阈配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速' };
 // 课型 → 强度区间（与仪表盘/日历一致：vdot.PACE_ZONES 的区间与 % 带）——
 // 制定出的课表在日历上按此标注「该课属于哪一档强度区间」
 const KIND_ZONES = {
   E: { label: '轻松区', band: '59–74%' },
   M: { label: '有氧/马配区', band: '74–82%' },
-  T1: { label: 'LT1 有氧阈区', band: '≈84%' },
+  T1: { label: 'LT1 巡航阈区', band: '≈84%' },
   T: { label: '乳酸阈 LT2 区', band: '≈88%' },
   I: { label: '最大摄氧量区', band: '92–100%' },
   R: { label: '无氧冲刺区', band: '100–105%' },
@@ -120,7 +120,7 @@ const HTML = `
         <div class="form-row" x-show="form.double_days > 0 && !form.pro_mode"><label>二练形式</label>
           <select x-model="form.double_mode">
             <option value="auto">按阶段自动</option>
-            <option value="threshold">挪威双阈值（一天两练：上午 LT1 有氧阈 4×8′ + 下午 LT2 乳酸阈 5×5′，配速各不同）</option>
+            <option value="threshold">挪威双阈值（一天两练：上午 LT1 巡航阈 + 下午 LT2 乳酸阈，形态按文献菜单轮换、按跑力缩量）</option>
             <option value="easy">强度课 + 傍晚放松跑</option>
           </select></div>
         <div class="form-row"><label>职业双练模式</label>
@@ -250,9 +250,9 @@ const HTML = `
             <tr><td><span class="badge kind-M">M</span> 马拉松配速</td>
               <td class="num" x-text="fmtPace(preview.pace_table.M)"></td>
               <td class="muted">专项耐力</td></tr>
-            <tr><td><span class="badge kind-T1">T1</span> 有氧阈跑</td>
+            <tr><td><span class="badge kind-T1">T1</span> 巡航阈跑</td>
               <td class="num" x-text="fmtPace(preview.pace_table.T1)"></td>
-              <td class="muted">LT1 有氧阈（挪威双阈值上午段）</td></tr>
+              <td class="muted">LT1 巡航阈（挪威双阈值上午段，≈84% VDOT）</td></tr>
             <tr><td><span class="badge kind-T">T</span> 阈值跑</td>
               <td class="num" x-text="fmtPace(preview.pace_table.T)"></td>
               <td class="muted">LT2 乳酸阈（下午段）</td></tr>

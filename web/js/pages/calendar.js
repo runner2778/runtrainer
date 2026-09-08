@@ -1,14 +1,14 @@
 import { tryCall } from '../api.js';
 
-const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T1: '有氧阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
+const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T1: '巡航阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
 const PHASE_LABELS = { base: '基础期', early: '早期强度', transition: '过渡期', final: '最终强度', taper: '减量期' };
-const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T1: 'LT1 有氧阈配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速', strength: '力量训练' };
+const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T1: 'LT1 巡航阈配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速', strength: '力量训练' };
 // 课型 → 强度区间（与水平预估六区配速表同源：vdot.PACE_ZONES 的区间与 % 带）。
 // 计划/日历里每种课对应哪一档、对应什么配速带，都由这张表标注。
 const KIND_ZONES = {
   E: { label: '轻松区', band: '59–74%' },
   M: { label: '有氧/马配区', band: '74–82%' },
-  T1: { label: 'LT1 有氧阈区', band: '≈84%' },
+  T1: { label: 'LT1 巡航阈区', band: '≈84%' },
   T: { label: '乳酸阈 LT2 区', band: '≈88%' },
   I: { label: '最大摄氧量区', band: '92–100%' },
   R: { label: '无氧冲刺区', band: '100–105%' },
@@ -520,7 +520,7 @@ export function initCalendar() {
         case 'warmup': return `🏃 热身 · ${zone}${pz} · ${s.duration_min} 分钟`;
         case 'cooldown': return `🧊 冷身 · ${zone}${pz} · ${s.duration_min} 分钟`;
         case 'continuous': return `🏃 ${zone}${pz}` + (s.distance_km ? ` · ${s.distance_km} km` : ` · ${s.duration_min} 分钟`);
-        case 'tempo': return `⚡ ${s.zone === 'T1' ? 'LT1 有氧阈跑' : 'LT2 阈值跑'} ${s.reps}×${s.duration_min} 分钟${pz}` + (s.rest_min ? `（组间 ${s.rest_min} 分钟${rm || '慢跑'}）` : '');
+        case 'tempo': return `⚡ ${s.zone === 'T1' ? 'LT1 巡航阈跑' : 'LT2 阈值跑'} ${s.reps}×${s.duration_min} 分钟${pz}` + (s.rest_min ? `（组间 ${s.rest_min} 分钟${rm || '慢跑'}）` : '');
         case 'reps': return `⚡ ${s.zone === 'I' ? '间歇' : '重复跑'} ${s.reps}×${s.rep_m}m${pz}（组间 ${s.rest_m}m ${rm || '慢跑恢复'}）`;
         case 'strides': return `⚡ 跨步跑 ${s.reps}×${s.rep_m}m${pz}（约 85% 最快速度）`;
         default: return '';

@@ -66,7 +66,7 @@ PB_DECAY_FLOOR = 0.35
 # 说明「按计划训练」在现实没发生，估计应更保守；反之计划跑得动，配速区间
 # 就有人撑。统计近 8 周计划内质量课（T/I/R/TUNEUP）的完成比例——
 # 由服务层从 plan_repo 取行、本层只做纯计算。
-QUALITY_KINDS = ("T", "T1", "I", "R", "TUNEUP")   # T1=双阈值日上段 LT1 有氧阈，同为质量课
+QUALITY_KINDS = ("T", "T1", "I", "R", "TUNEUP")   # T1=双阈值日上段 LT1 巡航阈，同为质量课
 QUALITY_WINDOW_DAYS = 56         # 近 8 周计划内质量课
 QUALITY_MIN_TOTAL = 2            # 计划质量课 <2 堂 → 样本不足，不参与调整
 QUALITY_K = 1.6                  # 完成率 → VDOT 线性系数（r=1→+0.48，r=0→−1.12）

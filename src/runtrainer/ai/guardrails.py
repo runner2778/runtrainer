@@ -22,7 +22,7 @@ from datetime import date, timedelta
 
 from .contracts import CoachOutput
 
-HARD_KINDS = {"T", "T1", "I", "R", "M", "TUNEUP", "RACE"}   # T1=LT1 有氧阈（双阈值上段，同为强度课）
+HARD_KINDS = {"T", "T1", "I", "R", "M", "TUNEUP", "RACE"}   # T1=LT1 巡航阈（双阈值上段，同为强度课）
 VALID_KINDS = {"E", "M", "T", "T1", "I", "R", "LR", "RECOVERY"}
 VALID_ZONES = {"E", "M", "T", "T1", "I", "R"}
 EXTRA_KINDS = {"E", "RECOVERY", "CROSS"}

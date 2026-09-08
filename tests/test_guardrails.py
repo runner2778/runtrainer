@@ -155,7 +155,7 @@ def test_modify_invalid_pace_zone_kept():
 
 
 def test_modify_pace_zone_t1_is_valid():
-    """T1（LT1 有氧阈）与 T 同为合法配速区：改到 T1 不被当作非法区改写。"""
+    """T1（LT1 巡航阈）与 T 同为合法配速区：改到 T1 不被当作非法区改写。"""
     items, log = _run([{"date": "2026-09-07", "planned_workout_id": 1,
                         "action": "modify", "changes": {"pace_zone": "T1"}}])
     assert items[0]["changes"]["pace_zone"] == "T1"

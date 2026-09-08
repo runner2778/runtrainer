@@ -22,7 +22,7 @@ class Template:
     reps: tuple[tuple[int, int], ...] = ()   # ((组数, 距离m), ...)，可多组不同距离
     rest_m: int = 400               # 组间慢跑恢复距离
     tempo_sets: tuple[tuple[int, int], ...] = ()  # ((组数, 分钟), ...)
-    tempo_zone: str = "T"          # 主体段目标带：普通阈值 T（LT2）；双阈值上午段 T1（LT1 有氧阈）
+    tempo_zone: str = "T"          # 主体段目标带：普通阈值 T（LT2）；双阈值上午段 T1（LT1 巡航阈，非 VT1/有氧阈）
     tempo_rest_min: int = 2
     wu_min: int = 15
     cd_min: int = 10
@@ -153,33 +153,39 @@ TUNEUP = _t("tuneup", "TUNEUP", "测试跑", "热身 15 分钟轻松跑 + 测试
             "赛前 2–3 周的短测试，检验状态并熟悉配速，不全力。", None, tuneup=True)
 
 # ---------- 一天两练（挪威双阈值法）----------
-# 科学依据（Seiler 80/20、Marius Bakken 创立的挪威模式）：双阈值日一天两练——
-# 上午 LT1 有氧阈（文献锚 ≈2 mmol 血乳酸、70–80% HRmax、约 84% VDOT、比 T 慢
-# 5–10 秒/公里）：组段长、重复少，立有氧阈的“量”；下午 LT2 乳酸阈（≈2–4.5
-# mmol 带内、T 配速“舒适地费力”）：组段短、重复多，磨乳酸阈的“强度”。两练
-# 间隔 4–10 小时（Talsnes 等 2024 crossover：拆分后心率漂移与 RPE 显著下降——
-# 6×10′ 单场有漂移、拆两场 3×10′ 无）。
-# 形态参考：Jakob Ingebrigtsen 型周 = 周二 AM 5×6′ + 周四 AM 6×5′（≤2.5 mmol），
-# PM 10–12×1km / 20–25×400m（≤3.5 mmol）（来源：Marathon Handbook、shuichi-
-# running、Kelemen & Tóth 2024 系统综述）。业余须缩量（精英 ~160km/周，非
-# 精英跑者单段主体 ≤35 分钟）、每周 ≤1–2 个双阈值日。
+# 证据分级（2026-09 复核，见 docs/training-science-3000m-hm.md）：双阈值 vs 经典
+# 训练无 RCT 头对头——支持证据是精英案例（Tjelta 案例研究）+ 急性拆场实验
+# （Talsnes 等 2024 crossover：单场 6×10′ 心率漂移/RPE 更高、拆两场 3×10′ 更低；
+# 受试以越野滑雪运动员为主，外推跑步为描述性证据，且只测过 6.5 小时间隔）。
+# 血乳酸目标（上午 ≤2.5、下午 ≤3.5 mmol 家族）出自教练文档与案例转述，非对照
+# 实验——只写在这条注释里，用户可见描述一律用配速锚+体感（见下两段 DESC）。
+# % 锚操作义（勿当 VT1 解释）：上午 T1=LT1 巡航阈 ≈84% VDOT（比 T 慢 5–10 秒/
+# 公里，阈下巡航带；文献 VT1 速度群体均值仅 ≈74%）；T=88% ≈ 实测 VT2 速度均值
+# 87.6±3.9%（Estéve-Lanao 等 2026，n=1411）。
+# 形态参考：挪威体系周模板 = AM 5×6′/6×5′ 级多组 + PM 10–12×1km/20–25×400m 级
+# 重复（来源：Marathon Handbook、shuichi-running 等教练博客转述——仅作形态出处，
+# 非循证；另见 Kelemen、Benczenleitner、Tóth 2024 描述性综述，n=13 均为年轻
+# 男性精英/准精英——女性与 50+ 跑者按保守档处理）。业余须缩量（精英 ~160km/
+# 周，非精英跑者单段主体 ≤35 分钟）、每周 ≤1–2 个双阈值日；两练间隔 ≥6 小时。
 # 注：「4×8′+5×5′ 经典配对」无文献出处，仅为本应用早期模板；本批起按已记录
 # 形态多样化并按目标距离调节长短（全马教练版改编：AM 长段优先，PM 短组/巡航）。
-_SUBT_AM_DESC = ("挪威双阈值法上午段 LT1（≈2 mmol 有氧阈，约 84% VDOT，比 T 慢 5–10 秒/公里，"
-                 "心率 70–80% HRmax，体感“稳定而克制”）。热身 12 分钟轻松跑 + {body} + "
-                 "冷身 8 分钟。与下午 LT2 段间隔 ≥5 小时，两段间补水补碳水。")
-_SUBT_PM_DESC = ("挪威双阈值法下午段 LT2（2–4.5 mmol 乳酸阈带，T 配速“舒适地费力”，心率 80–90% "
-                 "HRmax）。以轻热身为宜：热身 8 分钟轻松跑 + {body} + 冷身 8 分钟。"
+_SUBT_AM_DESC = ("双阈值法上午段 LT1 巡航阈（约 84% VDOT，比 T 慢 5–10 秒/公里，"
+                 "体感“稳定而克制”、能说短句；是低于 LT2 的阈下带，不是 VT1/有氧阈）。"
+                 "热身 12 分钟轻松跑 + {body} + 冷身 8 分钟。与下午 LT2 段间隔 ≥6 小时，"
+                 "两段间补水补碳水。")
+_SUBT_PM_DESC = ("双阈值法下午段 LT2 乳酸阈（≈88% VDOT，T 配速“舒适地费力”、"
+                 "只能蹦单词）。以轻热身为宜：热身 8 分钟轻松跑 + {body} + 冷身 8 分钟。"
                  "两段都不要上到力竭。")
 
 
 def _subt_am(key, n, m, rest=1, note="") -> Template:
     """LT1 上午段分钟制模板（时长随配速缩放，主体 n×m 分钟 ≤35 安全）。"""
     body = f"{n}×{m} 分钟 LT1（组间慢跑 {rest} 分钟）"
-    return _t(f"subt_am_{key}", "T1", f"双阈值·上（LT1 有氧阈 {n}×{m}′）",
+    return _t(f"subt_am_{key}", "T1", f"双阈值·上（LT1 巡航阈 {n}×{m}′）",
               _SUBT_AM_DESC.format(body=body) + (f"（{note}）" if note else ""),
               "T1", tempo_sets=((n, m),), tempo_zone="T1", tempo_rest_min=rest,
               wu_min=12, cd_min=8)
+
 
 
 def _subt_pm_tempo(key, n, m, rest) -> Template:
@@ -217,9 +223,10 @@ SUBT_AM_MENU = {
            _subt_am("6x5", 6, 5, 1, "多组短段形态")],
 }
 # LT2 菜单：分钟制巡航 2 形 + 距离制间歇 3 形（1km 组 ≈ 记录形态 10–12×1km
-# 的业余缩量 6×1km；400m 组 ≈ 20–25×400m 缩量 10×400m；800m 组 ≈ 文献出现的
-# 8×800m/1′ 阈值间歇）。每距离类各取 4 形、重排长短——AM 3 × PM 4 互素，
-# idx 轮换 12 种组合一轮不重复。
+# 的业余缩量 6×1km；400m 组 ≈ 20–25×400m 缩量 10×400m；800m 组 8×800m/1′ 此前的
+# “文献出处”（Lampou & Sengupta 2023）在索引库复核不到原文——【证据不足】，
+# 仅作 800m 巡航家族形态保留，不再引注该文）。每距离类各取 4 形、重排长短——
+# AM 3 × PM 4 互素，idx 轮换 12 种组合一轮不重复。
 SUBT_PM_MENU = {
     "5K": [_subt_pm_reps("10x400", 10, 400, 150, "10×400m", "30–45 秒"),
            _subt_pm_tempo("5x5", 5, 5, 1),
@@ -350,7 +357,7 @@ def session_stats(t: Template, vdot_val: float, *, lr_km: float = 0.0,
         hard += n * m / 1000.0
         total += n * m / 1000.0 + max(0, n - 1) * t.rest_m / 1000.0
     total += t.strides * 0.1
-    # tempo 主体按该课的段带配速（普通阈值课=T(LT2)；双阈值上段=T1(LT1 有氧阈)）
+    # tempo 主体按该课的段带配速（普通阈值课=T(LT2)；双阈值上段=T1(LT1 巡航阈)）
     tp_kpm = 60.0 / zone_pace(t.tempo_zone, vdot_val)
     tempo_total_min = sum(sets * minutes for sets, minutes in t.tempo_sets)
     total += tempo_total_min * tp_kpm
@@ -386,7 +393,8 @@ def _body_zone(t: Template) -> str:
 
 
 def build_segments(t: Template, *, lr_km: float = 0.0, m_block_km: float = 0.0,
-                   tuneup_km: float = 0.0, easy_min: float | None = None,
+                   m_block_at: str = "end", tuneup_km: float = 0.0,
+                   easy_min: float | None = None,
                    filler_km: float | None = None) -> list[dict]:
     """生成结构化详情段，供日历弹窗与 AI 提示词。
 
@@ -397,8 +405,19 @@ def build_segments(t: Template, *, lr_km: float = 0.0, m_block_km: float = 0.0,
         segs.append({"type": "warmup", "zone": "E", "duration_min": t.wu_min})
     if t.lr:
         if m_block_km > 0:
-            segs.append({"type": "continuous", "zone": "E", "distance_km": round(lr_km - m_block_km, 1)})
-            segs.append({"type": "continuous", "zone": "M", "distance_km": round(m_block_km, 1)})
+            # M 段位置轮换（Canova 调制：final 期 LR-M 前/中/后逐周轮换，防每周同构）
+            e_km = round(lr_km - m_block_km, 1)
+            if m_block_at == "front":
+                segs.append({"type": "continuous", "zone": "M", "distance_km": round(m_block_km, 1)})
+                segs.append({"type": "continuous", "zone": "E", "distance_km": e_km})
+            elif m_block_at == "mid":
+                a = round(e_km / 2, 1)
+                segs.append({"type": "continuous", "zone": "E", "distance_km": a})
+                segs.append({"type": "continuous", "zone": "M", "distance_km": round(m_block_km, 1)})
+                segs.append({"type": "continuous", "zone": "E", "distance_km": round(e_km - a, 1)})
+            else:                       # "end"：默认，E 后接 M（模拟比赛后程）
+                segs.append({"type": "continuous", "zone": "E", "distance_km": e_km})
+                segs.append({"type": "continuous", "zone": "M", "distance_km": round(m_block_km, 1)})
         else:
             segs.append({"type": "continuous", "zone": "E", "distance_km": round(lr_km, 1)})
     elif t.tuneup:

@@ -334,7 +334,7 @@ export function initActivities() {
       }
       const p = Math.max(0, Math.min(100, (w.hr_pct || 0) * 100));
       const mk = (v, t) => `<div class="istrip-mk" style="left:${(v * 100).toFixed(1)}%" title="${t}"></div>`;
-      const marksHtml = mk(w.lt1, 'LT1 有氧阈（一区上沿）') + mk(w.lt2, 'LT2 乳酸阈（二区上沿）');
+      const marksHtml = mk(w.lt1, 'LT1 巡航阈（一区上沿）') + mk(w.lt2, 'LT2 乳酸阈（二区上沿）');
       return `<div class="istrip">${segs}${marksHtml}`
         + `<div class="istrip-dot" style="left:calc(${p.toFixed(1)}% - 6px)" title="本次 ${p.toFixed(0)}%"></div></div>`
         + `<div class="istrip-keys">${keys}</div>`;

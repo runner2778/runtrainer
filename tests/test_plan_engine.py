@@ -301,7 +301,7 @@ def test_double_days_threshold_split():
     assert pairs, "应有同一天两练的日子"
     for d, ws in pairs:
         assert [w.slot for w in ws] == [1, 2]
-    # 至少一对是双阈值（T 日拆分，T 日只在 transition/final 期）：上段 LT1 有氧阈 + 下段 LT2
+    # 至少一对是双阈值（T 日拆分，T 日只在 transition/final 期）：上段 LT1 巡航阈 + 下段 LT2
     assert any(ws[0].kind == "T1" and ws[1].kind == "T"
                for _d, ws in pairs), "双阈值日应为上午 LT1（slot1）+ 下午 LT2（slot2）"
     # 上午段与下午段配速必须不同：LT1（84%VDOT）比 T/LT2（88%）慢——区间区隔开
@@ -406,6 +406,25 @@ def test_lr_m_blocks_final_fm_weekly_hm_every_other():
     assert k5_z and set(k5_z) == {"E"}                   # 短距离 final 纯有氧长跑
 
 
+def test_lr_m_segments_rotate_placement_fm_final():
+    """M 段位置轮换（批20）：全马 final 的 LR-M 逐周按 后段→中段→前段 循环，
+    同一 final 期至少出现两种位置顺序；M 段每节恰一段、段表有 M 区。"""
+    res = generate_plan(_spec(goal_distance_m=42195, weeks=16, base_weekly_km=60))
+    rows = [w for w in res.workouts if w.kind == "LR"
+            and w.phase == "final" and w.pace_zone == "M" and w.segments]
+    assert len(rows) >= 2
+    orders = []
+    for w in rows:
+        # 热身/冷身行只有 duration 没有 distance_km——按内容行判 M 段位置
+        content = [s for s in w.segments if s.get("distance_km") is not None]
+        m_idx = [i for i, s in enumerate(content) if s.get("zone") == "M"]
+        assert len(m_idx) == 1                 # 每节恰一个 M 段
+        i = m_idx[0]
+        orders.append("front" if i == 0
+                      else "mid" if len(content) == 3 and i == 1 else "end")
+    assert len(set(orders)) >= 2               # final 期不每周同构
+
+
 def test_double_days_easy_evening():
     """easy 模式：强度日保持主课，傍晚加 30 分钟放松晚跑（RECOVERY）。"""
     res = generate_plan(_spec(double_days=1, double_mode="easy"))
@@ -506,7 +525,7 @@ def test_pro_mode_all_other_days_double_sessions():
             continue
         if ws[0].kind == "T1" and ws[1].kind == "T":
             tt.append(ws)
-            # 双阈值拆分成上/下两练（挪威法）：LT1 有氧阈 ~84%VDOT 与 LT2 ~88% 不同配速
+            # 双阈值拆分成上/下两练（挪威法）：LT1 巡航阈 ~84%VDOT 与 LT2 ~88% 不同配速
             assert ws[0].pace_zone == "T1" and ws[1].pace_zone == "T"
             assert (ws[0].pace_slow_s_km or 0) > (ws[1].pace_slow_s_km or 1e9), \
                 "LT1 上段应比 LT2 下段慢"

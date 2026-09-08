@@ -261,6 +261,7 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
         # ---- 长距离（30% 上限按含热身冷身的总量约束）----
         lr_tpl: Template | None = None
         lr_km = m_block = 0.0
+        lr_m_at = "end"
         if not is_race_week:
             lr_tpl = lr_template(phase, pi, dist)
             wucd = session_stats(lr_tpl, vdot_val, lr_km=0.0, m_block_km=0.0)["total_km"]
@@ -273,6 +274,7 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
                 mlr, mm = LRM_MENU[cls][pi % len(LRM_MENU[cls])]
                 lr_km = min(mlr, cap_lr)
                 m_block = min(mm, lr_km * 0.5, 32.0)
+                lr_m_at = ("end", "mid", "front")[pi % 3]   # M 段前/中/后轮换（防同构连轴）
                 if m_block < 5:      # M 段太短则退化为普通长距离
                     m_block = 0.0
                     lr_tpl = lr_template("base", 0, dist)
@@ -339,7 +341,7 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
 
         # ---- 一天两练（slot=2）----
         # 职业双练模式（效仿职业运动员）：休息日轻松跑单练，其余所有训练日两练
-        # ——T 日按挪威模式拆上（LT1 有氧阈）+下（LT2 乳酸阈），其他日主课 + 30
+        # ——T 日按挪威模式拆上（LT1 巡航阈）+下（LT2 乳酸阈），其他日主课 + 30
         # 分钟放松晚跑；down 恢复周保留二练频率但降级为放松晚跑；减量/比赛周不排。
         # 普通模式：每周 double_days 天二练优先挑 T 日；减量/比赛/down 周不排。
         def _pair(tpl: Template | None) -> tuple[Template | None, Template | None]:
@@ -479,9 +481,13 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
                 continue
             if wd == lr_wd and lr_tpl:
                 title = f"长距离 {lr_km:.0f}km" + (f"（含 {m_block:.0f}km M 配速）" if m_block else "")
+                desc = lr_tpl.description
+                if m_block:
+                    pos = {"end": "后段接", "mid": "中段夹", "front": "前段放"}[lr_m_at]
+                    desc = f"长距离轻松跑，{pos} {m_block:.0f}km 马拉松配速段，模拟比赛节奏；M 段位置逐周轮换。"
                 workouts.append(_mk_draft(
-                    d, w, phase, lr_tpl, title, lr_tpl.description, paces, lr_stats,
-                    build_segments(lr_tpl, lr_km=lr_km, m_block_km=m_block),
+                    d, w, phase, lr_tpl, title, desc, paces, lr_stats,
+                    build_segments(lr_tpl, lr_km=lr_km, m_block_km=m_block, m_block_at=lr_m_at),
                     is_quality=lr_tpl.lr_m))
                 _append_extra(wd)
             elif wd == q1_wd and q1_tpl:
