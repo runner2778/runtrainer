@@ -563,6 +563,20 @@ def _refresh_title_numbers(w: dict) -> None:
             w["title"] = f"{m.group(1)} {dist:g}km"
 
 
+def _zone_pace_fields(paces: dict, zone: str | None) -> tuple:
+    """按引擎口径（plan_engine._mk_draft）把 zone 映射为落库配速字段：
+    E/RECOVERY 为带两端（slow 慢端），M/T1/T/I/R 为单值，无带/未知为 None。"""
+    if not zone or zone not in paces:
+        return None, None
+    if zone in ("E", "RECOVERY"):
+        return paces[zone]["slow_s_km"], paces[zone]["fast_s_km"]
+    return paces[zone], paces[zone]
+
+
+# kind 属强度带的集合（zone 与 kind 一一对应）；LR 例外允许 E/M，见下方注释
+_ZONE_KINDS = ("E", "RECOVERY", "M", "T1", "T", "I", "R")
+
+
 def _apply_row(plan: dict, r: dict) -> None:
     action = r["action"]
     changes = jsonutil.loads(r.get("changes_json")) or {}
@@ -577,6 +591,7 @@ def _apply_row(plan: dict, r: dict) -> None:
         if not w:
             raise RuntimeError("课表不存在")
         old_kind = w.get("kind")
+        old_zone = w.get("pace_zone")
         ai_title = (changes.get("title") or "").strip()
         ai_desc = (changes.get("description") or "").strip()
         for k, v in changes.items():
@@ -607,6 +622,22 @@ def _apply_row(plan: dict, r: dict) -> None:
         elif action == "modify":
             _align_workout_content(w, r)   # 类型未变但原改轻松类后的残留清理
             _refresh_title_numbers(w)      # 引擎风格标题里的量数字同步刷新
+        # 配速与结构同步（批23）：AI 调整契约没有配速字段，kind/zone 变了而
+        # 落库配速不跟着换，日历弹窗「目标配速」就会与类型标签矛盾（#38 实证：
+        # 短间歇 I 课残留 T 配速 3:55）。结构（kind/zone）一变化就按引擎口径
+        # 重算 zone 与配速：质量/轻松类 zone 即 kind，LR 允许 E/M（无 E/M 时
+        # 归 E），CROSS 等无强度带 → zone=None 并清空配速。
+        if w.get("kind") != old_kind or w.get("pace_zone") != old_zone:
+            k = w["kind"]
+            if k in _ZONE_KINDS:
+                zone = k
+            elif k == "LR":
+                zone = w.get("pace_zone") if w.get("pace_zone") in ("E", "M") else "E"
+            else:
+                zone = None
+            w["pace_zone"] = zone
+            w["pace_slow_s_km"], w["pace_fast_s_km"] = _zone_pace_fields(
+                vd.pace_table(float(plan["vdot"])), zone)
         w["source"] = "ai"
         w["adjustment_id"] = r["id"]
         plan_repo.update_workout(r["workout_id"], w)
@@ -627,10 +658,12 @@ def _apply_row(plan: dict, r: dict) -> None:
         kind = changes.get("kind") or "E"
         dur = changes.get("duration_min") or 30.0
         dist = changes.get("distance_km")
+        zone = changes.get("pace_zone") or ("E" if kind != "CROSS" else None)
+        paces = vd.pace_table(float(plan["vdot"]))
         if not dist:
-            paces = vd.pace_table(float(plan["vdot"]))
-            e_pace = paces["E"]["slow_s_km"]
-            dist = round(dur * 60 / e_pace, 1)
+            dist = round(dur * 60 / paces["E"]["slow_s_km"], 1)
+        # 加练同样落 canonical 配速（E/RECOVERY 带两端），日历弹窗不用现算 fallback
+        slow, fast = _zone_pace_fields(paces, zone)
         slot = int(changes.get("slot") or 1)
         title = "加练 · 放松晚跑（二练）" if slot == 2 else f"加练 · {kind}"
         w = {
@@ -639,8 +672,8 @@ def _apply_row(plan: dict, r: dict) -> None:
             "phase": _phase_for_week(plan, (d - date.fromisoformat(plan["start_date"])).days // 7),
             "kind": kind, "title": title, "description": r["reason"],
             "distance_km": dist, "duration_min": dur,
-            "pace_zone": changes.get("pace_zone") or ("E" if kind != "CROSS" else None),
-            "pace_slow_s_km": None, "pace_fast_s_km": None, "target_hr_zone": None,
+            "pace_zone": zone,
+            "pace_slow_s_km": slow, "pace_fast_s_km": fast, "target_hr_zone": None,
             "source": "ai", "adjustment_id": r["id"], "status": "planned",
             "completed_activity_id": None, "segments_json": None,
         }
