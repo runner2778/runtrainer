@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
@@ -31,6 +32,64 @@ HEALTH_DAYS_PER_SYNC = 90
 # 新活动详情回填窗口：与概要拉取范围一致（一年）——用户要求历史数据
 # 具体到圈/课程，只回填半年会让更早的活动没有结构，课程识别只剩平均配速
 DETAIL_BACKFILL_WINDOW_DAYS = 365
+# 同步后自动 AI 分析失败后的冷却：LLM 调用慢/429/解析失败时连点同步
+# 会反复重试同一批活动（每次最长 ~2×超时）。失败后 X 秒内跳过分析，
+# 只把失败原因写日志——同步本身已不被分析阻塞（分析在后台线程跑）。
+AUTO_ANALYZE_COOLDOWN_S = 600
+
+# 后台自动分析互斥（进程内）：并发同步只允许一个分析线程
+_auto_analyze_lock = threading.Lock()
+
+
+def _auto_analyze_worker() -> None:
+    """同步后自动分析的后台线程体：失败只记日志+写冷却时间，不打扰主流程。"""
+    if not _auto_analyze_lock.acquire(blocking=False):
+        log.info("已有后台自动分析在跑，本轮跳过")
+        return
+    try:
+        from ..services import coach_service
+        state = sync_repo.get_sync_state(SOURCE)
+        meta = json.loads(state["meta_json"]) if state["meta_json"] else {}
+        fail_ts = meta.get("analysis_fail_ts")
+        if fail_ts and time.time() - float(fail_ts) < AUTO_ANALYZE_COOLDOWN_S:
+            log.info("自动分析在失败冷却期内（%ds 前失败），本轮跳过", time.time() - float(fail_ts))
+            return
+        res = coach_service.auto_analyze_new_activities()
+        if res:
+            log.info("后台自动分析完成：%s", res)
+    except Exception as e:
+        log.warning("同步后自动分析失败（后台，非致命，%ds 内不再重试）: %s",
+                    AUTO_ANALYZE_COOLDOWN_S, e)
+        try:
+            # 写失败冷却时间（重读合并：主流程可能刚推进过游标/last_stats）
+            state = sync_repo.get_sync_state(SOURCE)
+            meta = json.loads(state["meta_json"]) if state["meta_json"] else {}
+            meta["analysis_fail_ts"] = time.time()
+            sync_repo.set_sync_state(SOURCE, meta=meta)
+        except Exception:
+            pass
+    finally:
+        _auto_analyze_lock.release()
+
+
+def _maybe_auto_analyze_async() -> str | None:
+    """把同步后自动分析移出同步关键路径：Garmin 数据入库后立即返回，
+    AI 分析在 daemon 线程慢慢跑（消息就绪后教练页可见）。
+
+    此前分析同步执行——模型慢/429/超时会拖住同步按钮几十秒到数分钟，
+    是「同步慢」的主因（Garmin 拉取本身秒级）。返回给 stats 的提示文案。
+    """
+    try:
+        state = sync_repo.get_sync_state(SOURCE)
+        meta = json.loads(state["meta_json"]) if state["meta_json"] else {}
+        fail_ts = meta.get("analysis_fail_ts")
+        if fail_ts and time.time() - float(fail_ts) < AUTO_ANALYZE_COOLDOWN_S:
+            return "AI 自动分析在冷却期内跳过（上次分析失败，稍后再试）"
+        threading.Thread(target=_auto_analyze_worker, daemon=True).start()
+        return "AI 分析后台进行中（教练页稍后可见结果）"
+    except Exception as e:
+        log.warning("自动分析启动失败（非致命）: %s", e)
+        return None
 
 
 def get_adapter() -> GarminAdapter:
@@ -190,33 +249,32 @@ def sync_all() -> dict:
             except Exception as e:
                 log.warning("课表重建失败（非致命）: %s", e)
 
-        # 4.5) 同步后 → AI 教练自动读取「游标之后、近 14 天内」的新训练数据
-        #      生成分析总结 + 未来几天建议（消息 kind=sync_analysis，AI 教练页
-        #      可见）。coach_service 按 last_analysis_act_ts 兜底去重：上轮导入
-        #      成功但分析失败/跳过的活动本轮自动补上，不依赖 new_acts 恰好同轮；
-        #      失败不阻断同步；重复同步不重复计费（游标成功才推进）。
+        # 4.5) 同步后 → AI 教练自动分析（新训练点评 + 未来几天建议，消息
+        #      kind=sync_analysis）。自 4.6 起在后台 daemon 线程执行：分析要
+        #      调 LLM（慢/429/超时可达分钟级），不能让它拖住同步按钮。
+        #      coach_service 按 last_analysis_act_ts 兜底去重（上轮失败/跳过的
+        #      活动本轮补上）；失败有冷却（AUTO_ANALYZE_COOLDOWN_S）防连点
+        #      同步反复打 LLM；成功游标才推进、不重复计费。
         if not settings_service.is_mock_mode():
-            try:
-                from ..services import coach_service
-                res = coach_service.auto_analyze_new_activities()
-                if res:
-                    stats["auto_analysis"] = \
-                        f"已自动分析 {res['activities_analyzed']} 条新训练"
-                    if res["adjustment_count"]:
-                        stats["auto_analysis"] += f"，附 {res['adjustment_count']} 条调整建议"
-                    stats["auto_analysis"] += "（AI 教练页查看）"
-            except Exception as e:
-                log.warning("同步后自动分析失败（非致命）: %s", e)
-                stats["auto_analysis_error"] = "AI 分析未生成，可在 AI 教练页手动询问"
+            note = _maybe_auto_analyze_async()
+            if note:
+                stats["auto_analysis"] = note
 
         meta["cursor_ts"] = int(datetime.now(timezone.utc).timestamp())
-        # 增量无变化的同步不要用全零统计覆盖上次结果：
-        # 设置页「本次结果」保持最近一次有意义的结果
+        # 增量无变化的同步不要用全零统计覆盖上次结果：设置页「本次结果」
+        # 保持最近一次有真实内容的摘要。复用前剔除过程性键——否则「上次
+        # 重建过计划/分析过」会作为本轮结果反复显示（plan_rebuilt 每轮为
+        # True 的假象即由此而来：本轮其实没重建）。
         if not (stats.get("activities") or stats.get("health_days")
                 or stats.get("health_error") or stats.get("plan_rebuilt")
-                or stats.get("mock_purged")):
+                or stats.get("mock_purged") or stats.get("auto_analysis")
+                or stats.get("health_backfill") or stats.get("details_backfilled")
+                or stats.get("max_hr_inferred")):
             if meta.get("last_stats"):
-                stats = meta["last_stats"]
+                stats = {k: v for k, v in meta["last_stats"].items()
+                         if not (k.startswith("plan_") or k.startswith("auto_analysis")
+                                 or k.startswith("max_hr_")
+                                 or k in ("health_purged", "mock_purged"))}
         meta["last_stats"] = stats
         sync_repo.set_sync_state(SOURCE, meta=meta, error=None)
         log.info("Garmin 同步完成: %s", stats)

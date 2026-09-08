@@ -216,3 +216,66 @@ def test_health_chunks_spans_real_mode(monkeypatch):
     fake.health_calls.clear()
     days = sync_service._fetch_health_chunks(fake, today, today)
     assert len(fake.health_calls) == 1 and len(days) == 1
+
+
+def test_real_sync_kicks_analysis_in_background(monkeypatch):
+    """同步后自动分析已移出同步关键路径（批21）：sync_all 立即返回，分析后台跑。
+
+    此前分析在同步流程内同步执行（模型慢/429/超时 → 同步按钮卡几十秒到数分钟）。
+    """
+    from runtrainer.services import settings_service
+    from runtrainer.utils import dates
+    fake = FakeGarmin()
+    monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(sync_service, "get_adapter", lambda: fake)
+    # 本轮把健康断点顶到昨天 → health_days=0，快速收尾
+    state = sync_repo.get_sync_state("garmin")
+    meta = json.loads(state["meta_json"]) if state["meta_json"] else {}
+    meta["last_health_date"] = (dates.today() - timedelta(days=1)).isoformat()
+    sync_repo.set_sync_state("garmin", meta=meta)
+    # 同步调用本身不做任何 LLM 调用（无活动也进不了分析体）：立即返回 + 提示
+    stats = sync_service.sync_all()
+    assert "auto_analysis" in stats
+    assert "后台进行中" in stats["auto_analysis"]
+
+
+def test_sync_auto_analyze_cooldown_skip(monkeypatch):
+    """自动分析失败冷却（批21）：连点同步不再反复打 LLM。"""
+    import time as _time
+    from runtrainer.services import settings_service
+    fake = FakeGarmin()
+    monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
+    monkeypatch.setattr(sync_service, "get_adapter", lambda: fake)
+    # 上次失败在冷却窗口内 → 本轮跳过（不 spawn 后台线程）
+    state = sync_repo.get_sync_state("garmin")
+    meta = json.loads(state["meta_json"]) if state["meta_json"] else {}
+    meta["analysis_fail_ts"] = _time.time()
+    sync_repo.set_sync_state("garmin", meta=meta)
+
+    stats = sync_service.sync_all()
+    assert "冷却期内跳过" in stats.get("auto_analysis", "")
+
+
+def test_sync_noop_stats_reuse_drops_transient(monkeypatch):
+    """无变化的同步复用上次结果时剔除过程性键（批21）。
+
+    此前 last_stats 原样复用 → 「上次重建过计划/分析过」作为本轮结果反复显示
+    （每轮 plan_rebuilt: True 的假象）；本轮什么也没发生就该只报无新数据。
+    """
+    from runtrainer.utils import dates
+    # 先正常同步一轮建立 cursor/health 断点
+    sync_service.sync_all()
+    # 伪造：上次结果带重建/分析键，且健康断点已追到今天 → 本轮必然无新数据
+    state = sync_repo.get_sync_state("garmin")
+    meta = json.loads(state["meta_json"])
+    meta["last_health_date"] = dates.today().isoformat()
+    meta["last_stats"] = {"activities": 3, "health_days": 2,
+                          "plan_rebuilt": True, "plan_vdot": 55.5,
+                          "auto_analysis": "已自动分析 1 条新训练",
+                          "max_hr_inferred": "x"}
+    sync_repo.set_sync_state("garmin", meta=meta)
+    stats = sync_service.sync_all()
+    assert stats.get("plan_rebuilt") is None
+    assert stats.get("plan_vdot") is None
+    assert stats.get("auto_analysis") is None
+    assert stats.get("activities") == 3  # 真实的旧计数仍保留

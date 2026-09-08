@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import date, timedelta
 
@@ -474,12 +475,35 @@ def decide_advice(approve: bool) -> dict:
 _QUALITY_TEXT_MARKERS = ("间歇", "阈值", "亚阈", "重复跑", "冲刺", "跨步",
                         "马拉松配速", "配速跑", "测试", "比赛")
 _QUALITY_SEGMENT_TYPES = {"tempo", "reps", "strides"}
+# AI 换类型时若没给新标题，按新 kind 兜底的规范课名（与引擎标题风格一致）
+_KIND_FALLBACK_LABEL = {
+    "T1": "双阈值·上（LT1 巡航阈）", "T": "阈值跑", "I": "间歇跑",
+    "R": "重复跑", "M": "马拉松配速跑", "E": "轻松跑", "RECOVERY": "放松跑",
+    "LR": "长距离", "STRENGTH": "力量训练", "CROSS": "交叉训练",
+    "TUNEUP": "测试跑", "RACE": "比赛",
+}
 
 
-def _align_workout_content(w: dict, r: dict) -> None:
+def _fallback_kind_title(w: dict, r: dict) -> str:
+    """kind 变更且 AI 未给 title 时的兜底标题：规范课名 + 距离/时长。"""
+    label = _KIND_FALLBACK_LABEL.get(w.get("kind"), w.get("kind") or "训练")
+    dist = float(w.get("distance_km") or 0)
+    dur = float(w.get("duration_min") or 0)
+    if dist and dur:
+        return f"{label}（教练调整 {dist:g}km / {dur:g} 分钟）"
+    if dist:
+        return f"{label}（教练调整 {dist:g}km）"
+    if dur:
+        return f"{label}（教练调整 {dur:g} 分钟）"
+    return f"{label}（教练调整）"
+
+
+def _align_workout_content(w: dict, r: dict, force: bool = False) -> None:
     """AI 把课改成轻松类（LR/E/RECOVERY）后，若标题/描述/分段还停留在原质量课
     内容上（如原「间歇 4×1200m」只改了 kind），自动对齐：
     标题换成长距离/轻松跑/放松跑，描述改为调整原因，旧分段清空。
+    force=True（kind 刚变更且 AI 没给新标题）时无条件重写规范标题/描述——
+    旧标题可能不含质量课标记（如「轻松跑」改成 RECOVERY 后仍叫轻松跑）。
     """
     kind = w.get("kind")
     if kind not in ("LR", "E", "RECOVERY"):
@@ -497,7 +521,7 @@ def _align_workout_content(w: dict, r: dict) -> None:
             seg_list = []
         need = any(m in text for m in _QUALITY_TEXT_MARKERS) or bool(
             {s.get("type") for s in seg_list if isinstance(s, dict)} & _QUALITY_SEGMENT_TYPES)
-    if not need:
+    if not need and not force:
         return
     dist = float(w.get("distance_km") or 0)
     dur = float(w.get("duration_min") or 0)
@@ -509,6 +533,34 @@ def _align_workout_content(w: dict, r: dict) -> None:
         w["title"] = f"轻松跑 {dur:g} 分钟" if dur else "轻松跑"
     w["description"] = f"教练按你的要求调整：{r.get('reason') or '轻松跑'}"[:300]
     w["segments_json"] = None
+
+
+# 引擎风格标题的数字模式（轻松跑/放松跑 N 分钟、长距离 Nkm）
+_TITLE_NUM_RE = re.compile(r"^(轻松跑|放松跑|长距离)\s+(\d+(?:\.\d+)?)\s*(分钟|km|公里)")
+
+
+def _refresh_title_numbers(w: dict) -> None:
+    """类型没变但距离/时长变了时，引擎风格标题里的数字跟着刷新。
+
+    如用户批准「90 分钟压到 60 分钟」后，标题若仍写「轻松跑 122 分钟」，
+    日历与详情就会显示与批准内容矛盾的数字（只改了量、kind 不变时，
+    _align 不会触发——这里按标题模式精确更新数字）。
+    """
+    kind = w.get("kind")
+    if kind not in ("E", "RECOVERY", "LR"):
+        return
+    m = _TITLE_NUM_RE.match((w.get("title") or "").strip())
+    if not m:
+        return
+    old_val = float(m.group(2))
+    if m.group(3) == "分钟":
+        dur = float(w.get("duration_min") or 0)
+        if dur and abs(dur - old_val) > 0.1:
+            w["title"] = f"{m.group(1)} {dur:g} 分钟"
+    else:
+        dist = float(w.get("distance_km") or 0)
+        if dist and abs(dist - old_val) > 0.1:
+            w["title"] = f"{m.group(1)} {dist:g}km"
 
 
 def _apply_row(plan: dict, r: dict) -> None:
@@ -524,11 +576,37 @@ def _apply_row(plan: dict, r: dict) -> None:
         w = plan_repo.get_workout(r["workout_id"])
         if not w:
             raise RuntimeError("课表不存在")
+        old_kind = w.get("kind")
+        ai_title = (changes.get("title") or "").strip()
+        ai_desc = (changes.get("description") or "").strip()
         for k, v in changes.items():
             if k in w:
                 w[k] = v
-        if action == "modify":
-            _align_workout_content(w, r)   # 类型改轻松类后清理残留的质量课标题/分段
+        if w.get("kind") != old_kind:
+            # 类型变更 → 界面文字/分段必须跟着换，否则日历格子与详情页残留
+            # 旧课名旧描述（强度标签变了内容没变，用户看到「红标签写旧课」）。
+            # AI 给了新 title/description 就直接用（prompt 已要求改形态时填写）；
+            # 没给则覆盖为规范标题 + 调整原因描述（旧描述属于旧形态，无论
+            # 是否非空都不能留——旧「LT2 巡航 5×5′」文案配 I 标签就是矛盾）。
+            if w["kind"] in ("LR", "E", "RECOVERY"):
+                _align_workout_content(w, r, force=not ai_title)
+                if ai_title:
+                    w["title"] = ai_title  # _align 可能按标记重写过，AI 标题优先
+                if ai_desc:
+                    w["description"] = ai_desc
+                else:
+                    w["description"] = f"教练按你的要求调整：{r.get('reason') or ''}"[:300]
+            else:
+                if not ai_title:
+                    w["title"] = _fallback_kind_title(w, r)
+                if not ai_desc:
+                    w["description"] = f"教练按你的要求调整：{r.get('reason') or ''}"[:300]
+            # 旧模板分段属于旧形态（如 T 巡航 5×5′），AI 未给新结构一律清空，
+            # 详情页显示新描述而非旧分段
+            w["segments_json"] = None
+        elif action == "modify":
+            _align_workout_content(w, r)   # 类型未变但原改轻松类后的残留清理
+            _refresh_title_numbers(w)      # 引擎风格标题里的量数字同步刷新
         w["source"] = "ai"
         w["adjustment_id"] = r["id"]
         plan_repo.update_workout(r["workout_id"], w)
@@ -877,8 +955,15 @@ def auto_analyze_new_activities(new_acts: list[tuple[str, int]] | None = None,
     ids = _persist_chat_items(ctx, items, guard_log, model, prompt, output)
     coach_row = chat_repo.create_message(
         "coach", output.reply, adjustment_ids=ids, model=model, kind="sync_analysis")
+    # 成功推进游标前重读最新 meta 合并：分析在后台线程跑，期间主同步流程
+    # 可能已推进 cursor/last_stats——直接覆盖会丢它们的更新。成功同时清掉
+    # sync_service 写的失败冷却标记（analysis_fail_ts）。
     meta["last_analysis_act_ts"] = max(int(ts) for _, ts in fresh)
-    sync_repo.set_sync_state("garmin", meta=meta)
+    state_now = sync_repo.get_sync_state("garmin")
+    meta_now = jsonutil.loads(state_now["meta_json"]) if state_now["meta_json"] else {}
+    meta_now.update(meta)
+    meta_now.pop("analysis_fail_ts", None)
+    sync_repo.set_sync_state("garmin", meta=meta_now)
     log.info("同步后自动分析完成：分析 %d 条新活动，%d 条调整建议，消息 #%s",
              len(new_rows), len(items), coach_row["id"])
     return {"message_id": coach_row["id"], "activities_analyzed": len(new_rows),
