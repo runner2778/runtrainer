@@ -316,8 +316,9 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
 
         # ---- 一天两练（slot=2）----
         # 职业双练模式（效仿职业运动员）：休息日轻松跑单练，其余所有训练日两练
-        # ——T 日按挪威模式拆上（3×8' 亚阈）+下（5×5' 亚阈），其他日主课 + 30 分钟
-        # 放松晚跑；down 恢复周保留二练频率但降级为放松晚跑；减量/比赛周不排。
+        # ——T 日按挪威模式拆上（LT1 有氧阈 4×8′）+下（LT2 乳酸阈 5×5′），其他日
+        # 主课 + 30 分钟放松晚跑；down 恢复周保留二练频率但降级为放松晚跑；减量/
+        # 比赛周不排。
         # 普通模式：每周 double_days 天二练优先挑 T 日；减量/比赛/down 周不排。
         def _pair(tpl: Template | None) -> tuple[Template | None, Template | None]:
             if tpl is None:

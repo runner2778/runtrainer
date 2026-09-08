@@ -179,7 +179,7 @@ class _ScenarioBuilder:
         adj = []
         if self.today in self.by_date:
             w = self.by_date[self.today]
-            if w.get("kind") in ("T", "I", "R", "TUNEUP") or \
+            if w.get("kind") in ("T", "T1", "I", "R", "TUNEUP") or \
                     (w.get("kind") == "LR" and w.get("pace_zone") == "M"):
                 adj.append({**self._ref(self.today), "action": "modify",
                             "changes": {"kind": "E", "pace_zone": "E",
@@ -199,7 +199,7 @@ class _ScenarioBuilder:
         target = None
         for d in self.dates:
             w = self.by_date[d]
-            if w.get("kind") in ("T", "I", "R", "TUNEUP") or \
+            if w.get("kind") in ("T", "T1", "I", "R", "TUNEUP") or \
                     (w.get("kind") == "LR" and w.get("pace_zone") == "M"):
                 target = w
                 break

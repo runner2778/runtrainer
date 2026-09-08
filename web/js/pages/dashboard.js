@@ -1,12 +1,13 @@
 import { tryCall } from '../api.js';
 import { baseAxis, chartColors, disposeChart, initChart, resizeIn, tooltip } from '../charts.js';
 
-const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
+const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T1: '有氧阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
 // 课型 → 强度区间（与水平预估六区配速表同源：vdot.PACE_ZONES 的区间与 % 带）
 const KIND_ZONES = {
   E: { label: '轻松区', band: '59–74%' },
   M: { label: '有氧/马配区', band: '74–82%' },
-  T: { label: '乳酸阈值区', band: '82–92%' },
+  T1: { label: 'LT1 有氧阈区', band: '≈84%' },
+  T: { label: '乳酸阈 LT2 区', band: '≈88%' },
   I: { label: '最大摄氧量区', band: '92–100%' },
   R: { label: '无氧冲刺区', band: '100–105%' },
   LR: { label: '有氧区（长距离）', band: '59–82%' },

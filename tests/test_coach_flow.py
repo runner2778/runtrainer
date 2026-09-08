@@ -305,16 +305,18 @@ def test_chat_adjustment_apply_flow(monkeypatch, plan):
     assert len(chat_repo.list_messages()) == 2
 
 
-def test_chat_forced_adjustment_auto_applies(monkeypatch, plan):
-    """用户强制要求（user_requested=true）：调整直接生效到课表，无需再点批准。"""
+def test_chat_requested_adjustment_waits_for_approval(monkeypatch, plan):
+    """即使 user_requested=true（训练者语气坚决）：调整也只是 pending 建议，
+    先征求同意——批准前课表不动，批准后才逐项生效（不得自动改）。"""
     from runtrainer.db.repos import chat_repo
     p, ws = plan
     d = _hard_date(ws)
     _patch_today(monkeypatch, dates.date.fromisoformat(d))
     target = next(w for w in ws if w["date"] == d)
+    assert target["kind"] not in ("E", "RECOVERY"), "fixture 强度课"
     client = _FakeChatClient({
-        "reply": "好的，已按你的要求执行：那天改轻松跑、配速按 E 区，其余课保持不动，"
-                 "注意赛前恢复。",
+        "reply": "好的，建议把那天改成轻松跑：按 E 区配速、时长保持原样，"
+                 "强度先降下来，更利于身体恢复和后续训练。",
         "user_requested": True,
         "adjustments": [{
             "date": d, "planned_workout_id": target["id"], "action": "modify",
@@ -324,54 +326,98 @@ def test_chat_forced_adjustment_auto_applies(monkeypatch, plan):
         "profile_updates": {}, "rebuild_plan": False,
     })
     _real_mode(monkeypatch, client)
-    res = coach_service.chat("把 d 那天的课改轻松，不用问我")
-    # 回复明确告知已直接改到课表
-    assert "直接改到课表" in res["reply"]["content"]
-    # 课表已立即变化（无需 approve）
-    w = plan_repo.get_workout(target["id"])
-    assert w["kind"] == "E" and w["source"] == "ai"
-    aid = res["reply"]["adjustment_ids"][0]
-    assert adjustment_repo.get_adjustment(aid)["status"] == "applied"
-    # 历史消息标记 auto_applied → 前端不再显示批准按钮
-    hist = coach_service.get_chat_history()
-    coach_msg = next(m for m in hist if m["id"] == res["reply"]["id"])
-    assert coach_msg["auto_applied"] is True
-    # 已生效的调整不能再被 decide 二次应用
-    assert coach_service.decide_chat_adjustments(coach_msg["id"], True)["applied"] == 0
-    assert len(chat_repo.list_messages()) == 2
-
-
-def test_chat_forced_failed_apply_stays_pending(monkeypatch, plan):
-    """强制调整自动应用失败（如底层课表已被改动）→ 行保持 pending 不丢审计，可手动批准。"""
-    from runtrainer.db.repos import chat_repo
-    p, ws = plan
-    d = _hard_date(ws)
-    _patch_today(monkeypatch, dates.date.fromisoformat(d))
-    target = next(w for w in ws if w["date"] == d)
-    client = _FakeChatClient({
-        "reply": "好的，已按你的要求执行：那天改轻松跑、配速按 E 区，其余课保持不动，"
-                 "注意赛前恢复。",
-        "user_requested": True,
-        "adjustments": [{
-            "date": d, "planned_workout_id": target["id"], "action": "modify",
-            "changes": {"kind": "E", "pace_zone": "E"},
-            "reason": "你要求调整",
-        }],
-        "profile_updates": {}, "rebuild_plan": False,
-    })
-    _real_mode(monkeypatch, client)
-
-    def _boom(plan, r):
-        raise RuntimeError("模拟应用失败")
-    monkeypatch.setattr(coach_service, "_apply_row", _boom)
-
     res = coach_service.chat("把那天的课改轻松，不用问我")
-    assert "未能自动执行" in res["reply"]["content"]
+    # 回复明确告知：需点批准才生效（绝不声称已改到课表）
+    assert "批准" in res["reply"]["content"] and "不会变动" in res["reply"]["content"]
+    # 批准前：调整 pending，课表原样
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == target["kind"] and w["source"] == "engine"
     aid = res["reply"]["adjustment_ids"][0]
     assert adjustment_repo.get_adjustment(aid)["status"] == "pending"
     hist = coach_service.get_chat_history()
     coach_msg = next(m for m in hist if m["id"] == res["reply"]["id"])
     assert coach_msg["auto_applied"] is False
+    # 拒绝 → 课表维持原样
+    out = coach_service.decide_chat_adjustments(coach_msg["id"], False)
+    assert out["rejected"] == 1
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == target["kind"]
+    assert adjustment_repo.get_adjustment(aid)["status"] == "rejected"
+    assert len(chat_repo.list_messages()) == 2
+
+
+def test_chat_approval_applies_requested_change(monkeypatch, plan):
+    """同一请求换一种姿势：批准后调整生效到课表（审批流闭环）。"""
+    from runtrainer.db.repos import chat_repo
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    target = next(w for w in ws if w["date"] == d)
+    client = _FakeChatClient({
+        "reply": "好的，建议把那天改成轻松跑：按 E 区配速、时长保持原样执行，"
+                 "强度先降下来，更利于身体恢复和后续训练。",
+        "user_requested": True,
+        "adjustments": [{
+            "date": d, "planned_workout_id": target["id"], "action": "modify",
+            "changes": {"kind": "E", "pace_zone": "E"},
+            "reason": "你要求调整",
+        }],
+        "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    res = coach_service.chat("把那天的课改轻松")
+    assert res["reply"]["adjustment_ids"]
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == target["kind"], "批准前课表不得变化"
+    out = coach_service.decide_chat_adjustments(res["reply"]["id"], True)
+    assert out["applied"] == 1 and out["errors"] == []
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == "E" and w["source"] == "ai"
+    aid = res["reply"]["adjustment_ids"][0]
+    assert adjustment_repo.get_adjustment(aid)["status"] == "applied"
+    # 已生效的调整不能再被 decide 二次应用
+    assert coach_service.decide_chat_adjustments(res["reply"]["id"], True)["applied"] == 0
+    assert len(chat_repo.list_messages()) == 2
+
+
+def test_chat_wide_scope_adjusts_future_week(monkeypatch, plan):
+    """大范围权力：训练者要求改远期课（超过 [今天,+6] 窄窗）→ 护栏在
+    plan_end=比赛日 下放行，调整仍待批准；批准后远期课生效。"""
+    from runtrainer.db.repos import chat_repo
+    p, ws = plan
+    d = _hard_date(ws)
+    _patch_today(monkeypatch, dates.date.fromisoformat(d))
+    horizon = dates.date.fromisoformat(d) + timedelta(days=6)
+    # 远期强度课：日期严格大于今天+6，且落在训练中期（避开 taper）
+    target = next((w for w in ws if w["date"] > horizon.isoformat()
+                   and w["kind"] in ("T", "I", "LR")
+                   and 2 <= int(w["week_index"]) <= 8), None)
+    assert target, "12 周计划里应存在远期可调整的强度课"
+    assert target["date"] > horizon.isoformat()
+    client = _FakeChatClient({
+        "reply": "好的，把那一周的强度课降为恢复跑：换成 30 分钟放松慢跑，"
+                 "对远期积累与赛前状态都更稳。",
+        "user_requested": True,
+        "adjustments": [{
+            "date": target["date"], "planned_workout_id": target["id"],
+            "action": "modify",
+            "changes": {"kind": "RECOVERY", "pace_zone": "E"},
+            "reason": "你要求远期调整",
+        }],
+        "profile_updates": {}, "rebuild_plan": False,
+    })
+    _real_mode(monkeypatch, client)
+    res = coach_service.chat("把下下周（那一天的课）改成恢复跑，不要强度")
+    aid = res["reply"]["adjustment_ids"]
+    assert aid, "远期调整应通过护栏成为待批准建议（plan_end 放宽生效）"
+    assert adjustment_repo.get_adjustment(aid[0])["status"] == "pending"
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == target["kind"], "批准前远期课不得变动"
+    out = coach_service.decide_chat_adjustments(res["reply"]["id"], True)
+    assert out["applied"] == 1
+    w = plan_repo.get_workout(target["id"])
+    assert w["kind"] == "RECOVERY" and w["source"] == "ai"
+    assert w["adjustment_id"] == aid[0]
     assert len(chat_repo.list_messages()) == 2
 
 

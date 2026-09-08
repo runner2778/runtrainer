@@ -2,10 +2,13 @@
 
 规则：
 1. schema 校验（pydantic，由调用方先做）
-2. 日期范围 [今天, +6]；调整必须指向存在的课；add_easy 必须落在空档日
+2. 日期范围 [今天, +6]（GuardContext.plan_end 显式给出时放宽到该日——聊天里训练者
+   要求整张课表/大范围调整时用 plan_end=比赛日）；调整必须指向存在的课；
+   add_easy 必须落在空档日
 3. 调整后相邻日不得同时为强度课
-4. 已有课扩容累计不超过 +10%（减量不设下限；加练由规则 5 单独约束）
-5. 加练仅 E/RECOVERY/CROSS、≤45 分钟、每周 ≤2 次、赛前 3 天禁止
+4. 已有课扩容累计不超过 +10%（按目标课所在自然周独立计数，减量不设下限；
+   加练由规则 5 单独约束）
+5. 加练仅 E/RECOVERY/CROSS、≤45 分钟、每周 ≤2 次（按自然周独立计数）、赛前 3 天禁止
 6. modify 距离变化 ≤30%、配速区必须来自配速表
 7. 赛前 14 天只能 keep/rest/decrease/skip 或轻松课
 8. 强度课容量上限（I ≤8% 周量且 ≤10km；R ≤5% 且 ≤8km；T ≤50min；M ≤32km）
@@ -19,9 +22,9 @@ from datetime import date, timedelta
 
 from .contracts import CoachOutput
 
-HARD_KINDS = {"T", "I", "R", "M", "TUNEUP", "RACE"}
-VALID_KINDS = {"E", "M", "T", "I", "R", "LR", "RECOVERY"}
-VALID_ZONES = {"E", "M", "T", "I", "R"}
+HARD_KINDS = {"T", "T1", "I", "R", "M", "TUNEUP", "RACE"}   # T1=LT1 有氧阈（双阈值上段，同为强度课）
+VALID_KINDS = {"E", "M", "T", "T1", "I", "R", "LR", "RECOVERY"}
+VALID_ZONES = {"E", "M", "T", "T1", "I", "R"}
 EXTRA_KINDS = {"E", "RECOVERY", "CROSS"}
 
 # 容量上限（与 plan_engine 保持一致）
@@ -48,6 +51,9 @@ class GuardContext:
     # force 豁免：赛前窗口非轻松改动→降 E 落地；相邻强度日冲突→降 E 落地；挪课进强度夹缝→降 E 挪入；
     # 周量 +10% 上限豁免；赛前加练→改 20–30 分钟恢复跑。
     # force 不豁免：距离 ±30%/容量上限钳制与数据合法性（日期范围/课存在/已完成课/占档日）
+    plan_end: date | None = None         # 允许调整的最晚日期。None=[今天,+6]（日常建议/自动分析）；
+    # 聊天（尤其训练者要求大范围改课）时给比赛日——AI 可据此调整未来任意周的课；
+    # 每一条仍是建议，落库 pending，由训练者批准后才改课表。
 
 
 def is_hard(kind: str, pace_zone: str | None) -> bool:
@@ -58,8 +64,15 @@ def _in_taper_window(ctx: GuardContext, d: date) -> bool:
     return d >= ctx.race_date - timedelta(days=13)
 
 
-def _in_week(ctx: GuardContext, d: date) -> bool:
-    return ctx.week_start <= d <= ctx.week_end
+def _horizon_end(ctx: GuardContext) -> date:
+    """允许调整的最晚日期：plan_end 显式给出（聊天大范围改课）时用该日，
+    否则维持 [今天, +6] 窄窗口（日常建议/同步自动分析）。"""
+    return ctx.plan_end or ctx.today + timedelta(days=6)
+
+
+def _week_key(ctx: GuardContext, d: date) -> int:
+    """目标课所在自然周序号（相对 ctx.week_start=本周一：本周 0，下周 1…）。"""
+    return (d - ctx.week_start).days // 7
 
 
 def _wkey(w: dict) -> str:
@@ -87,17 +100,41 @@ def _adjacent_ok(by_date: dict, d: date) -> bool:
 
 
 class _State:
+    """按自然周跟踪累计变更：周量 ±10% 与加练每周 ≤2 次都按“目标课所在周”
+    独立计数——一次跨多周的大范围调整，各周互不挤占各自的上限。"""
+
     def __init__(self, ctx: GuardContext):
         self.by_date: dict[str, dict] = {_wkey(w): dict(w) for w in ctx.workouts}
-        self.week_km = float(ctx.week_km)
-        self.extras = int(ctx.add_extra_count_this_week)
+        self.deltas: dict[int, float] = {}            # 各自然周已累计跑量增量
+        self.extra_used: dict[int, int] = {0: int(ctx.add_extra_count_this_week)}
+        # 未来各自然周的基准跑量（本周固定用 ctx.week_km，与历史口径一致；
+        # 自然周基准 = 该周计划课距离之和）
+        self.bases: dict[int, float] = {}
+        for w in ctx.workouts:
+            try:
+                d = date.fromisoformat(w["date"])
+            except (TypeError, ValueError):
+                continue
+            k = _week_key(ctx, d)
+            if k:
+                self.bases[k] = self.bases.get(k, 0.0) + float(w.get("distance_km") or 0)
 
-    def km_delta(self, ctx: GuardContext, delta: float) -> bool:
-        """周跑量检查：增幅累计不超过 +10%（减量是安全方向，不设下限）。"""
-        new = self.week_km + delta
-        if delta > 0 and new > 1.10 * ctx.week_km:
+    def base_km(self, ctx: GuardContext, d: date) -> float:
+        """目标课所在自然周的基准跑量（容量上限的百分比分母）。"""
+        k = _week_key(ctx, d)
+        base = float(ctx.week_km) if k == 0 else self.bases.get(k, 0.0)
+        return base if base > 0 else float(ctx.week_km)
+
+    def km_delta(self, ctx: GuardContext, d: date, delta: float,
+                 exempt: bool = False) -> bool:
+        """周量变化检查（按目标课所在自然周累计）：增幅超基准 +10% 返回 False，
+        exempt=True（强制模式）放行并照常记账。减量是安全方向，不设下限。"""
+        k = _week_key(ctx, d)
+        base = self.base_km(ctx, d)
+        cur = base + self.deltas.get(k, 0.0)
+        if delta > 0 and cur + delta > 1.10 * base and not exempt:
             return False
-        self.week_km = new
+        self.deltas[k] = cur + delta - base
         return True
 
 
@@ -125,8 +162,8 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
     except ValueError:
         log.append(f"调整#{idx} 日期格式错误被丢弃: {item.date}")
         return None
-    if not (ctx.today <= d <= ctx.today + timedelta(days=6)):
-        log.append(f"调整#{idx} 日期 {item.date} 超出 [今天, +6] 范围被丢弃")
+    if not (ctx.today <= d <= _horizon_end(ctx)):
+        log.append(f"调整#{idx} 日期 {item.date} 超出可调整范围（今天 ~ {_horizon_end(ctx)}）被丢弃")
         return None
 
     # 定位目标课
@@ -165,7 +202,7 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
 
     if action in ("rest", "skip"):
         state.by_date.pop(_wkey(workout), None)
-        if _in_week(ctx, d) and not state.km_delta(ctx, -float(workout.get("distance_km") or 0)):
+        if not state.km_delta(ctx, d, -float(workout.get("distance_km") or 0)):
             state.by_date[_wkey(workout)] = workout
             log.append(f"调整#{idx} 休息导致周量降幅超 10% 被丢弃")
             return None
@@ -180,7 +217,7 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
         key = _wkey(workout)
         orig = state.by_date[key]
         state.by_date[key] = dict(workout, distance_km=new)
-        if _in_week(ctx, d) and not state.km_delta(ctx, new - old):
+        if not state.km_delta(ctx, d, new - old):
             state.by_date[key] = orig
             log.append(f"调整#{idx} 降量导致周量变化超限被丢弃")
             return None
@@ -223,12 +260,12 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
                 return None
             log.append(f"调整#{idx} 强制模式：赛前 14 天内不能上 {kind} 强度，按用户要求降为轻松跑 E 落地（跑量保留）")
             kind, zone = "E", "E"
-        # 容量上限
+        # 容量上限（% 分母 = 目标课所在自然周基准量，未来周用各自周量）
         if kind == "I":
-            dist = min(dist, min(CAP_I_WEEK_PCT * ctx.week_km, CAP_I_KM))
+            dist = min(dist, min(CAP_I_WEEK_PCT * state.base_km(ctx, d), CAP_I_KM))
         elif kind == "R":
-            dist = min(dist, min(CAP_R_WEEK_PCT * ctx.week_km, CAP_R_KM))
-        elif kind == "T":
+            dist = min(dist, min(CAP_R_WEEK_PCT * state.base_km(ctx, d), CAP_R_KM))
+        elif kind in ("T", "T1"):
             dur = min(dur, CAP_T_MIN)
         if zone == "M":
             dist = min(dist, CAP_M_KM)
@@ -244,12 +281,12 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
             kind, zone = "E", "E"
             new_w = dict(workout, kind=kind, pace_zone=zone, distance_km=dist, duration_min=dur)
             state.by_date[key] = new_w
-        if _in_week(ctx, d) and not state.km_delta(ctx, dist - old):
+        if not state.km_delta(ctx, d, dist - old):
             if not ctx.force:
                 state.by_date[key] = workout
                 log.append(f"调整#{idx} 导致周量变化超 ±10% 被丢弃")
                 return None
-            state.week_km += dist - old
+            state.km_delta(ctx, d, dist - old, exempt=True)
             log.append(f"调整#{idx} 强制模式：周量增幅超 +10% 上限被豁免，按用户要求执行")
         out["changes"] = {"kind": kind, "pace_zone": zone,
                           "distance_km": round(dist, 1), "duration_min": round(dur, 1)}
@@ -273,8 +310,8 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
         except ValueError:
             log.append(f"调整#{idx} 目标日期格式错误，被丢弃")
             return None
-        if not (ctx.today <= nd <= ctx.today + timedelta(days=6)):
-            log.append(f"调整#{idx} 目标日期 {changes.date} 超出范围，被丢弃")
+        if not (ctx.today <= nd <= _horizon_end(ctx)):
+            log.append(f"调整#{idx} 目标日期 {changes.date} 超出可调整范围（今天 ~ {_horizon_end(ctx)}）被丢弃")
             return None
         if _day_occupied(state.by_date, nd):
             log.append(f"调整#{idx} 目标日期 {changes.date} 已有课，被丢弃")
@@ -313,7 +350,8 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
             if len(day_w) >= 2:
                 log.append(f"调整#{idx} 当日已有两练，被丢弃")
                 return None
-        if state.extras >= 2:
+        wk_key = _week_key(ctx, d)
+        if state.extra_used.get(wk_key, 0) >= 2:
             log.append(f"调整#{idx} 本周加练已达 2 次上限，被丢弃")
             return None
         kind = (suggestion.kind if suggestion and suggestion.kind in EXTRA_KINDS else "E")
@@ -338,8 +376,8 @@ def _apply(item, suggestion, state: _State, ctx: GuardContext, log: list[str], i
             "distance_km": dist, "duration_min": dur, "status": "planned",
         }
         state.by_date[_wkey(new_w)] = new_w
-        # 加练不计入周量 ±10% 检查（时长 ≤45min、每周 ≤2 次已单独约束）
-        state.extras += 1
+        # 加练不计入周量 ±10% 检查（时长 ≤45min、每周 ≤2 次已单独约束，按自然周计数）
+        state.extra_used[wk_key] = state.extra_used.get(wk_key, 0) + 1
         out["changes"] = {"kind": kind, "duration_min": dur, "slot": slot,
                           "distance_km": dist, "pace_zone": "E" if kind != "CROSS" else None}
         return out

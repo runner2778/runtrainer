@@ -301,13 +301,15 @@ def test_double_days_threshold_split():
     assert pairs, "应有同一天两练的日子"
     for d, ws in pairs:
         assert [w.slot for w in ws] == [1, 2]
-    # 至少一对是双阈值（T 日拆分，T 日只在 transition/final 期）
-    assert any(w1.kind == w2.kind == "T" for _d, ws in pairs for w1, w2 in [ws])
-    # 双阈值单练时段阈值主体 ≤30 分钟（3×8'=24 / 5×5'=25，全天 ~49 分钟）
+    # 至少一对是双阈值（T 日拆分，T 日只在 transition/final 期）：上段 LT1 有氧阈 + 下段 LT2
+    assert any(ws[0].kind == "T1" and ws[1].kind == "T"
+               for _d, ws in pairs), "双阈值日应为上午 LT1（slot1）+ 下午 LT2（slot2）"
+    # 上午段与下午段配速必须不同：LT1（84%VDOT）比 T/LT2（88%）慢——区间区隔开
     for w in res.workouts:
-        if w.kind == "T":
+        if w.kind in ("T1", "T"):
+            # LT1 单练为 4×8'=32'，LT2 单练 5×5'=25'，均 ≤ 单段阈值时长上限
             tempo_min = sum(s["duration_min"] for s in w.segments if s["type"] == "tempo")
-            assert tempo_min <= 30
+            assert tempo_min <= 35
 
 
 def test_double_days_easy_evening():
@@ -408,11 +410,15 @@ def test_pro_mode_all_other_days_double_sessions():
     for d, ws in by_date.items():
         if len(ws) != 2:
             continue
-        if ws[0].kind == ws[1].kind == "T":
+        if ws[0].kind == "T1" and ws[1].kind == "T":
             tt.append(ws)
-            for w in ws:      # 双阈值：单练时段亚阈主体 ≤30 分钟（3×8'/5×5'）
+            # 双阈值拆分成上/下两练（挪威法）：LT1 有氧阈 ~84%VDOT 与 LT2 ~88% 不同配速
+            assert ws[0].pace_zone == "T1" and ws[1].pace_zone == "T"
+            assert (ws[0].pace_slow_s_km or 0) > (ws[1].pace_slow_s_km or 1e9), \
+                "LT1 上段应比 LT2 下段慢"
+            for w in ws:      # 单练时段阈值主体：LT1 4×8'=32' / LT2 5×5'=25'
                 tempo_min = sum(s["duration_min"] for s in w.segments if s["type"] == "tempo")
-                assert tempo_min <= 30
+                assert tempo_min <= 35
         else:
             assert ws[1].kind == "RECOVERY"
     assert tt, "应有 T 日双阈值拆分（transition/final 期）"

@@ -142,74 +142,23 @@ def _decode_activity(a: dict) -> dict:
 
 
 def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
-    """近 30 天成绩水平预估（仪表盘卡；与目标页 180 天能力卡同算法，
-    窗口不同：目标页看长期基线定 VDOT，这里回答「现在的水平」）。
-
-    依据分量：近期比赛（30 天内）/手表 VO2max/配速-心率回归阈值/间歇
-    能力/HRR 配速/同配速心率趋势——用户关注的配速、配速对应心率、间歇、
-    手表预估、最大摄氧量都在内。每次同步后前端 syncRefresh → get_dashboard
-    重算，天然满足「随每一次同步自动读取并调整」。
+    """成绩水平预估（仪表盘卡）——与目标页/AI 教练走 plan_service 的
+    ability_assessment() 统一入口：180 天同源同口径（含近一年 PB/保持度、
+    课表完成度自动判定、比赛心率对照档案最大心率）。每次 get_dashboard /
+    同步完成后端重算，天然随每一次同步即时刷新；不再有第二套 30 天口径
+    造成仪表盘与向导/AI 数字不一致（曾出现 50.6 vs 55.0 的分裂）。
     """
-    from ..domain import ability as ab
-    # 一次拉近一年：30 天切片作「现在水平」，全年行供近一年最佳成绩/保持度
-    acts_year = [_decode_activity(a) for a in activity_repo.list_activities(
-        (today - timedelta(days=364)).isoformat(), limit=3000)]
-    for a in acts_year:
-        if a.get("start_ts"):
-            a["date"] = dates.ts_to_date(a["start_ts"]).isoformat()
-    acts30 = [a for a in acts_year
-              if a.get("date", "") >= (today - timedelta(days=30)).isoformat()]
-    # 静息心率：档案优先；否则取近 30 天健康数据中位数（HRR 分量必需）
-    rest_hr = profile.get("rest_hr")
-    if not rest_hr:
-        rhrs = [r["resting_hr"] for r in health_repo.get_health(
-            (today - timedelta(days=30)).isoformat()) if r.get("resting_hr")]
-        if rhrs:
-            rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
-    # 课表质量课完成度（近 8 周计划内 T/I/R/TUNEUP 完成比例）：完成情况
-    # 参与「现在水平」——计划执行差说明估计应更保守（防高估生成跑不动的课）；
-    # 首轮就并入，调整不依赖 PB 等其它证据在场
-    plan_exec = None
-    if plan_vdot is not None:
-        ap = plan_repo.get_active_plan()
-        if ap:
-            q_rows = _plan_rows(plan_repo.get_workouts(
-                ap["id"], (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
-                today.isoformat()), ap)
-            # 用户不手动勾完成 → 质量课按当日实际跑步自动判定已执行
-            run_day: dict[str, float] = {}
-            for a in acts_year:
-                if (a.get("date") and a.get("distance_m")
-                        and load_metrics.is_running(a.get("sport"))):
-                    run_day[a["date"]] = run_day.get(a["date"], 0.0) \
-                        + a["distance_m"] / 1000.0
-            auto = load_metrics.workout_auto_done(q_rows, run_day)
-            plan_exec = ab.quality_execution(q_rows, today=today, auto_done=auto)
-    est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
-                             rest_hr=rest_hr, as_of=today, plan_exec=plan_exec)
-    # 近一年各距离最佳成绩 + 训练保持度：与「现在水平」互相印证
-    # （最近没跑比赛时，回答「现在能跑多少」要引用这些数字）
-    year_bests = ab.distance_bests(
-        acts_year,
-        get_samples=(lambda aid: activity_repo.get_samples(aid)) if any(
-            a.get("has_samples") for a in acts_year) else None,
-        max_hr=est.get("max_hr"))
-    consistency = ab.training_consistency(acts_year, today)
-    # 近一年 PB 参与「现在水平」：显著快于估计时保守加分（时间衰减/封顶）；
-    # 新 PB 同步进来 → 本卡与下方预测随每次 get_dashboard 自动刷新
-    if year_bests and est.get("vdot") is not None:
-        est = ab.compute_ability(acts30, profile.get("vo2max"), profile.get("max_hr"),
-                                 rest_hr=rest_hr, as_of=today, year_bests=year_bests,
-                                 plan_exec=plan_exec)
+    from .plan_service import ability_assessment
+    a = ability_assessment(today)
     return {
-        "window_days": 30,
+        "window_days": a.get("window_days", 180),
         "plan_vdot": plan_vdot,  # 对照用：课表训练按目标页定的 VDOT 配速
-        **{k: est.get(k) for k in ("vdot", "predictions", "zones", "evidence",
-                                   "max_hr", "as_of")},
-        "year_bests": year_bests,
-        "consistency": consistency,
-        "note": ("近 30 天跑步数据不足，无法综合预估；跑几次后会自动更新。"
-                 if not est.get("vdot") else None),
+        **{k: a.get(k) for k in ("vdot", "predictions", "zones", "evidence",
+                                 "max_hr", "as_of")},
+        "year_bests": a.get("year_bests") or [],
+        "consistency": a.get("consistency"),
+        "note": ("近 180 天跑步数据不足，无法综合预估；跑几次后会自动更新。"
+                 if not a.get("vdot") else None),
     }
 
 

@@ -26,18 +26,21 @@ def _decode_activity(a: dict) -> dict:
     return a
 
 
-def wizard_context() -> dict:
-    """向导预填：当前水平预估（综合手表 VO2max/配速-心率趋势/间歇能力/
-    近期比赛）、近 4 周平均周跑量。
+def ability_assessment(today: date | None = None) -> dict:
+    """成绩水平预估统一入口（仪表盘 / 目标向导 / AI 教练同源同口径）。
 
-    水平预估由 domain.ability 综合计算（不再只看最近最快配速）；
-    完全无依据时回退手表 vo2max 读数。
+    唯一实现：180 天活动切片 + 手表 VO2max/档案最大心率/静息心率 + 近一年
+    各距离最佳成绩与训练保持度 + 课表质量课完成度（按当日跑量自动判定执行，
+    不依赖手动勾选）。任何调用方重算一次，同步进数据后每次调用即自动刷新；
+    全库不再存在第二套「30 天口径」造成仪表盘与向导/AI 数字打架（曾出现
+    仪表盘 50.6 vs 向导 55.0）。返回含 est 各字段 + 上下文（plan_vdot/
+    year_bests/consistency/acts180…）供上层拼装。
     """
     from ..db.repos import health_repo
     from ..domain import ability as ab
-    from ..utils import jsonutil
-    today = dates.today()
-    # 一次拉近一年：180 天切片供水平预估分量，全年供近一年最佳成绩/保持度
+    from ..domain import load_metrics
+    today = today or dates.today()
+    # 一次拉近一年：180 天切片供水平预估分量，全年行供近一年最佳成绩/保持度
     acts_year = [_decode_activity(a) for a in
                  activity_repo.list_activities((today - timedelta(days=364)).isoformat(),
                                                limit=3000)]
@@ -55,19 +58,28 @@ def wizard_context() -> dict:
         if rhrs:
             rest_hr = round(sorted(rhrs)[len(rhrs) // 2], 1)
     # 课表质量课完成度（课程内容 + 完成情况参与预估）：近 8 周计划内
-    # T/I/R/TUNEUP 完成比例，由计划行直接统计（无需等手表同步）；
-    # 在首轮就并入——完成度调整不依赖 PB/比赛等其它证据是否在场
+    # T/I/R/TUNEUP 完成比例，按课表生命周期裁剪；执行按当日实际跑量自动
+    # 判定（不手动勾完成也算跑过），首次并入——调整不依赖 PB/比赛证据在场
     plan_exec = None
     plan = plan_repo.get_active_plan()
     if plan:
-        plan_exec = ab.quality_execution(
-            plan_repo.get_workouts(plan["id"],
-                                   (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
-                                   today.isoformat()))
+        rows = plan_repo.get_workouts(
+            plan["id"], (today - timedelta(days=ab.QUALITY_WINDOW_DAYS)).isoformat(),
+            today.isoformat())
+        rows = [w for w in rows
+                if plan["start_date"] <= w["date"] <= plan["race_date"]]
+        run_day: dict[str, float] = {}
+        for a in acts_year:
+            if (a.get("date") and a.get("distance_m")
+                    and load_metrics.is_running(a.get("sport"))):
+                run_day[a["date"]] = run_day.get(a["date"], 0.0) \
+                    + a["distance_m"] / 1000.0
+        plan_exec = ab.quality_execution(rows, today=today,
+                                         auto_done=load_metrics.workout_auto_done(rows, run_day))
     est = ab.compute_ability(acts180, prof.get("vo2max"), prof.get("max_hr"),
-                             rest_hr=rest_hr, plan_exec=plan_exec)
+                             rest_hr=rest_hr, as_of=today, plan_exec=plan_exec)
     # 近一年各距离最佳成绩（比赛硬证据 + 长跑最快分段）+ 训练保持度：
-    # 供 AI 教练「预估水平/今年状态」类提问引用，并参与水平预估（PB 加成）
+    # 供「预估水平/今年状态」类提问与仪表盘引用，并参与水平预估（PB 加成）
     year_bests = ab.distance_bests(
         acts_year,
         get_samples=(lambda aid: activity_repo.get_samples(aid)) if any(
@@ -78,36 +90,56 @@ def wizard_context() -> dict:
     # 重算一次让 evidence 与 recent_vdot 反映 PB 与完成度；无 PB 时保持首轮结果
     if year_bests and est.get("vdot") is not None:
         est = ab.compute_ability(acts180, prof.get("vo2max"), prof.get("max_hr"),
-                                 rest_hr=rest_hr, year_bests=year_bests,
+                                 rest_hr=rest_hr, as_of=today, year_bests=year_bests,
                                  plan_exec=plan_exec)
+    return {**{k: est.get(k) for k in
+               ("vdot", "predictions", "zones", "evidence", "max_hr", "as_of")},
+            "window_days": 180,
+            "plan_vdot": plan.get("vdot") if plan else None,
+            "plan": plan, "profile": prof,
+            "year_bests": year_bests, "consistency": consistency,
+            "acts_year": acts_year, "acts180": acts180, "rest_hr": rest_hr}
 
-    recent_vdot = est.get("vdot")
+
+def wizard_context() -> dict:
+    """向导预填：当前水平预估（综合手表 VO2max/配速-心率趋势/间歇能力/
+    近期比赛 + 近一年 PB/保持度）、近 4 周平均周跑量、训练时期建议。
+
+    水平预估走 ability_assessment() 统一入口（与仪表盘/AI 教练同源同口径）；
+    完全无依据时回退手表 vo2max 读数。
+    """
+    today = dates.today()
+    a = ability_assessment(today)
+    est_vdot = a.get("vdot")
+    recent_vdot = est_vdot
     recent_vdot_source = "ability" if recent_vdot is not None else None
     recent_race = None
-    for ev in est.get("evidence") or []:
+    for ev in a.get("evidence") or []:
         if ev.get("source") == "recent_race" and ev.get("race"):
             r = ev["race"]
             recent_race = {"distance_m": r["distance_m"],
                            "date": dates.ts_to_date(r["date"]).isoformat(),
                            "duration_s": r["duration_s"], "name": r["name"]}
+    prof = a.get("profile") or {}
     if recent_vdot is None:
         vo2 = prof.get("vo2max")
         if vo2:
             recent_vdot = round(float(vo2), 1)
             recent_vdot_source = "garmin_vo2max"
     month = activity_repo.list_activities((today - timedelta(days=28)).isoformat(), limit=1000)
-    avg_km_4w = round(sum((a.get("distance_m") or 0) for a in month) / 1000 / 4, 1)
+    avg_km_4w = round(sum((act.get("distance_m") or 0) for act in month) / 1000 / 4, 1)
     # 训练时期智能判断（近 8 周强度与跑量分布）
     from ..domain.phase_estimator import suggest_phase
     from ..domain.workout_analysis import estimate_max_hr
     max_hr = prof.get("max_hr") or estimate_max_hr(prof.get("birth_year"))
-    phase_suggestion = suggest_phase(acts180, today, max_hr=max_hr,
-                                     rest_hr=prof.get("rest_hr"))
+    phase_suggestion = suggest_phase(a.get("acts180") or [], today, max_hr=max_hr,
+                                     rest_hr=a.get("rest_hr"))
     return {"today": today.isoformat(), "recent_vdot": recent_vdot,
             "recent_vdot_source": recent_vdot_source, "recent_race": recent_race,
-            "ability": {k: est.get(k) for k in
+            "ability": {k: a.get(k) for k in
                         ("vdot", "predictions", "zones", "evidence", "max_hr", "as_of")}
-            | {"year_bests": year_bests, "consistency": consistency},
+            | {"year_bests": a.get("year_bests") or [],
+               "consistency": a.get("consistency")},
             "avg_weekly_km_4w": avg_km_4w, "min_weeks": MIN_WEEKS,
             "phase_suggestion": phase_suggestion}
 

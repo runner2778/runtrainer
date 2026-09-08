@@ -18,6 +18,10 @@ from . import vdot as vd
 # 标准比赛距离带 ± 容差
 RACE_BANDS = ((5000, 0.10), (10000, 0.10), (21097, 0.05), (42195, 0.05))
 RACE_NAME_HINTS = ("比赛", "race", "5k", "10k", "半马", "全马", "marathon", "test")
+# 「全力/比赛强度」的平均心率下限（对个体最大心率）：比赛冲刺平均可达
+# 90–95% HRmax；阈值巡航整场约 84–88%——用 88% 会把配速心率都很稳的
+# 强度巡航课误判成比赛（曾把 10.4km 阈值课当 10K 比赛锚点压死水平预估）
+RACE_HR_MIN_REF = 0.90
 # 心率-配速趋势样本要求
 TREND_MIN_RUNS = 5
 TREND_MIN_DURATION_S = 15 * 60
@@ -62,7 +66,7 @@ PB_DECAY_FLOOR = 0.35
 # 说明「按计划训练」在现实没发生，估计应更保守；反之计划跑得动，配速区间
 # 就有人撑。统计近 8 周计划内质量课（T/I/R/TUNEUP）的完成比例——
 # 由服务层从 plan_repo 取行、本层只做纯计算。
-QUALITY_KINDS = ("T", "I", "R", "TUNEUP")
+QUALITY_KINDS = ("T", "T1", "I", "R", "TUNEUP")   # T1=双阈值日上段 LT1 有氧阈，同为质量课
 QUALITY_WINDOW_DAYS = 56         # 近 8 周计划内质量课
 QUALITY_MIN_TOTAL = 2            # 计划质量课 <2 堂 → 样本不足，不参与调整
 QUALITY_K = 1.6                  # 完成率 → VDOT 线性系数（r=1→+0.48，r=0→−1.12）
@@ -187,8 +191,16 @@ def threshold_pace_from_trend(activities: list[dict], max_hr: float) -> dict | N
             "vdot": _vdot_for_pace(pace, vd.T_PCT)}
 
 
-def best_recent_race(activities: list[dict]) -> dict | None:
-    """近 180 天内的最佳比赛成绩（标准距离带内，名称/心率双判定）。"""
+def best_recent_race(activities: list[dict], max_hr: float | None = None) -> dict | None:
+    """近 180 天内的最佳比赛成绩（标准距离带内，名称/心率双判定）。
+
+    max_hr：已知的个体最大心率（档案设置 > 活动样本 95 分位，由调用方算出）。
+    判定心率用它对冲「单场跑自己的纪录」的偏差：阈值巡航的平均心率通常在
+    个体最大心率的 84–88% 上下，而比赛/全力平均 ≥90%（RACE_HR_MIN_REF）——
+    用单场 max_hr 比值（avg/max≈0.94+）或 88% 线会把配速心率都很稳的强度课
+    误判成比赛（曾把 10.4km 阈值课当 10K 比赛锚点，把水平预估压到 51 封顶）。
+    无 max_hr 时退回单场比值。
+    """
     best = None
     for a in activities:
         dist = a.get("distance_m")
@@ -196,8 +208,12 @@ def best_recent_race(activities: list[dict]) -> dict | None:
         if not dist or not dur or dist < 3000 or dist > 43000:
             continue
         name = (a.get("name") or "").lower()
-        hr_ok = bool(a.get("avg_hr") and a.get("max_hr")
-                     and a["avg_hr"] / a["max_hr"] >= 0.88)
+        avg_hr = a.get("avg_hr")
+        if avg_hr and (max_hr or a.get("max_hr")):
+            hr_ref = max_hr or a["max_hr"]
+            hr_ok = avg_hr / hr_ref >= RACE_HR_MIN_REF
+        else:
+            hr_ok = False
         name_ok = any(h in name for h in RACE_NAME_HINTS)
         if not (hr_ok or name_ok):
             continue
@@ -247,10 +263,16 @@ def distance_bests(activities: list[dict], get_samples=None,
         if not dist or not dur:
             continue
         name = (a.get("name") or "").lower()
-        a_hr_ratio = ((a.get("avg_hr") or 0) / (a.get("max_hr") or 0)
-                      if a.get("avg_hr") and a.get("max_hr") else None)
+        # 平均心率对个体最大心率（与 best_recent_race 同一套参照）：用单场
+        # max_hr 比值会把匀速阈值课误认成近似全程比赛（阈值巡航 avg≈84–88%，
+        # 但相对自己冲到的场次峰值可到 94%+），整场比赛/近似全程才够 90% 线
+        avg_hr = a.get("avg_hr")
+        if avg_hr and (max_hr or a.get("max_hr")):
+            a_hr_ratio = avg_hr / (max_hr or a["max_hr"])
+        else:
+            a_hr_ratio = None
         name_ok = any(h in name for h in RACE_NAME_HINTS)
-        whole_ok = (a_hr_ratio is not None and a_hr_ratio >= 0.88) or name_ok
+        whole_ok = (a_hr_ratio is not None and a_hr_ratio >= RACE_HR_MIN_REF) or name_ok
         for label, std in YEAR_BEST_DISTANCES:
             if whole_ok and abs(dist - std) / std <= YEAR_BEST_TOL and dur > 0:
                 v = vd.estimate_vdot(dist, dur)
@@ -665,7 +687,7 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     无任何依据时 vdot=None。
     """
     max_hr = estimate_max_hr(profile_max_hr, activities)
-    race = best_recent_race(activities)
+    race = best_recent_race(activities, max_hr)
     threshold = threshold_pace_from_trend(activities, max_hr) if max_hr else None
     intervals = interval_ability(activities, max_hr)
     hrr = hrr_ability(activities, max_hr, rest_hr) if max_hr and rest_hr else None

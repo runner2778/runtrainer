@@ -88,8 +88,11 @@ class ChatOutput(BaseModel):
         description="用户在本条消息中明确要求调整课表（无论语气坚决还是商量）。"
                     "置 true 时必须至少给出 1 条 adjustments，不许空数组敷衍、不许以“不建议”回绝；"
                     "请求不合理时用降低强度/调整课表的方式落地")
-    adjustments: list[AdjustmentItem] = Field(default_factory=list,
-                                              description="仅当用户明确要求改课时给出，日期限未来 7 天")
+    adjustments: list[AdjustmentItem] = Field(
+        default_factory=list,
+        description="仅当用户明确要求改课时给出；可定点改某一天，也可大范围改整张"
+                    "未来课表——日期范围从今天到比赛日（含后面几周），每改动一节课"
+                    "列一条（可多条）。改课建议落库后由训练者批准才生效")
     profile_updates: dict = Field(default_factory=dict,
                                   description="仅当用户明确提供新档案信息或健康数据与档案明显矛盾时给出，键限 max_hr/rest_hr/weight_kg/run_experience")
     rebuild_plan: bool = Field(default=False,

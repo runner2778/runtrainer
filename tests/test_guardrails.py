@@ -10,7 +10,7 @@ from runtrainer.ai.contracts import (
 
 TODAY = date(2026, 9, 7)   # 周一
 PACES = {"vdot": 45.0, "E": {"slow_s_km": 335, "fast_s_km": 300},
-         "M": 296, "T": 278, "I": 255, "R": 235}
+         "M": 296, "T1": 286, "T": 278, "I": 255, "R": 235}
 
 # 一周课表：Mon E8 / Tue REC5 / Wed T10(硬) / Thu E8 / Fri 空 / Sat I7(硬) / Sun LR14
 WORKOUTS = [
@@ -154,6 +154,24 @@ def test_modify_invalid_pace_zone_kept():
     assert any("非法 pace_zone" in x for x in log)
 
 
+def test_modify_pace_zone_t1_is_valid():
+    """T1（LT1 有氧阈）与 T 同为合法配速区：改到 T1 不被当作非法区改写。"""
+    items, log = _run([{"date": "2026-09-07", "planned_workout_id": 1,
+                        "action": "modify", "changes": {"pace_zone": "T1"}}])
+    assert items[0]["changes"]["pace_zone"] == "T1"
+    assert not any("非法 pace_zone" in x for x in log)
+
+
+def test_t1_kind_counts_as_hard_adjacency():
+    """T1 属于强度课：轻松日改成 T1 后与邻日强度课冲突 → 相邻规则拦截。"""
+    items, log = _run([{"date": "2026-09-10", "planned_workout_id": 4,
+                        "action": "modify",
+                        "changes": {"kind": "T1", "pace_zone": "T1",
+                                    "duration_min": 55.0, "distance_km": 9.0}}])
+    assert items == []
+    assert any("相邻" in x for x in log)
+
+
 # ---- 规则 3：相邻强度日 ----
 
 def test_modify_creating_adjacent_hard_dropped():
@@ -189,6 +207,83 @@ def test_decrease_never_blocked_by_week_rule():
     items, log = _run([{"date": "2026-09-13", "planned_workout_id": 7, "action": "rest"}])
     assert len(items) == 1
     assert not any("周量" in x for x in log)
+
+
+# ---- 大范围调整（训练者要求改远期课：GuardContext.plan_end 放宽日期窗口） ----
+# 课表多拉两行第 2 自然周（09-14 周一起）的课：E8 / T12 / LR18 → 基准 38km
+FAR_WORKOUTS = WORKOUTS + [
+    {"id": 8, "date": "2026-09-15", "kind": "E", "pace_zone": "E",
+     "distance_km": 8.0, "duration_min": 50.0, "status": "planned"},
+    {"id": 9, "date": "2026-09-16", "kind": "T", "pace_zone": "T",
+     "distance_km": 12.0, "duration_min": 55.0, "status": "planned"},
+    {"id": 10, "date": "2026-09-19", "kind": "LR", "pace_zone": "E",
+     "distance_km": 18.0, "duration_min": 105.0, "status": "planned"},
+]
+
+
+def test_future_week_edit_needs_plan_end():
+    """默认窗口 [今天, +6]：远期课一律拒绝；plan_end 放宽后同一条调整通过。"""
+    items, log = _run([{"date": "2026-09-16", "planned_workout_id": 9,
+                        "action": "modify", "changes": {"kind": "E"}}],
+                      ctx=_ctx(workouts=FAR_WORKOUTS))
+    assert items == []
+    assert any("超出可调整范围" in x for x in log)
+    ctx = _ctx(workouts=FAR_WORKOUTS, plan_end=date(2026, 9, 20))
+    items2, _ = _run([{"date": "2026-09-16", "planned_workout_id": 9,
+                       "action": "modify", "changes": {"kind": "E"}}], ctx=ctx)
+    assert len(items2) == 1
+    assert items2[0]["changes"]["kind"] == "E"
+
+
+def test_future_week_weekly_cap_uses_own_week():
+    """远周扩容按目标课所在周的基准跑量独立限 ±10%（本周基准不掺和）：
+    第 2 周基准 38km → +3.8 上限；累计 +1.2/+1.2 通过，再 +1.6 超限被丢。"""
+    ctx = _ctx(workouts=FAR_WORKOUTS, plan_end=date(2026, 9, 30))
+    items, log = _run([
+        {"date": "2026-09-15", "planned_workout_id": 8, "action": "modify",
+         "changes": {"distance_km": 9.2}},   # E8→9.2 (+1.2)
+        {"date": "2026-09-19", "planned_workout_id": 10, "action": "modify",
+         "changes": {"distance_km": 19.2}},  # LR18→19.2 (+1.2)
+        {"date": "2026-09-16", "planned_workout_id": 9, "action": "modify",
+         "changes": {"distance_km": 13.6}},  # T12→13.6 (+1.6)，累计 +4.0 > +3.8
+    ], ctx=ctx)
+    assert len(items) == 2
+    assert any("周量变化超" in x for x in log)
+
+
+def test_future_week_weekly_cap_force_exempt():
+    """强制模式豁免也按远周各自基准生效：+2.4/+3.6 累计超 +10%（>+3.8）→ 放行并记豁免。"""
+    ctx = _ctx(workouts=FAR_WORKOUTS, plan_end=date(2026, 9, 30), force=True)
+    items, log = _run([
+        {"date": "2026-09-15", "planned_workout_id": 8, "action": "modify",
+         "changes": {"distance_km": 10.4}},  # E8→10.4 (+2.4，±30% 上限内)
+        {"date": "2026-09-16", "planned_workout_id": 9, "action": "modify",
+         "changes": {"distance_km": 15.6}},  # T12→15.6 (+3.6)，累计 +6.0 > +3.8
+    ], ctx=ctx)
+    assert len(items) == 2
+    assert any("豁免" in x for x in log)
+
+
+def test_add_easy_counted_per_natural_week():
+    """加练每周 ≤2 次按自然周独立计数：第 2 周两次通过、第三次被丢，
+    第 3 周另计不受影响（互不挤占）。"""
+    ctx = _ctx(workouts=FAR_WORKOUTS, plan_end=date(2026, 9, 30))
+    items, log = _run([
+        {"date": "2026-09-14", "planned_workout_id": None, "action": "add_easy"},
+        {"date": "2026-09-17", "planned_workout_id": None, "action": "add_easy"},
+        {"date": "2026-09-18", "planned_workout_id": None, "action": "add_easy"},  # 第 3 次同周 → 上限
+        {"date": "2026-09-22", "planned_workout_id": None, "action": "add_easy"},  # 第 3 周 → 允许
+    ], ctx=ctx)
+    assert len(items) == 3
+    assert any("上限" in x for x in log)
+
+
+def test_shift_future_week_under_plan_end():
+    """挪课目标日期也可放宽到 plan_end（远期空档日）。"""
+    ctx = _ctx(workouts=FAR_WORKOUTS, plan_end=date(2026, 9, 30))
+    items, _ = _run([{"date": "2026-09-15", "planned_workout_id": 8,
+                      "action": "shift", "changes": {"date": "2026-09-18"}}], ctx=ctx)
+    assert len(items) == 1 and items[0]["action"] == "shift"
 
 
 # ---- 规则 7：赛前 14 天 ----

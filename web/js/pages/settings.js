@@ -53,7 +53,7 @@ const HTML = `
             <label>服务商</label>
             <select x-model="aiProvider">
               <template x-for="p in aiProviders" :key="p.key">
-                <option :value="p.key" x-text="p.label"></option>
+                <option :value="p.key" :selected="p.key === aiProvider" x-text="p.label"></option>
               </template>
             </select>
           </div>
@@ -72,7 +72,9 @@ const HTML = `
               <label>模型</label>
               <select x-model="aiModel">
                 <template x-for="m in modelOptions()" :key="m">
-                  <option :value="m" x-text="modelLabel(m)"></option>
+                  <!-- :selected 显式跟随状态：x-model 初始化先于 x-for 渲染 option，
+                       不加会出现「显示第一项(4.7)、状态仍是旧值(5.3)」→ 确定把旧值写回 -->
+                  <option :value="m" :selected="m === aiModel" x-text="modelLabel(m)"></option>
                 </template>
               </select>
             </div>
@@ -226,8 +228,10 @@ export function initSettings() {
       this.syncStates = data.sync_states || [];
       this.aiLocked = true;
     },
-    // 切到设置页时刷新（同步状态/档案可能已变化；也兜底启动时 init 未跑成的情况）
-    async shown() { await this.init(); },
+    // 切到设置页时刷新（同步状态/档案可能已变化；也兜底启动时 init 未跑成的情况）。
+    // 编辑中（已解锁）不重跑 init：sync-done 会刷新所有页，重跑会把草稿静默
+    // 重置回库里的旧模型并重新上锁 → 用户随后点确定的又是旧值
+    async shown() { if (this.aiLocked) await this.init(); },
 
     async pasteInto(field) {
       const { ok, data, error } = await tryCall('read_clipboard');
@@ -344,6 +348,11 @@ export function initSettings() {
     },
     async confirmAi() {
       const info = this.provInfo();
+      // 需要 Key 且本地没有 → 先要求粘贴，避免 provider/model 先落库却没锁定的半提交
+      if (info && info.needs_key && !this.hasAiKey() && !this.aiKey) {
+        this.$dispatch('toast', { text: `「${info.label}」需要 API Key：粘贴后再次确定，或换免费/本地方案` });
+        return;
+      }
       const r = await tryCall('set_setting', 'ai_provider', this.aiProvider);
       if (!r.ok) { this.$dispatch('toast', { text: '切换失败: ' + r.error }); return; }
       // 模型名不在新服务商候选列表时，落到其默认模型并保存（与后端回落逻辑一致）
@@ -352,16 +361,20 @@ export function initSettings() {
       }
       const m = await tryCall('set_setting', 'ai_model', this.aiModel);
       if (!m.ok) { this.$dispatch('toast', { text: '模型保存失败: ' + m.error }); return; }
-      // 需要 Key 且本地没有 → 要求粘贴；已有 → 无需二次输入
       if (info && info.needs_key && !this.hasAiKey()) {
-        if (!this.aiKey) {
-          this.$dispatch('toast', { text: `「${info.label}」需要 API Key：粘贴后再次确定，或换免费/本地方案` });
-          return;
-        }
         const k = await tryCall('save_ai_key', this.aiProvider, this.aiKey);
         if (!k.ok) { this.$dispatch('toast', { text: 'Key 保存失败: ' + k.error }); return; }
         this.aiKeys = { ...this.aiKeys, [this.aiProvider]: true };
         this.aiKey = '';
+      }
+      // 读回后端实值再展示/锁定（曾有下拉显示 4.7、库里实际存 5.3 的分裂：
+      // 锁定条若回显前端内存值会把「以为保存了 4.7」当成功）
+      const s = await tryCall('get_settings');
+      if (s.ok && s.data) {
+        this.aiProvider = s.data.ai_provider || this.aiProvider;
+        if (s.data.ai_model) this.aiModel = s.data.ai_model;
+        this.aiKeys = s.data.ai_keys || this.aiKeys;
+        this.mockMode = s.data.mock_mode;
       }
       this.aiLocked = true;
       this.$dispatch('ai-config-changed');

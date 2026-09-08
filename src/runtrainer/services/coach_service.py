@@ -72,10 +72,15 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
     ws_start = today - timedelta(days=today.weekday())
     ws_end = ws_start + timedelta(days=6)
     horizon = today + timedelta(days=6)
-    workouts = plan_repo.get_workouts(
-        plan["id"], ws_start.isoformat(), max(ws_end, horizon).isoformat())
-    for w in workouts:
+    race_date = date.fromisoformat(plan["race_date"])
+    # 一次拉齐 本周初 → 比赛日 的整张课表：护栏校验（目标课存在/占档/邻日/逐周
+    # 跑量）需要看全，聊天里训练者要求大范围/远期改课时才有据可依
+    plan_workouts = plan_repo.get_workouts(
+        plan["id"], ws_start.isoformat(), race_date.isoformat())
+    for w in plan_workouts:
         w["is_quality"] = guardrails.is_hard(w["kind"], w.get("pace_zone"))
+    workouts = [w for w in plan_workouts if w["date"] <= horizon.isoformat()]
+    future_workouts = [w for w in plan_workouts if w["date"] > horizon.isoformat()]
 
     week_km = sum(float(w.get("distance_km") or 0) for w in workouts
                   if ws_start <= date.fromisoformat(w["date"]) <= ws_end)
@@ -213,7 +218,6 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         1 for a in applied if a.get("action") == "add_easy" and a.get("applies_date")
         and ws_start <= date.fromisoformat(a["applies_date"]) <= ws_end)
 
-    race_date = date.fromisoformat(plan["race_date"])
     return {
         "today": today.isoformat(),
         "athlete": profile,
@@ -229,6 +233,8 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "today_workout": today_workout,
         "today_workouts": today_workouts,
         "week_workouts": workouts,
+        # 超过 [今天, +6] 的远期课（提示词在训练者要求大范围改课时追加展示）
+        "future_workouts": future_workouts,
         "recent": recent,
         "recent_acts": recent_acts,
         "plan_actual": plan_actual,
@@ -242,9 +248,11 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "guard": {
             "today": today, "race_date": race_date,
             "week_start": ws_start, "week_end": ws_end, "week_km": week_km,
-            "workouts": workouts, "paces": paces,
+            "workouts": plan_workouts, "paces": paces,
             "add_extra_count_this_week": add_count,
             "extra_requested": extra_requested,
+            # plan_end 不在此设：日常建议/自动分析保持 [今天, +6] 窄窗；
+            # 只有聊天改课请求显式放宽（见 chat()）
         },
     }
 
@@ -566,18 +574,16 @@ def _apply_row(plan: dict, r: dict) -> None:
 # ---------------- 教练聊天 ----------------
 
 def _persist_chat_items(ctx: dict, items: list[dict], guard_log: list[str],
-                        model: str, prompt: dict, output: ChatOutput,
-                        auto_apply: bool = False) -> tuple[list[int], int]:
+                        model: str, prompt: dict, output: ChatOutput) -> list[int]:
     """聊天提出的调整逐条落库（pending，不写今日缓存）。
 
-    auto_apply=True（用户强制要求改课）时逐条直接应用到课表并置 applied——
-    失败的行保持 pending（可在聊天里再批准）。返回 (ids, 自动应用失败条数)。
+    无论训练者语气多坚决（user_requested），改课一律先征求同意：
+    落库后等训练者在聊天里点「批准」才应用到课表（见 decide_chat_adjustments）。
     """
     plan = plan_repo.get_active_plan()
     input_json = {"system": prompt["system"], "user": prompt["user"]}
     output_json = output.model_dump(mode="json")
     ids = []
-    failed = 0
     for it in items:
         r = adjustment_repo.create_adjustment({
             "plan_id": plan["id"], "workout_id": it.get("planned_workout_id"),
@@ -588,14 +594,7 @@ def _persist_chat_items(ctx: dict, items: list[dict], guard_log: list[str],
             "status": "pending",
         })
         ids.append(r["id"])
-        if auto_apply:
-            try:
-                _apply_row(plan, r)
-                adjustment_repo.set_applied(r["id"])
-            except Exception as e:
-                failed += 1
-                log.warning("强制调整 #%s 自动应用失败，保留待批准: %s", r["id"], e)
-    return ids, failed
+    return ids
 
 
 def _apply_profile_updates(updates: dict) -> dict:
@@ -753,6 +752,9 @@ def chat(message: str) -> dict:
     if ctx is None:
         raise RuntimeError("尚未创建训练计划，请先到“训练目标”页生成课表")
     ctx["ability"] = (plan_service.wizard_context() or {}).get("ability") or {}
+    # 训练者这条消息像改课请求 → 提示词附上远期课表（+7 天至比赛），
+    # AI 才能针对未来任意周给出带正确 id/日期的调整建议
+    ctx["show_full_plan"] = "plan" in _chat_intent(message)
 
     web = _maybe_web_search(message)
     prompt = prompt_builder.build_chat(ctx, chat_repo.list_messages(limit=50), web=web)
@@ -776,16 +778,17 @@ def chat(message: str) -> dict:
             client, {**prompt, "user": prompt["user"] + nudge}, ChatOutput)
     log.info("教练聊天调用返回，耗时 %.1fs", time.monotonic() - t0)
 
-    # 调整建议走与日常建议相同的护栏；用户明确要求改课（user_requested）时
-    # 进入强制模式：不丢弃，降强度/调课表落地（见 guardrails.force）
+    # 调整建议走与日常建议相同的护栏。聊天放宽了可调整的日期范围（plan_end=
+    # 比赛日 → AI 可定点/大范围改到整张未来课表）；用户明确要求改课
+    # （user_requested）时进入强制模式：护栏不丢弃，降强度/调课表落地
+    # （见 guardrails.force）——但只是“建议更慷慨”，绝不自动改课表
     fake = CoachOutput(summary="chat", readiness="ok", key_signals=[],
                        adjustments=output.adjustments, add_extra_advice=None, weekly_notes="")
     items, guard_log = guardrails.validate(
-        fake, guardrails.GuardContext(**ctx["guard"], force=bool(output.user_requested)))
+        fake, guardrails.GuardContext(**ctx["guard"], force=bool(output.user_requested),
+                                      plan_end=ctx["guard"]["race_date"]))
     model = getattr(client, "model", "mock")
-    forced = bool(output.user_requested)
-    ids, auto_failed = _persist_chat_items(
-        ctx, items, guard_log, model, prompt, output, auto_apply=forced)
+    ids = _persist_chat_items(ctx, items, guard_log, model, prompt, output)
 
     profile_applied = _apply_profile_updates(output.profile_updates or {})
     rebuild_info = None
@@ -803,13 +806,9 @@ def chat(message: str) -> dict:
     dropped = len(output.adjustments) - len(items)
     if dropped:
         reply += f"\n\n⚠️ 其中 {dropped} 条调整未通过安全护栏被忽略。"
-    if forced:
-        applied_n = len(items) - auto_failed
-        if applied_n > 0:
-            reply += (f"\n\n✅ 已按你的要求直接改到课表（{applied_n} 项），去日历即可看到变化。"
-                      + ("其余调整未执行成功，可点下方「批准」重试。" if auto_failed else ""))
-        elif auto_failed:
-            reply += "\n\n⚠️ 本次调整未能自动执行，请点下方「批准」手动应用到课表。"
+    if ids:
+        reply += ("\n\n✍️ 调整方案已列在上方（每条都写了理由）。在你点「✓ 批准」之前，"
+                  "课表不会变动；确认后我才逐项应用到日历，点「✖ 拒绝」则维持原计划。")
     user_row = chat_repo.create_message("user", message)
     coach_row = chat_repo.create_message(
         "coach", reply, adjustment_ids=ids, profile_updates=profile_applied, model=model)
@@ -818,14 +817,21 @@ def chat(message: str) -> dict:
             "rebuild": rebuild_info}
 
 
-def auto_analyze_new_activities(new_acts: list[tuple[str, int]],
+ANALYSIS_LOOKBACK_DAYS = 14  # 兜底分析只看游标之后近这些天内的活动
+
+
+def auto_analyze_new_activities(new_acts: list[tuple[str, int]] | None = None,
                                 client=None) -> dict | None:
     """同步后有新训练数据 → 自动生成分析总结 + 未来几天建议（教练消息）。
 
-    new_acts: [(external_id, start_ts)]（sync_service 本轮 upsert 的新活动）。
-    去重游标 last_analysis_act_ts 存 sync_state meta：已分析过的活动不再重复分析
-    （同步多次不重复计费）。mock 模式不触发。返回 None 表示无需分析；
-    AI 失败抛异常，由调用方降级（同步本身不受影响）。
+    new_acts=None 时自行兜底：从库里找 start_ts > 游标 且落在近
+    ANALYSIS_LOOKBACK_DAYS 天内的 garmin 活动——上一轮同步导入了活动但分析
+    失败/被跳过（当时无计划、AI 出错、进程中断）的，本轮同步自然补上，
+    不再依赖 new_acts 恰好同轮传入。带 new_acts（旧调用）时语义不变。
+    去重游标 last_analysis_act_ts 存 sync_state meta：已分析过的不重复分析
+    （同步多次不重复计费）；游标只在分析成功后才推进，失败下轮重试。
+    mock 模式不触发。返回 None 表示无需分析；AI 失败抛异常由调用方降级
+    （同步本身不受影响）。
     """
     from ..db.repos import sync_repo
     from . import settings_service
@@ -834,10 +840,16 @@ def auto_analyze_new_activities(new_acts: list[tuple[str, int]],
     state = sync_repo.get_sync_state("garmin")
     meta = jsonutil.loads(state["meta_json"]) if state["meta_json"] else {}
     last_ts = int(meta.get("last_analysis_act_ts") or 0)
-    fresh = [(eid, ts) for eid, ts in new_acts if int(ts) > last_ts]
+    today = dates.today()
+    if new_acts is None:
+        lookback = today - timedelta(days=ANALYSIS_LOOKBACK_DAYS)
+        fresh = [(a["external_id"], a["start_ts"]) for a in
+                 activity_repo.list_activities(lookback.isoformat(), limit=800)
+                 if a.get("source") == "garmin" and int(a["start_ts"]) > last_ts]
+    else:
+        fresh = [(eid, ts) for eid, ts in new_acts if int(ts) > last_ts]
     if not fresh:
         return None
-    today = dates.today()
     ctx = _gather(today, False, "")
     if ctx is None:
         return None
@@ -862,8 +874,7 @@ def auto_analyze_new_activities(new_acts: list[tuple[str, int]],
     items, guard_log = guardrails.validate(
         fake, guardrails.GuardContext(**ctx["guard"], force=False))
     model = getattr(client, "model", "mock")
-    ids, _ = _persist_chat_items(ctx, items, guard_log, model, prompt, output,
-                                 auto_apply=False)
+    ids = _persist_chat_items(ctx, items, guard_log, model, prompt, output)
     coach_row = chat_repo.create_message(
         "coach", output.reply, adjustment_ids=ids, model=model, kind="sync_analysis")
     meta["last_analysis_act_ts"] = max(int(ts) for _, ts in fresh)
@@ -884,6 +895,7 @@ def decide_chat_adjustments(message_id: int, approve: bool) -> dict:
         raise RuntimeError("没有活动计划")
     ids = jsonutil.loads(m.get("adjustment_ids_json")) or []
     applied = 0
+    rejected = 0
     errors: list[str] = []
     for i in ids:
         r = adjustment_repo.get_adjustment(i)
@@ -899,5 +911,5 @@ def decide_chat_adjustments(message_id: int, approve: bool) -> dict:
                 errors.append(f"#{i} {r['action']}: {e}")
         else:
             adjustment_repo.decide_adjustment(i, "rejected")
-    return {"applied": applied, "rejected": 0 if approve else len(ids),
-            "errors": errors}
+            rejected += 1
+    return {"applied": applied, "rejected": rejected, "errors": errors}

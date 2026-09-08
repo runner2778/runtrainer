@@ -188,13 +188,13 @@ def test_coach_advice_from_today_cache(monkeypatch):
 
 
 def test_ability_30d_from_profile_vo2max(monkeypatch):
-    """档案有手表 VO2max + max_hr 但近 30 天无跑步 → 手表读数为唯一依据。"""
+    """档案有手表 VO2max + max_hr 但近期无跑步 → 手表读数为唯一依据。"""
     _patch_today(monkeypatch, REAL_TODAY + timedelta(days=1))
     from runtrainer.db.repos import profile_repo
     profile_repo.upsert_profile({"vo2max": 50.0, "max_hr": 185})
     d = dashboard_service.get_dashboard()
     ab = d["ability_30d"]
-    assert ab["window_days"] == 30
+    assert ab["window_days"] == 180          # 与目标向导/AI 教练同源同口径
     assert ab["plan_vdot"] is None          # 无计划
     assert ab["vdot"] == 50.0
     assert ab["as_of"] == (REAL_TODAY + timedelta(days=1)).isoformat()

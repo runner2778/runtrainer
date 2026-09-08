@@ -75,7 +75,7 @@ class PlannedWorkout:
 
     @property
     def is_hard(self) -> bool:
-        return self.kind in ("T", "I", "R", "M")
+        return self.kind in ("T", "T1", "I", "R", "M")
 
 
 @dataclass

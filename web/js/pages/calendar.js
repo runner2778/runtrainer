@@ -1,14 +1,15 @@
 import { tryCall } from '../api.js';
 
-const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
+const KIND_LABELS = { E: '轻松跑', M: '马拉松配速', T1: '有氧阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑', LR: '长距离', RECOVERY: '恢复', TUNEUP: '测试赛', RACE: '比赛', STRENGTH: '力量训练' };
 const PHASE_LABELS = { base: '基础期', early: '早期强度', transition: '过渡期', final: '最终强度', taper: '减量期' };
-const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速', strength: '力量训练' };
+const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T1: 'LT1 有氧阈配速', T: '阈值配速', I: '间歇配速', R: '重复配速', race: '比赛配速', strength: '力量训练' };
 // 课型 → 强度区间（与水平预估六区配速表同源：vdot.PACE_ZONES 的区间与 % 带）。
 // 计划/日历里每种课对应哪一档、对应什么配速带，都由这张表标注。
 const KIND_ZONES = {
   E: { label: '轻松区', band: '59–74%' },
   M: { label: '有氧/马配区', band: '74–82%' },
-  T: { label: '乳酸阈值区', band: '82–92%' },
+  T1: { label: 'LT1 有氧阈区', band: '≈84%' },
+  T: { label: '乳酸阈 LT2 区', band: '≈88%' },
   I: { label: '最大摄氧量区', band: '92–100%' },
   R: { label: '无氧冲刺区', band: '100–105%' },
   LR: { label: '有氧区（长距离）', band: '59–82%' },
@@ -26,7 +27,7 @@ const ACT_ZN = {
   tempo: '阈值', anaerobic: '无氧', interval: '间歇', repeats: '重复', unknown: '匀速',
 };
 // 计划课型 → 单元格字母芯片（与课型色一体：E/M/T/I/R + 长距离 L，其余无）
-const WK_MARK = { E: 'E', M: 'M', T: 'T', I: 'I', R: 'R', LR: 'L' };
+const WK_MARK = { E: 'E', M: 'M', T1: 'T1', T: 'T', I: 'I', R: 'R', LR: 'L' };
 const DOW = ['一', '二', '三', '四', '五', '六', '日'];
 
 function fmtPace(s) {
@@ -437,7 +438,7 @@ export function initCalendar() {
     },
     // 课型 → 配速表区间键（旧行缺落库配速时回退到课表 VDOT 区间）
     kindZone(kind) {
-      return { E: 'E', M: 'M', T: 'T', I: 'I', R: 'R', LR: 'E',
+      return { E: 'E', M: 'M', T1: 'T1', T: 'T', I: 'I', R: 'R', LR: 'E',
                RECOVERY: 'RECOVERY', TUNEUP: 'T', RACE: 'race' }[kind];
     },
     // 弹窗「目标配速」：落库配速带优先；NULL（旧行/未知）→ 课表 VDOT 对应区间
@@ -519,7 +520,7 @@ export function initCalendar() {
         case 'warmup': return `🏃 热身 · ${zone}${pz} · ${s.duration_min} 分钟`;
         case 'cooldown': return `🧊 冷身 · ${zone}${pz} · ${s.duration_min} 分钟`;
         case 'continuous': return `🏃 ${zone}${pz}` + (s.distance_km ? ` · ${s.distance_km} km` : ` · ${s.duration_min} 分钟`);
-        case 'tempo': return `⚡ 阈值跑 ${s.reps}×${s.duration_min} 分钟${pz}` + (s.rest_min ? `（组间 ${s.rest_min} 分钟${rm || '慢跑'}）` : '');
+        case 'tempo': return `⚡ ${s.zone === 'T1' ? 'LT1 有氧阈跑' : 'LT2 阈值跑'} ${s.reps}×${s.duration_min} 分钟${pz}` + (s.rest_min ? `（组间 ${s.rest_min} 分钟${rm || '慢跑'}）` : '');
         case 'reps': return `⚡ ${s.zone === 'I' ? '间歇' : '重复跑'} ${s.reps}×${s.rep_m}m${pz}（组间 ${s.rest_m}m ${rm || '慢跑恢复'}）`;
         case 'strides': return `⚡ 跨步跑 ${s.reps}×${s.rep_m}m${pz}（约 85% 最快速度）`;
         default: return '';

@@ -193,13 +193,15 @@ def sync_all() -> dict:
             except Exception as e:
                 log.warning("课表重建失败（非致命）: %s", e)
 
-        # 4.5) 同步后有新训练数据 → AI 教练自动读取精确数据生成分析总结 +
-        #      未来几天建议（教练消息 kind=sync_analysis，AI 教练页可见）。
-        #      失败不阻断同步；去重游标在 coach_service 内，重复同步不重复计费。
-        if not settings_service.is_mock_mode() and new_acts:
+        # 4.5) 同步后 → AI 教练自动读取「游标之后、近 14 天内」的新训练数据
+        #      生成分析总结 + 未来几天建议（消息 kind=sync_analysis，AI 教练页
+        #      可见）。coach_service 按 last_analysis_act_ts 兜底去重：上轮导入
+        #      成功但分析失败/跳过的活动本轮自动补上，不依赖 new_acts 恰好同轮；
+        #      失败不阻断同步；重复同步不重复计费（游标成功才推进）。
+        if not settings_service.is_mock_mode():
             try:
                 from ..services import coach_service
-                res = coach_service.auto_analyze_new_activities(new_acts)
+                res = coach_service.auto_analyze_new_activities()
                 if res:
                     stats["auto_analysis"] = \
                         f"已自动分析 {res['activities_analyzed']} 条新训练"

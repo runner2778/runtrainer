@@ -5,10 +5,10 @@ const ACTION_LABELS = {
   skip: '跳过', add_easy: '加练', shift: '挪课',
 };
 const KIND_LABELS = {
-  E: '轻松跑', M: '马拉松配速', T: '阈值跑', I: '间歇跑', R: '重复跑',
+  E: '轻松跑', M: '马拉松配速', T1: '有氧阈·LT1', T: '阈值跑', I: '间歇跑', R: '重复跑',
   LR: '长距离', RECOVERY: '恢复跑', TUNEUP: '测试赛', RACE: '比赛', CROSS: '交叉训练',
 };
-const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T: '阈值配速', I: '间歇配速', R: '重复配速' };
+const ZONE_LABELS = { E: '轻松配速', RECOVERY: '恢复配速', M: '马拉松配速', T1: 'LT1 有氧阈配速', T: '阈值配速', I: '间歇配速', R: '重复配速' };
 const STATUS_LABELS = { pending: '待处理', approved: '已批准', rejected: '已拒绝', applied: '已生效' };
 const READINESS = {
   good: { label: '状态良好', cls: 'ok' },
@@ -158,8 +158,8 @@ const HTML = `
               <p class="chat-text" x-text="m.content"></p>
               <div class="mt8" x-show="m.adjustments && m.adjustments.length">
                 <p class="muted" x-text="m.auto_applied
-                  ? '✅ 已按你的要求直接改到课表（日历已更新）：'
-                  : '调整建议（批准后应用到课表）：'"></p>
+                  ? '✅ 已按你的要求改到课表（日历已更新）：'
+                  : '✍️ 调整建议：每条已过安全护栏；点下方「全部批准」才改到课表，批准前课表不变：'"></p>
                 <template x-for="a in m.adjustments" :key="a.id">
                   <div class="diff-row">
                     <div class="flex between">
@@ -169,16 +169,8 @@ const HTML = `
                         <b x-text="fmtDate(a.applies_date)"></b>
                         <span class="muted" x-text="ACTION_LABELS[a.action] || a.action"></span>
                       </div>
-                      <div>
-                        <template x-if="a.status === 'pending'">
-                          <span class="flex">
-                            <button class="btn small primary" :data-cmd="'chat-approve'" :data-mid="m.id">✓ 批准</button>
-                            <button class="btn small" :data-cmd="'chat-reject'" :data-mid="m.id">✖ 拒绝</button>
-                          </span>
-                        </template>
-                        <span class="badge" :class="'st-' + a.status" x-show="a.status !== 'pending'"
-                              x-text="STATUS_LABELS[a.status] || a.status"></span>
-                      </div>
+                      <span class="badge" :class="'st-' + a.status"
+                            x-text="STATUS_LABELS[a.status] || a.status"></span>
                     </div>
                     <div class="diff-body mt8">
                       <div class="diff-col" x-show="a.workout">
@@ -203,6 +195,14 @@ const HTML = `
                     <p class="reason">💬 <span x-text="a.reason"></span></p>
                   </div>
                 </template>
+                <div class="flex mt8" x-show="hasPending(m)">
+                  <button class="btn small primary" :data-cmd="'chat-approve'" :data-mid="m.id"
+                          title="把本条消息的全部 N 项调整应用到课表">
+                    ✅ 全部批准（<span x-text="pendingCount(m)"></span> 项）
+                  </button>
+                  <button class="btn small" :data-cmd="'chat-reject'" :data-mid="m.id"
+                          title="拒绝本条消息的全部调整，维持原课表">✖ 全部拒绝</button>
+                </div>
               </div>
               <p class="muted mt4" x-show="m.profile_updates && Object.keys(m.profile_updates).length">
                 📝 已更新档案：<span x-text="profileUpdatesText(m.profile_updates)"></span>
@@ -213,7 +213,7 @@ const HTML = `
       </div>
       <div class="flex mt8">
         <textarea class="chat-input" x-model="chatInput" rows="2" :disabled="chatWorking"
-          placeholder="例：这周末出差，把周日长距离换到周六（改课请求会直接改到课表）；或：我最大心率其实是 195"
+          placeholder="例：这周末出差，把周日长距离换到周六（也可指定后面几周的课——教练会列出调整，你批准后才改到课表）；或：我最大心率其实是 195"
           @keydown.enter.prevent.exact="send()"></textarea>
         <button class="btn primary" @click="send()" :disabled="chatWorking || !chatInput.trim()">
           <span x-text="chatWorking ? '思考中…' : '发送'"></span>
@@ -283,6 +283,12 @@ export function initCoach() {
 
     get allPending() {
       return this.advice && this.advice.adjustments.some(a => a.status === 'pending');
+    },
+    hasPending(m) {
+      return (m.adjustments || []).some(a => a.status === 'pending');
+    },
+    pendingCount(m) {
+      return (m.adjustments || []).filter(a => a.status === 'pending').length;
     },
 
     async init() {
@@ -421,6 +427,8 @@ export function initCoach() {
       }
       await this.refresh();
       this.$dispatch('toast', { text: '今日建议已生成' });
+      // 新建议可能引用最新水平预估/计划 → 仪表盘等其它页立即按新数据重算
+      window.dispatchEvent(new Event('data-changed'));
     },
     askExtra() {
       this.note = window.prompt('今天想加练？可以写一句原因（如：周末想多跑点）：', '');

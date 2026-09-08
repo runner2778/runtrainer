@@ -5,6 +5,7 @@
   /* 训练类型固定色（勿随筛选重排） */
   --kind-e: #2a78d6;
   --kind-m: #1baf7a;
+  --kind-t1: #9acd32;   /* LT1 有氧阈（T1，双阈值日上午段）：介于 M 绿与 T 黄之间的黄绿 */
   --kind-t: #eda100;
   --kind-i: #e34948;
   --kind-r: #e87ba4;
@@ -347,6 +348,7 @@ tbody tr:hover { background: var(--bg-hover); }
 /* 训练类型色块（与 domain/models.py KIND_COLORS 保持一致） */
 .kind-E, .kind-LR { background: var(--kind-e); }
 .kind-M { background: var(--kind-m); }
+.kind-T1 { background: var(--kind-t1); }
 .kind-T { background: var(--kind-t); }
 .kind-I { background: var(--kind-i); }
 .kind-R { background: var(--kind-r); }
@@ -597,6 +599,7 @@ table th { border-bottom: 1.5px solid var(--border-strong); }
 .zn-chip { border: 1px solid; font-weight: 600; }
 .znk-E, .znk-LR { color: var(--kind-e); border-color: color-mix(in srgb, var(--kind-e) 60%, var(--border)); background: color-mix(in srgb, var(--kind-e) 10%, transparent); }
 .znk-M { color: var(--kind-m); border-color: color-mix(in srgb, var(--kind-m) 60%, var(--border)); background: color-mix(in srgb, var(--kind-m) 10%, transparent); }
+.znk-T1 { color: var(--kind-t1); border-color: color-mix(in srgb, var(--kind-t1) 60%, var(--border)); background: color-mix(in srgb, var(--kind-t1) 10%, transparent); }
 .znk-T { color: var(--kind-t); border-color: color-mix(in srgb, var(--kind-t) 60%, var(--border)); background: color-mix(in srgb, var(--kind-t) 12%, transparent); }
 .znk-I { color: var(--kind-i); border-color: color-mix(in srgb, var(--kind-i) 60%, var(--border)); background: color-mix(in srgb, var(--kind-i) 10%, transparent); }
 .znk-R { color: var(--kind-r); border-color: color-mix(in srgb, var(--kind-r) 60%, var(--border)); background: color-mix(in srgb, var(--kind-r) 10%, transparent); }

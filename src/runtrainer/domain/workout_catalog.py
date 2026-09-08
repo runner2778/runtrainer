@@ -22,6 +22,7 @@ class Template:
     reps: tuple[tuple[int, int], ...] = ()   # ((组数, 距离m), ...)，可多组不同距离
     rest_m: int = 400               # 组间慢跑恢复距离
     tempo_sets: tuple[tuple[int, int], ...] = ()  # ((组数, 分钟), ...)
+    tempo_zone: str = "T"          # 主体段目标带：普通阈值 T（LT2）；双阈值上午段 T1（LT1 有氧阈）
     tempo_rest_min: int = 2
     wu_min: int = 15
     cd_min: int = 10
@@ -93,14 +94,24 @@ TUNEUP = _t("tuneup", "TUNEUP", "测试跑", "热身 15 分钟轻松跑 + 测试
             "赛前 2–3 周的短测试，检验状态并熟悉配速，不全力。", None, tuneup=True)
 
 # ---------- 一天两练（挪威双阈值法）----------
-SUBT_AM = _t("subt_am", "T", "双阈值·上（3×8' 亚阈）",
-             "挪威双阈值法上午段：热身 15 分钟轻松跑 + 3×8 分钟亚阈跑（T 配速下缘，比 T 慢 3–5 秒，"
-             "组间慢跑 1 分钟）+ 冷身 10 分钟。与下午段间隔 ≥5 小时，两段间注意补水补碳水。",
-             "T", tempo_sets=((3, 8),), tempo_rest_min=1, wu_min=15, cd_min=10)
-SUBT_PM = _t("subt_pm", "T", "双阈值·下（5×5' 亚阈）",
-             "挪威双阈值法下午段：热身 10 分钟轻松跑 + 5×5 分钟亚阈跑（T 配速下缘，组间慢跑 1 分钟）"
-             "+ 冷身 10 分钟。全天阈值总量约 49 分钟，两段都不要上到力竭。",
-             "T", tempo_sets=((5, 5),), tempo_rest_min=1, wu_min=10, cd_min=10)
+# 科学依据（双乳酸阈值训练法，Seiler/挪威模式）：双阈值日一天两练——
+# 上午 LT1 有氧阈（≈2 mmol 血乳酸、75–80% HRmax、约 84% VDOT、比 T 慢 5–10
+# 秒/公里）：分段多、单段长，建立有氧阈的“量”；下午 LT2 乳酸阈（≈4 mmol，
+# T 配速“舒适地费力”）：单段短、重复多，打磨乳酸阈的“强度”。两练间隔 ≥5
+# 小时。跑力相当的典型模板：上午 3–5×6–10′ LT1（本文 4×8′），下午 8–12×
+# 2–5′ 或 5×5′ LT2（来源：Marathon Handbook《挪威双阈值训练》、Noble Pro、
+# 跑班计划实例）。精英每周 ≤2 天、业余 ≤1 天，且须已有较高周跑量基础。
+SUBT_AM = _t("subt_am", "T1", "双阈值·上（LT1 有氧阈 4×8′）",
+             "挪威双阈值法上午段：LT1 有氧阈（≈2 mmol，约 84% VDOT 配速，比 T 慢 5–10 秒/公里，"
+             "心率 75–80% HRmax，体感“稳定而克制”、可断句说话）。热身 12 分钟轻松跑 + "
+             "4×8 分钟 LT1（组间慢跑 1 分钟）+ 冷身 8 分钟。与下午 LT2 段间隔 ≥5 小时，"
+             "两段间注意补水补碳水。",
+             "T1", tempo_sets=((4, 8),), tempo_zone="T1", tempo_rest_min=1, wu_min=12, cd_min=8)
+SUBT_PM = _t("subt_pm", "T", "双阈值·下（LT2 乳酸阈 5×5′）",
+             "挪威双阈值法下午段：LT2 乳酸阈（≈4 mmol = T 配速，心率 85–90% HRmax，体感“舒适地"
+             "费力”）。傍晚段以轻热身为宜：热身 8 分钟轻松跑 + 5×5 分钟 T（组间慢跑 1 分钟）+ "
+             "冷身 8 分钟。全天阈值总量 32′（LT1）+ 25′（T）≈ 57 分钟，两段都不要上到力竭。",
+             "T", tempo_sets=((5, 5),), tempo_zone="T", tempo_rest_min=1, wu_min=8, cd_min=8)
 DBL_EASY = _t("dbl_easy", "RECOVERY", "放松晚跑 30 分钟（二练）",
               "高强度课后的放松晚跑：非常轻松，帮助代谢清除、促进恢复。与第一练间隔 ≥5 小时。",
               "RECOVERY", easy_min=30, wu_min=0, cd_min=0, is_quality=False)
@@ -147,8 +158,8 @@ def easy_pace(vdot_val: float) -> float:
 def zone_pace(zone: str, vdot_val: float) -> float:
     table = vd.pace_table(vdot_val)
     return {"RECOVERY": vd.pace_s_km(vdot_val, (vd.REC_LOW + vd.REC_HIGH) / 2),
-            "E": easy_pace(vdot_val), "M": table["M"], "T": table["T"],
-            "I": table["I"], "R": table["R"]}[zone]
+            "E": easy_pace(vdot_val), "M": table["M"], "T1": table["T1"],
+            "T": table["T"], "I": table["I"], "R": table["R"]}[zone]
 
 
 def session_stats(t: Template, vdot_val: float, *, lr_km: float = 0.0,
@@ -167,8 +178,8 @@ def session_stats(t: Template, vdot_val: float, *, lr_km: float = 0.0,
         hard += n * m / 1000.0
         total += n * m / 1000.0 + max(0, n - 1) * t.rest_m / 1000.0
     total += t.strides * 0.1
-    # tempo 主体按 T 配速
-    tp_kpm = 60.0 / zone_pace("T", vdot_val)
+    # tempo 主体按该课的段带配速（普通阈值课=T(LT2)；双阈值上段=T1(LT1 有氧阈)）
+    tp_kpm = 60.0 / zone_pace(t.tempo_zone, vdot_val)
     tempo_total_min = sum(sets * minutes for sets, minutes in t.tempo_sets)
     total += tempo_total_min * tp_kpm
     hard += tempo_total_min * tp_kpm
@@ -230,7 +241,7 @@ def build_segments(t: Template, *, lr_km: float = 0.0, m_block_km: float = 0.0,
     elif t.easy_min:
         segs.append({"type": "continuous", "zone": _body_zone(t), "duration_min": t.easy_min})
     for sets, minutes in t.tempo_sets:
-        segs.append({"type": "tempo", "zone": "T", "duration_min": minutes, "reps": sets,
+        segs.append({"type": "tempo", "zone": t.tempo_zone, "duration_min": minutes, "reps": sets,
                      "rest_min": t.tempo_rest_min if sets > 1 else 0,
                      "rest_mode": "jog" if sets > 1 else None})
     for n, m in t.reps:
