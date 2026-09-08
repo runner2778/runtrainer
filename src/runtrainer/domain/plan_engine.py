@@ -237,11 +237,11 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
     workouts: list[WorkoutDraft] = []
     q1_menu, q2_menu = Q_TABLES[cls]["q1"], Q_TABLES[cls]["q2"]   # 距离专项菜单
 
-    # ---- 双阈值拆分对（挪威法形态菜单轮换）----
-    # 按文献记录形态（LT1 5×6′/6×5′/4×8′/3×10′；LT2 巡航、6×1km、8×800m、
-    # 10×400m）以拆分累计次数为下标轮换：AM 3 × PM 4 菜单互素取模 → 12 种
-    # 组合一轮不重复；目标距离类重排长短（全马改编 AM 长段优先、PM 巡航多）。
-    # LT2 距离制组按跑力缩量（clamp_subt_main），低跑力也保证主体 ≤35 分钟。
+    # ---- 双练日拆分对（挪威法形态菜单轮换）----
+    # 以拆分累计次数为下标轮换：AM 3 形（LT1 长段巡航 5–10′×3–5 组）× PM 4 形
+    # 互素取模 → 12 种组合一轮不重复；PM 按位置 A/B 隔次交替：偶位 I 短间歇
+    # （400/600m，VO2max 下午段）、奇位 T 短段（800/1000m，纯正 LT2）。
+    # PM 距离制组按跑力缩量（clamp_subt_main），低跑力也保证主体 ≤35 分钟。
     subt_idx = 0
 
     def _sub_pair() -> tuple[Template, Template]:
@@ -341,8 +341,9 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
 
         # ---- 一天两练（slot=2）----
         # 职业双练模式（效仿职业运动员）：休息日轻松跑单练，其余所有训练日两练
-        # ——T 日按挪威模式拆上（LT1 巡航阈）+下（LT2 乳酸阈），其他日主课 + 30
-        # 分钟放松晚跑；down 恢复周保留二练频率但降级为放松晚跑；减量/比赛周不排。
+        # ——T 日按挪威模式拆上午长段（LT1 巡航阈）+ 下午短段（菜单隔次轮换
+        # I 短间歇/T 短段），其他日主课 + 30 分钟放松晚跑；down 恢复周保留二练
+        # 频率但降级为放松晚跑；减量/比赛周不排。
         # 普通模式：每周 double_days 天二练优先挑 T 日；减量/比赛/down 周不排。
         def _pair(tpl: Template | None) -> tuple[Template | None, Template | None]:
             if tpl is None:

@@ -301,20 +301,20 @@ def test_double_days_threshold_split():
     assert pairs, "应有同一天两练的日子"
     for d, ws in pairs:
         assert [w.slot for w in ws] == [1, 2]
-    # 至少一对是双阈值（T 日拆分，T 日只在 transition/final 期）：上段 LT1 巡航阈 + 下段 LT2
-    assert any(ws[0].kind == "T1" and ws[1].kind == "T"
-               for _d, ws in pairs), "双阈值日应为上午 LT1（slot1）+ 下午 LT2（slot2）"
-    # 上午段与下午段配速必须不同：LT1（84%VDOT）比 T/LT2（88%）慢——区间区隔开
+    # 至少一对双练日拆分（T 日拆分，T 日只在 transition/final 期）：slot1 必为
+    # LT1 巡航阈长段；slot2 下午短段按菜单轮换——T 档（双阈值·下）或 I 档（短间歇）
+    assert any(ws[0].kind == "T1" and ws[1].kind in ("T", "I")
+               for _d, ws in pairs), "双练日应为上午 LT1 巡航阈（slot1）+ 下午短段（slot2）"
+    # 短段拆分形态（AM 巡航分钟制 + PM 距离制短段）主段 ≤35 分钟
     for w in res.workouts:
         if w.kind in ("T1", "T"):
-            # 形态菜单轮换后仍是短段拆分：分钟制段总和 ≤35（LT1 30–32′/LT2 24–25′）
             tempo_min = sum(s["duration_min"] for s in w.segments if s["type"] == "tempo")
             assert tempo_min <= 35
 
 
 def test_subt_menus_rotate_all_12_combos():
-    """双阈值形态轮换（批19）：AM 3 形 × PM 4 形互素取模，12 个 idx 的
-    (LT1, LT2) 组合一轮内不重复；距离类菜单各不相同。"""
+    """双练日形态轮换（批19+批21）：AM 3 形 × PM 4 形互素取模，12 个 idx 的
+    (上午长巡航, 下午短段) 组合一轮内不重复；距离类菜单各不相同。"""
     from runtrainer.domain.workout_catalog import double_threshold_pair
     for cls in ("5K", "10K", "HM", "FM"):
         seen = [double_threshold_pair(cls, i) for i in range(12)]
@@ -322,6 +322,8 @@ def test_subt_menus_rotate_all_12_combos():
         assert len(combos) == 12, (cls, len(combos))          # 12 组合全不重复
         assert len({am.key for am, _ in seen}) == 3, cls      # AM 3 形都出场
         assert len({pm.key for pm in [p for _, p in seen]}) == 4, cls  # PM 4 形都出场
+        # AM 上午永远长段巡航（分钟制 tempo_sets），不掺距离制短段
+        assert all(am.tempo_sets for am, _ in seen)
     # 5K 偏短组（含 400m）、全马偏长巡航：AM 形态集合与优先级不同
     k5_ams = [am.key for i in range(3) for am, _ in [double_threshold_pair("5K", i)]]
     fm_ams = [am.key for i in range(3) for am, _ in [double_threshold_pair("FM", i)]]
@@ -330,9 +332,26 @@ def test_subt_menus_rotate_all_12_combos():
                                 [p for _, p in [double_threshold_pair("5K", i) for i in range(4)]]}
 
 
-def test_subt_lt2_reps_clamped_for_low_vdot():
-    """LT2 距离制组按跑力缩量（批19）：主体 ≤35 分钟；高跑力不减组不误伤；
-    缩量时名称/描述组数同步改写。"""
+def test_subt_pm_alternates_i_and_t():
+    """PM 下午短段 A/B 隔次轮换（批21 用户拍板「长+短组合」）：偶数位
+    I 短间歇（kind=I、标题「短间歇」）、奇数位 T 短段（kind=T）——连续
+    双练日严格交替；上午形态不受影响。"""
+    from runtrainer.domain.workout_catalog import double_threshold_pair
+    for cls in ("5K", "10K", "HM", "FM"):
+        pms = [double_threshold_pair(cls, i)[1] for i in range(12)]
+        kinds = [p.kind for p in pms]
+        assert kinds == (["I", "T"] * 6), (cls, kinds[:8])
+        i_forms = {p.key for p in pms if p.kind == "I"}
+        t_forms = {p.key for p in pms if p.kind == "T"}
+        assert all(p.pace_zone == "I" and "短间歇" in p.name for p in pms if p.kind == "I")
+        assert all(p.pace_zone == "T" for p in pms if p.kind == "T")
+        # 每类 I 2 形 + T 2 形（400/600 短间歇 vs 800/1000 短段家族）
+        assert len(i_forms) == 2 and len(t_forms) == 2, (cls, i_forms, t_forms)
+
+
+def test_subt_pm_reps_clamped_for_low_vdot():
+    """PM 距离制短段（T 短段/I 短间歇）按跑力缩量（批19+批21）：主体 ≤35 分钟；
+    高跑力不减组不误伤；缩量时名称/描述组数同步改写。"""
     from runtrainer.domain.workout_catalog import (clamp_subt_main, double_threshold_pair,
                                                    subt_main_min)
     for cls in ("5K", "10K", "HM", "FM"):
@@ -341,11 +360,11 @@ def test_subt_lt2_reps_clamped_for_low_vdot():
             for vdot in (30, 35, 45, 60, 85):
                 cl = clamp_subt_main(pm, vdot)
                 assert subt_main_min(cl, vdot) <= 35 + 1e-6, (cls, pm.key, vdot)
-            # 跑力足够时不缩量（6×1000@45 约 29′、10×400 更短），组数原样
+            # 跑力足够时不缩量（6×1000@45 约 29′、短间歇更短），组数原样
             cl45 = clamp_subt_main(pm, 45)
             assert cl45.reps == pm.reps or pm.tempo_sets
             # 低跑力确有缩量触发（6×1000@30 > 35′）→ 改写组数文字
-    pm1000 = double_threshold_pair("HM", 2)[1]   # HM PM 菜单第 3 形 = 6×1000
+    pm1000 = double_threshold_pair("HM", 3)[1]   # HM PM 菜单第 4 形（奇数位 T 短段）= 6×1000
     assert pm1000.key == "subt_pm_6x1000"
     cl30 = clamp_subt_main(pm1000, 30)
     n30 = cl30.reps[0][0]
@@ -523,13 +542,14 @@ def test_pro_mode_all_other_days_double_sessions():
     for d, ws in by_date.items():
         if len(ws) != 2:
             continue
-        if ws[0].kind == "T1" and ws[1].kind == "T":
+        if ws[0].kind == "T1" and ws[1].kind in ("T", "I"):
             tt.append(ws)
-            # 双阈值拆分成上/下两练（挪威法）：LT1 巡航阈 ~84%VDOT 与 LT2 ~88% 不同配速
-            assert ws[0].pace_zone == "T1" and ws[1].pace_zone == "T"
+            # 双阈值拆分（挪威法）：上午 LT1 巡航阈 ~84%VDOT 始终长段；下午按双练日交替
+            # ——T 短段 800/1000m（LT2 ~88%）或 I 短间歇 400/600m（VO2max ~98% 带）
+            assert ws[0].pace_zone == "T1" and ws[1].pace_zone in ("T", "I")
             assert (ws[0].pace_slow_s_km or 0) > (ws[1].pace_slow_s_km or 1e9), \
-                "LT1 上段应比 LT2 下段慢"
-            for w in ws:      # 单练时段阈值主体：LT1 4×8'=32' / LT2 5×5'=25'
+                "LT1 上段应比下段慢"
+            for w in ws:      # 单练时段主体 ≤35 分钟：LT1 巡航 4×8'=32' / LT2 5×5'=25'
                 tempo_min = sum(s["duration_min"] for s in w.segments if s["type"] == "tempo")
                 assert tempo_min <= 35
         else:

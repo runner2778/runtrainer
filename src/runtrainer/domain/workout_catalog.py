@@ -176,6 +176,11 @@ _SUBT_AM_DESC = ("双阈值法上午段 LT1 巡航阈（约 84% VDOT，比 T 慢
 _SUBT_PM_DESC = ("双阈值法下午段 LT2 乳酸阈（≈88% VDOT，T 配速“舒适地费力”、"
                  "只能蹦单词）。以轻热身为宜：热身 8 分钟轻松跑 + {body} + 冷身 8 分钟。"
                  "两段都不要上到力竭。")
+_SUBT_PM_I_DESC = ("双练日下午段——高强度短间歇（与上午 LT1 巡航阈段间隔 ≥6 小时、"
+                   "两段间补水补碳水；这天下午磨的是 VO2max，不是 LT2 阈课）。"
+                   "I 配速（≈98% VDOT 的 VO2max 带，体感喘、但节奏要稳）："
+                   "热身 8 分钟轻松跑 + {body} + 冷身 8 分钟，组间必须慢跑不能停，"
+                   "全程不上力竭。")
 
 
 def _subt_am(key, n, m, rest=1, note="") -> Template:
@@ -187,22 +192,26 @@ def _subt_am(key, n, m, rest=1, note="") -> Template:
               wu_min=12, cd_min=8)
 
 
-
-def _subt_pm_tempo(key, n, m, rest) -> Template:
-    """LT2 分钟制巡航（时长随配速缩放，低跑力也安全）。"""
-    return _t(f"subt_pm_{key}", "T", f"双阈值·下（LT2 乳酸阈 {n}×{m}′）",
-              _SUBT_PM_DESC.format(body=f"{n}×{m} 分钟 T 巡航（组间慢跑 {rest} 分钟）"),
-              "T", tempo_sets=((n, m),), tempo_zone="T", tempo_rest_min=rest,
-              wu_min=8, cd_min=8)
-
-
 def _subt_pm_reps(key, n, m_m, rest_m, label, note="") -> Template:
-    """LT2 距离制间歇（文献形态：1km 组慢跑约 1 分钟 / 400m 组 30–45 秒）。
-    主体时长随配速变化——引擎按 VDOT 钳制 ≤35 分钟。"""
+    """LT2 下午短段（距离制重复：8×800/6×1000/10×400 级）——段落短于上午巡航段，
+    踩 LT2 档，是「纯正」双阈值日的下午形态。主体随配速变化，引擎按 VDOT 钳 ≤35 分钟。"""
     return _t(f"subt_pm_{key}", "T", f"双阈值·下（LT2 乳酸阈 {label}）",
               _SUBT_PM_DESC.format(
                   body=f"{label}（T 配速，组间 {rest_m}m 慢跑约 {note}）"),
               "T", reps=((n, m_m),), tempo_zone="T", rest_m=rest_m,
+              wu_min=8, cd_min=8)
+
+
+def _subt_pm_i(key, n, m_m, rest_m, label, note) -> Template:
+    """I 短间歇（VO2max 下午段）：400/600m 级短组、短慢跑恢复——双练日的高强度一半。
+
+    kind=I 落 I 区/标签（日历红、VO2max 带）；标题用「短间歇」——2026-09 用户
+    拍板「长间歇+短间歇组合」：双练日按 A/B 隔次轮换（偶位 I 短间歇、奇位 T 短段）。
+    """
+    return _t(f"subt_pm_{key}", "I", f"短间歇 {label}",
+              _SUBT_PM_I_DESC.format(
+                  body=f"{label}（I 配速，组间 {rest_m}m 慢跑约 {note}）"),
+              "I", reps=((n, m_m),), rest_m=rest_m,
               wu_min=8, cd_min=8)
 
 
@@ -222,37 +231,43 @@ SUBT_AM_MENU = {
            _subt_am("4x8", 4, 8, 1, "4×2km 的分钟制近似"),
            _subt_am("6x5", 6, 5, 1, "多组短段形态")],
 }
-# LT2 菜单：分钟制巡航 2 形 + 距离制间歇 3 形（1km 组 ≈ 记录形态 10–12×1km
-# 的业余缩量 6×1km；400m 组 ≈ 20–25×400m 缩量 10×400m；800m 组 8×800m/1′ 此前的
-# “文献出处”（Lampou & Sengupta 2023）在索引库复核不到原文——【证据不足】，
-# 仅作 800m 巡航家族形态保留，不再引注该文）。每距离类各取 4 形、重排长短——
-# AM 3 × PM 4 互素，idx 轮换 12 种组合一轮不重复。
+# PM 下午短段菜单（批21 用户拍板「长间歇+短间歇组合」；分钟制 tempo 巡航形态退役）：
+# 每距离类 4 形按位置隔次交替——偶数位（idx%4=0/2）I 短间歇 400/600m×8–10 组
+# （VO2max 下午段，kind=I、标题「短间歇」；如 10×400m≈文献 20–25×400m 业余缩量），
+# 奇数位（idx%4=1/3）T 短段 800/1000m 重复（纯正 LT2 下午形态；1km 组 ≈ 记录形态
+# 10–12×1km 的业余缩量 6×1km；800m 组此前的“文献出处”（Lampou & Sengupta 2023）
+# 在索引库复核不到原文——【证据不足】，仅作家族形态保留，不再引注该文）。
+# 双练日逐次轮换即 A/B 交替（日频≈周频时呈现隔周轮换）；AM 3 × PM 4 互素取模
+# → 12 种组合一轮不重复。距离类各自重排长短（5K 保留 10×400m 短组频次多、
+# HM/FM 以 800/1000m 段为主）。距离制组均按跑力缩量（clamp_subt_main，≤35′）。
 SUBT_PM_MENU = {
-    "5K": [_subt_pm_reps("10x400", 10, 400, 150, "10×400m", "30–45 秒"),
-           _subt_pm_tempo("5x5", 5, 5, 1),
-           _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "约 1 分钟"),
-           _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "约 1 分钟")],
-    "10K": [_subt_pm_tempo("5x5", 5, 5, 1),
-            _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "约 1 分钟"),
-            _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "约 1 分钟"),
-            _subt_pm_reps("10x400", 10, 400, 150, "10×400m", "30–45 秒")],
-    "HM": [_subt_pm_tempo("5x5", 5, 5, 1),
-           _subt_pm_tempo("4x6", 4, 6, 1.5),
-           _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "约 1 分钟"),
-           _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "约 1 分钟")],
-    "FM": [_subt_pm_tempo("4x6", 4, 6, 1.5),   # 全马：短组×中等巡航为主
-           _subt_pm_tempo("5x5", 5, 5, 1),
-           _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "约 1 分钟"),
-           _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "约 1 分钟")],
+    # note 只写时长数字：body 已含「慢跑约」，勿再带「约」前缀（否则描述出现“约约”）
+    "5K": [_subt_pm_i("i10x400", 10, 400, 200, "10×400m", "1 分钟"),
+           _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "1 分钟"),
+           _subt_pm_i("i8x600", 8, 600, 300, "8×600m", "1.5 分钟"),
+           _subt_pm_reps("10x400", 10, 400, 150, "10×400m", "30–45 秒")],
+    "10K": [_subt_pm_i("i8x600", 8, 600, 300, "8×600m", "1.5 分钟"),
+            _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "1 分钟"),
+            _subt_pm_i("i10x400", 10, 400, 200, "10×400m", "1 分钟"),
+            _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "1 分钟")],
+    "HM": [_subt_pm_i("i8x600", 8, 600, 300, "8×600m", "1.5 分钟"),
+           _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "1 分钟"),
+           _subt_pm_i("i10x400", 10, 400, 200, "10×400m", "1 分钟"),
+           _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "1 分钟")],
+    "FM": [_subt_pm_i("i10x400", 10, 400, 200, "10×400m", "1 分钟"),
+           _subt_pm_reps("6x1000", 6, 1000, 200, "6×1000m", "1 分钟"),
+           _subt_pm_i("i8x600", 8, 600, 300, "8×600m", "1.5 分钟"),
+           _subt_pm_reps("8x800", 8, 800, 200, "8×800m", "1 分钟")],
 }
 
 
 def double_threshold_pair(cls: str, idx: int) -> tuple[Template, Template]:
-    """双阈值日第 idx 天的模板对：(上午 LT1, 下午 LT2)。
+    """双练日第 idx 天的模板对：(上午 LT1 长段巡航, 下午短段)。
 
-    idx 递增轮换：AM 菜单长 3、PM 长 4（互素），(idx%3, idx%4) 组合周期 12、
-    一轮内 12 种组合不重复。距离类各自重排：5K/10K 短组与 400m 高频多，
-    HM/FM 长段/巡航多（全马改编方向）。
+    idx 递增轮换：AM 菜单长 3、PM 菜单长 4（互素），(idx%3, idx%4) 组合周期 12、
+    一轮内 12 种组合不重复。PM 按位置 A/B 隔次交替——偶数位 I 短间歇
+    （VO2max 下午段，kind=I）、奇数位 T 短段（纯正 LT2）；上午始终长段巡航
+    （用户 2026-09 拍板「长间歇+短间歇」：双练日短段轮换 I/T，分钟制巡航退役）。
     """
     am_menu = SUBT_AM_MENU[cls]
     pm_menu = SUBT_PM_MENU[cls]
@@ -268,10 +283,10 @@ def subt_main_min(t: Template, vdot_val: float) -> float:
 
 
 def clamp_subt_main(t: Template, vdot_val: float, cap_min: float = 35.0) -> Template:
-    """LT2 距离制组按跑力缩量（挪威法业余缩放）：任何跑力下主体 ≤ cap_min。
+    """PM 距离制短段（T 短段/I 短间歇，均走 reps）按跑力缩量：任何跑力下主体 ≤ cap_min。
 
-    精英 PM 形态（10–12×1km / 20–25×400m）对低跑力跑者按比例减组；分钟制段
-    （tempo_sets）时长本就随配速缩放，无需处理。缩量同时改写名称/描述里的
+    精英 PM 形态（10–12×1km / 20–25×400m）对低跑力跑者按比例减组；时长本就随
+    配速缩放的分钟制段（tempo_sets，AM 巡航）无需处理。缩量同时改写名称/描述里的
     组数，避免「标题 6×1000m、实际 5 组」的错位。
     """
     if not t.reps or t.tempo_sets or subt_main_min(t, vdot_val) <= cap_min:
