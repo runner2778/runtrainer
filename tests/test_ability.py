@@ -271,6 +271,49 @@ def test_year_bests_hr_gate_excludes_easy_segments():
     assert len(ab.distance_bests(acts, lambda aid: samples, max_hr=None)) == 2
 
 
+def test_year_bests_tt_admitted_via_own_peak():
+    """真·全力测试跑（名称无比赛字样、对照档案 max 不足 90%）靠「当场峰值
+    ≥88%」通道进入近一年最佳；阈值巡航过同门但等效 VDOT 更低被更快真成绩压住；
+    放松跑两门都不满足被排除。（#4 真实库回归：18:31 5K/38:52 10K 计时曾因只
+    对照档案 201 被全拒，卡片退回分段投影 21:11/42:39）"""
+    acts = [
+        _yr_act(140, 5000, 18 * 60 + 31, avg_hr=173, max_hr=182,   # 5K 计时 own .95
+                name="操场跑步", aid=1),
+        _yr_act(120, 9620, 38 * 60 + 52, avg_hr=159, max_hr=180,   # 10K 计时 own .88
+                name="操场跑步", aid=2),
+        _yr_act(100, 10400, 44 * 60 + 9, avg_hr=171, max_hr=184,   # 阈值巡航 own .93
+                name="基础训练", aid=3),
+        _yr_act(90, 10000, 60 * 60, avg_hr=130, max_hr=190,        # 放松跑 own .68
+                name="放松跑", aid=4),
+    ]
+    out = ab.distance_bests(acts, None, max_hr=201)
+    by = {b["distance"]: b for b in out}
+    assert set(by) == {"5K", "10K"}
+    assert by["5K"]["source"] == "race"
+    assert abs(by["5K"]["best_seconds"] - 1111) < 5
+    assert abs(by["5K"]["vdot"] - round(vd.estimate_vdot(5000, 1111), 1)) < 0.1
+    # 阈值巡航（10.4km 44:09）与 10K 计时同距离竞争：计时 2332s 更快胜出
+    assert abs(by["10K"]["best_seconds"] - 2332) < 5
+    # 放松跑不出现在任何距离
+    assert not any(b["distance"] == "半马" for b in out)
+
+
+def test_year_bests_interval_session_not_whole_run():
+    """间歇结构（≥2 组 work + rest）的总耗时含休息，不算整场成绩；
+    无分段样本时不产出任何距离。"""
+    acts = [_yr_act(10, 10000, 50 * 60, avg_hr=175, max_hr=195,
+                    name="间歇训练", aid=1)]
+    acts[0]["structure"] = [
+        {"type": "work", "distance_m": 1000, "elapsed_s": 240},
+        {"type": "rest", "elapsed_s": 120}] * 5
+    assert ab.distance_bests(acts, None, max_hr=201) == []
+    # 同形态但连续跑（无分段）则按当场峰值通道正常录取
+    acts[0]["structure"] = []
+    out = ab.distance_bests(acts, None, max_hr=201)
+    assert len(out) == 1 and out[0]["distance"] == "10K"
+    assert out[0]["best_seconds"] == 50 * 60
+
+
 def test_year_bests_effort_beats_race_when_faster():
     """同日段证据取等效 VDOT 更高者：快分段覆盖慢比赛。"""
     races = [_yr_act(5, 10000, 43 * 60, avg_hr=175, max_hr=190,

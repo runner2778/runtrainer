@@ -9,7 +9,7 @@ from pathlib import Path
 
 APP_NAME = "RunTrainer"  # 数据目录/凭据服务名保持不变（改名会丢数据）
 APP_TITLE = "SuperTrainer"
-ENGINE_VERSION = "1.2.0"  # 职业双练模式（休息日轻松跑单练，其余每天两练）
+ENGINE_VERSION = "1.3.0"  # 批19：双阈值形态按文献菜单轮换/按跑力缩量 + 距离专项菜单（5K/10K 速度、HM/FM 长巡航、FM LR-M 每周） + 休息科学（I 等时长慢跑/T 巡航组间 1/4–1/3）
 
 DATA_DIR = Path(os.environ.get("RUNTRAINER_DATA_DIR")
                 or os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / APP_NAME

@@ -1,8 +1,11 @@
 """中国区 Garmin API 结构解析（字段名与国际版不同：activityType / userData）。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
+import pytest
+
+from runtrainer.garmin.adapter import AdapterError
 from runtrainer.garmin.garminconnect_adapter import GarminConnectAdapter
 
 # 真实中国区 API 形状（tools/probe_garmin.py 实测）
@@ -63,3 +66,47 @@ def test_fetch_activities_uses_activity_type_field():
     assert a.avg_pace_s_km == 360.0
     assert a.avg_hr == 128.0
     assert a.calories == 220
+
+
+class FlakyClient:
+    """健康端点桩：bad_days 里的日期 4 端点全抛（模拟限流/服务故障）。"""
+
+    def __init__(self, bad_days: set[str]):
+        self._bad = bad_days
+
+    def get_sleep_data(self, iso):
+        if iso in self._bad:
+            raise Exception("429 too many requests")
+        return {"dailySleepDTO": {"sleepTimeSeconds": 28800.0}}
+
+    def get_hrv_data(self, iso):
+        if iso in self._bad:
+            raise Exception("429 too many requests")
+        return {}
+
+    def get_stress_data(self, iso):
+        if iso in self._bad:
+            raise Exception("429 too many requests")
+        return {}
+
+    def get_user_summary(self, iso):
+        if iso in self._bad:
+            raise Exception("429 too many requests")
+        return {}
+
+
+def test_fetch_daily_health_skips_failed_day():
+    """健康逐日拉取（批19）：单日 4 端点全挂只跳过该日，不拖垮整批 90 天。"""
+    a = GarminConnectAdapter.__new__(GarminConnectAdapter)
+    a._client = FlakyClient({"2026-09-02"})
+    days = a.fetch_daily_health(date(2026, 9, 1), date(2026, 9, 3))
+    assert [d.date.isoformat() for d in days] == ["2026-09-01", "2026-09-03"]
+    assert days[0].sleep_duration_s == 28800.0
+
+
+def test_fetch_daily_health_all_failed_raises():
+    """整批全挂仍抛（外部干预信号），不被静默吞掉。"""
+    a = GarminConnectAdapter.__new__(GarminConnectAdapter)
+    a._client = FlakyClient({"2026-09-01", "2026-09-02"})
+    with pytest.raises(AdapterError):
+        a.fetch_daily_health(date(2026, 9, 1), date(2026, 9, 2))

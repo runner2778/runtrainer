@@ -236,6 +236,16 @@ def best_recent_race(activities: list[dict], max_hr: float | None = None) -> dic
 # 的距离；保持度用「周活跃率 + 近 4 周跑量 vs 全年周均」量化。
 YEAR_BEST_DISTANCES = (("5K", 5000), ("10K", 10000), ("半马", 21097), ("全马", 42195))
 YEAR_BEST_TOL = 0.06        # 整场活动距离与标准距离容差（≈近似全程的比赛）
+# 整场候选的「对照当场峰值」通道（YEAR_WHOLE_OWN_MIN）：真·全力测试跑（操场
+# 计时/测验，名称常不带比赛字样）场均心率可达当场记录峰值的 88%+（5K 计时
+# 173/182≈0.95、10K 计时 159/180≈0.88）——仅对照档案最大心率 90% 线会把它们
+# 全拒掉，近一年最佳退回「长跑最快段」投影、比真实成绩慢 10%+（真实库实证：
+# 18:31 的 5K 计时被拒后显示 21:11 的分段投影）。阈值巡航的 avg/当场峰值与之
+# 重叠（0.88–0.93）也能过此门——无碍：本通道只服务「近一年最佳成绩」展示表，
+# 取等效 VDOT 最快者，巡航 VDOT≈49–50 压不过真全力跑（≥51）；而预估/证据
+# 路径（best_recent_race 等）仍只看档案最大心率 90% 线，巡航误认比赛的教训
+# 不受影响。
+YEAR_WHOLE_OWN_MIN = 0.88
 SEG_RANGE = (0.97, 1.12)    # 滑窗覆盖距离相对标准距离的下/上界
 SEG_MIN_HR_RATIO = 0.82     # 分段平均心率 ≥82% 最大心率才认（防散步/轻松段）
 YEAR_SAMPLE_RUN_CAP = 40    # 参与分段扫描的活动上限（防超大库拖慢聊天/看板）
@@ -246,8 +256,9 @@ def distance_bests(activities: list[dict], get_samples=None,
                    max_hr: float | None = None) -> list[dict]:
     """近一年（调用方给窗口内活动）各标准距离最佳成绩。
 
-    - 整场近似比赛：距离在容差带内且（平均心率 ≥88% 活动最高心率 或 名称含
-      比赛标记）→ 直接折算 VDOT；
+    - 整场近似比赛：距离在容差带内且（名称含比赛标记 | 平均心率 ≥90% 档案/
+      估算最大心率 | 平均心率 ≥88% 本场记录峰值——真·全力测试跑常只有此条）且
+      非间歇结构（≥2 组 work + 有 rest 的总时长含休息，不算整场成绩）→ 折算 VDOT；
     - 最长分段（Best Effort）：带样本的更长跑中，按时间滑窗找覆盖距离在
       [0.97, 1.12]×标准距离、最快的最短耗时窗口；窗口平均心率 ≥82% 最大心率
       才认（无心率样本的窗口不参与——配速可能被下坡/漂移虚高）。
@@ -263,16 +274,27 @@ def distance_bests(activities: list[dict], get_samples=None,
         if not dist or not dur:
             continue
         name = (a.get("name") or "").lower()
-        # 平均心率对个体最大心率（与 best_recent_race 同一套参照）：用单场
-        # max_hr 比值会把匀速阈值课误认成近似全程比赛（阈值巡航 avg≈84–88%，
-        # 但相对自己冲到的场次峰值可到 94%+），整场比赛/近似全程才够 90% 线
+        # 两个心率参照系：档案/估算个体最大心率（真比赛全力平均 ≥90% 线，
+        # 与 best_recent_race 同款——防阈值巡航误认比赛）与本场记录峰值
+        # （YEAR_WHOLE_OWN_MIN 通道——真·全力测试跑 vs 档案最大心率常在
+        # 84–88%，只有对照当场峰值才够 88%+；见常量注释）。该放宽只出现在
+        # 近一年最佳展示，不开放给预估的证据路径。
         avg_hr = a.get("avg_hr")
         if avg_hr and (max_hr or a.get("max_hr")):
             a_hr_ratio = avg_hr / (max_hr or a["max_hr"])
         else:
             a_hr_ratio = None
+        act_ratio = (avg_hr / a["max_hr"]
+                     if avg_hr and a.get("max_hr") else None)
         name_ok = any(h in name for h in RACE_NAME_HINTS)
-        whole_ok = (a_hr_ratio is not None and a_hr_ratio >= RACE_HR_MIN_REF) or name_ok
+        struct = a.get("structure") or []
+        is_interval = (isinstance(struct, list)
+                       and sum(1 for s in struct if s.get("type") == "work") >= 2
+                       and any(s.get("type") == "rest" for s in struct))
+        whole_ok = (name_ok
+                    or (a_hr_ratio is not None and a_hr_ratio >= RACE_HR_MIN_REF)
+                    or (act_ratio is not None and act_ratio >= YEAR_WHOLE_OWN_MIN)) \
+            and not is_interval
         for label, std in YEAR_BEST_DISTANCES:
             if whole_ok and abs(dist - std) / std <= YEAR_BEST_TOL and dur > 0:
                 v = vd.estimate_vdot(dist, dur)
@@ -313,8 +335,14 @@ def distance_bests(activities: list[dict], get_samples=None,
 
 
 def _keep_best(best: dict, label: str, rec: dict) -> None:
-    """同距离多证据取等效 VDOT 最高者（比赛硬证据自带权重，无需特殊处理）。"""
-    if label not in best or rec["vdot"] > best[label]["vdot"]:
+    """同距离多证据取等效 VDOT 最高者；VDOT 并列（1 位小数相同）取总用时更短者
+    ——「近一年最佳」展示的是最快成绩，结果不随活动遍历顺序摇摆。"""
+    cur = best.get(label)
+    if cur is None:
+        best[label] = rec
+    elif rec["vdot"] > cur["vdot"]:
+        best[label] = rec
+    elif rec["vdot"] == cur["vdot"] and rec["best_seconds"] < cur["best_seconds"]:
         best[label] = rec
 
 

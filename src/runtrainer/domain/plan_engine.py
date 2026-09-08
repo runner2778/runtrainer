@@ -15,10 +15,9 @@ from ..config import ENGINE_VERSION
 from ..utils import jsonutil
 from . import vdot as vd
 from .workout_catalog import (
-    DBL_EASY, E_30, E_40, LR_MENU, LRM_MENU, Q1_BASE, Q1_EARLY, Q1_FINAL,
-    Q1_TAPER, Q1_TRANSITION, Q2_BASE, Q2_EARLY, Q2_FINAL, Q2_TAPER,
-    Q2_TRANSITION, REC_30, REC_35, STRENGTH, SUBT_AM, SUBT_PM, TUNEUP,
-    Template, build_segments, distance_class, lr_template, session_stats,
+    DBL_EASY, E_30, E_40, LR_MENU, LRM_MENU, Q_TABLES, REC_30, REC_35,
+    STRENGTH, TUNEUP, Template, build_segments, clamp_subt_main,
+    distance_class, double_threshold_pair, lr_template, session_stats,
 )
 
 PHASE_ORDER = ("base", "early", "transition", "final", "taper")
@@ -28,10 +27,18 @@ MIN_WEEKS = {5000: 8, 10000: 8, 21097: 12, 42195: 12}
 PEAK_CAP = {5000: 60.0, 10000: 75.0, 21097: 85.0, 42195: 110.0}
 TUNEUP_KM = {"5K": 3.0, "10K": 4.0, "HM": 5.0, "FM": 5.0}
 
-Q1_MENU = {"base": Q1_BASE, "early": Q1_EARLY, "transition": Q1_TRANSITION,
-           "final": Q1_FINAL, "taper": Q1_TAPER}
-Q2_MENU = {"base": Q2_BASE, "early": Q2_EARLY, "transition": Q2_TRANSITION,
-           "final": Q2_FINAL, "taper": Q2_TAPER}
+DIST_LABEL = {5000: "5K", 10000: "10K", 21097: "半马", 42195: "全马"}
+# 比赛日临场指引按距离分级（躯干相同、战术不同）——写进日历卡片/提示词
+RACE_DESC = {
+    "5K": "比赛！5K 无补给需求：起跑 2–3 分钟内压住冲动，配速进入目标节奏后顶住不掉速，"
+          "最后 600–800m 全力冲刺。",
+    "10K": "比赛！前 3 公里比目标配速略克制（-3~5 秒/公里），中段巡航稳住节奏，"
+           "最后 2 公里逐步加力到底。",
+    "HM": "比赛！前半程比目标配速略克制，14 公里处补一次水/电解质，"
+          "过半后如状态好再稳中提速，最后 3 公里全力。",
+    "FM": "比赛！前 1/3 严格压住目标配速（宁慢勿快），每 5 公里补水、按计划补胶；"
+          "30 公里后才允许考虑提速——全马是后半程的比赛。",
+}
 
 
 def pro_extra_km(vdot_val: float) -> float:
@@ -228,6 +235,20 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
     cls = distance_class(dist)
     paces = vd.pace_table(vdot_val)
     workouts: list[WorkoutDraft] = []
+    q1_menu, q2_menu = Q_TABLES[cls]["q1"], Q_TABLES[cls]["q2"]   # 距离专项菜单
+
+    # ---- 双阈值拆分对（挪威法形态菜单轮换）----
+    # 按文献记录形态（LT1 5×6′/6×5′/4×8′/3×10′；LT2 巡航、6×1km、8×800m、
+    # 10×400m）以拆分累计次数为下标轮换：AM 3 × PM 4 菜单互素取模 → 12 种
+    # 组合一轮不重复；目标距离类重排长短（全马改编 AM 长段优先、PM 巡航多）。
+    # LT2 距离制组按跑力缩量（clamp_subt_main），低跑力也保证主体 ≤35 分钟。
+    subt_idx = 0
+
+    def _sub_pair() -> tuple[Template, Template]:
+        nonlocal subt_idx
+        am, pm = double_threshold_pair(cls, subt_idx)
+        subt_idx += 1
+        return am, clamp_subt_main(pm, vdot_val)
 
     for w in range(weeks):
         phase = next(p for p in reversed(PHASE_ORDER) if w >= offsets[p])
@@ -275,11 +296,13 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
         if is_race_week:
             q1_tpl = REC_35
         elif is_taper:
-            q1_tpl = _pick(Q1_MENU, "taper", pi)
-            q2_tpl = Q2_MENU["taper"][0]          # 减量期 Q2 无质量课
+            q1_tpl = _pick(q1_menu, "taper", pi)
+            # 减量期 Q2 无质量课；轻松跑时长按减量周轮换（不再每个减量周同款 40′）
+            tap_menu = q2_menu["taper"]
+            q2_tpl = tap_menu[pi % len(tap_menu)]
         else:
-            q1_tpl = _pick(Q1_MENU, phase, pi)
-            q2_tpl = _pick(Q2_MENU, phase, pi)
+            q1_tpl = _pick(q1_menu, phase, pi)
+            q2_tpl = _pick(q2_menu, phase, pi)
             if lr_tpl.lr_m:            # LR 含 M 段 → 周日已强度，周六改轻松
                 q2_tpl = E_40
         # 最终强度期倒数第 3 周设测试赛（Q2 位）；测试周 LR 不叠加 M 段
@@ -316,15 +339,14 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
 
         # ---- 一天两练（slot=2）----
         # 职业双练模式（效仿职业运动员）：休息日轻松跑单练，其余所有训练日两练
-        # ——T 日按挪威模式拆上（LT1 有氧阈 4×8′）+下（LT2 乳酸阈 5×5′），其他日
-        # 主课 + 30 分钟放松晚跑；down 恢复周保留二练频率但降级为放松晚跑；减量/
-        # 比赛周不排。
+        # ——T 日按挪威模式拆上（LT1 有氧阈）+下（LT2 乳酸阈），其他日主课 + 30
+        # 分钟放松晚跑；down 恢复周保留二练频率但降级为放松晚跑；减量/比赛周不排。
         # 普通模式：每周 double_days 天二练优先挑 T 日；减量/比赛/down 周不排。
         def _pair(tpl: Template | None) -> tuple[Template | None, Template | None]:
             if tpl is None:
                 return None, None
             if tpl.kind == "T" and double_mode in ("threshold", "auto"):
-                return SUBT_AM, SUBT_PM
+                return _sub_pair()
             if tpl.is_quality:
                 return tpl, DBL_EASY
             return tpl, None
@@ -339,12 +361,12 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
                         continue
                     if wd == q1_wd:
                         if q1_tpl.kind == "T" and split_ok:
-                            q1_tpl, q1_slot2 = SUBT_AM, SUBT_PM
+                            q1_tpl, q1_slot2 = _sub_pair()
                         else:
                             q1_slot2 = DBL_EASY
                     elif wd == q2_wd:
                         if q2_tpl.kind == "T" and split_ok:
-                            q2_tpl, q2_slot2 = SUBT_AM, SUBT_PM
+                            q2_tpl, q2_slot2 = _sub_pair()
                         else:
                             q2_slot2 = DBL_EASY
                     else:
@@ -437,11 +459,10 @@ def generate_plan(spec: PlanSpec) -> PlanResult:
             if d > spec.race_date:
                 continue
             if is_race_week and wd == 6:
-                label = spec.goal_name or ({5000: "5K", 10000: "10K",
-                                            21097: "半马", 42195: "全马"}[dist])
+                label = spec.goal_name or DIST_LABEL[dist]
                 workouts.append(WorkoutDraft(
                     date=d, week_index=w, phase=phase, kind="RACE", title=f"比赛日 · {label}",
-                    description="比赛！前 3 公里压住速度，按目标配速执行，后半程稳中求进。",
+                    description=RACE_DESC[cls],
                     pace_zone=None, distance_km=round(dist / 1000, 1),
                     duration_min=round(spec.target_seconds / 60, 1) if spec.target_seconds else None,
                     pace_slow_s_km=None, pace_fast_s_km=None, is_quality=True,

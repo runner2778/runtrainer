@@ -319,11 +319,27 @@ class GarminConnectAdapter(GarminAdapter):
         return samples
 
     def fetch_daily_health(self, start: date, end: date) -> list[RawDailyHealth]:
+        """逐日拉取健康（每天内部已对 4 端点逐个降级）。
+
+        单日 4 端点全挂时只跳过该日（断点按成功日推进，失败日下轮自然重拉），
+        不再让一个失败日作废整批——此前 90 天批中间一天失败，89 天成功数据
+        全部下轮重拉。整批全挂仍抛（需要外部干预的信号）。
+        """
         result = []
+        failed = 0
         d = start
         while d <= end:
-            result.append(self._fetch_day_health(d))
+            try:
+                result.append(self._fetch_day_health(d))
+            except AdapterError as e:
+                failed += 1
+                log.warning("健康日 %s 拉取失败（跳过，下轮按断点重试）: %s", d, e)
             d += timedelta(days=1)
+        if not result and failed:
+            raise AdapterError(f"健康数据拉取失败（{failed} 天全部失败，可能被限流）")
+        if failed:
+            log.warning("健康数据跳过 %d/%d 天（失败日下轮自动补拉）",
+                        failed, (end - start).days + 1)
         return result
 
     def _fetch_day_health(self, d: date) -> RawDailyHealth:

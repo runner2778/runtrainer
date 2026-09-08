@@ -65,6 +65,37 @@ def list_activities(start_date: str | None = None, end_date: str | None = None,
         return [dict(r) for r in conn.execute(sql, args)]
 
 
+def get_by_external(source: str, external_id: str) -> dict | None:
+    """按 (source, external_id) 取整行。
+
+    详情回填保留已存字段用——此前每活动 list_activities(limit=1000) 全表
+    线性扫描找行，N 活动 O(N×M)；此列有 UNIQUE 索引，O(N) 直达。
+    """
+    with get_conn() as conn:
+        return row_to_dict(conn.execute(
+            "SELECT * FROM activities WHERE source = ? AND external_id = ?",
+            (source, external_id)).fetchone())
+
+
+def mark_detail_attempted(activity_id: int) -> None:
+    """详情回填成功标记：无采样曲线的活动不再被每轮同步重复拉取。"""
+    with get_conn() as conn:
+        conn.execute("UPDATE activities SET detail_attempted = 1 WHERE id = ?", (activity_id,))
+
+
+def list_detail_missing(cutoff_ts: int, source: str, limit: int = 3000) -> list[dict]:
+    """缺详情回填的活动（轻量投影，避开 laps/structure 大 JSON 字段）。
+
+    条件：窗口内 + has_samples=0 + 从未成功回填过（detail_attempted=0）。
+    返回 [{external_id, start_ts}]，按时间倒序。
+    """
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT external_id, start_ts FROM activities"
+            " WHERE source = ? AND start_ts >= ? AND has_samples = 0 AND detail_attempted = 0"
+            " ORDER BY start_ts DESC LIMIT ?", (source, cutoff_ts, limit))]
+
+
 def list_pace_hr_rows(start_date: str | None = None, end_date: str | None = None,
                       limit: int = 5000) -> list[dict]:
     """配速-心率分析用轻量行（避开 laps_json/structure_json 大字段）。

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 from ..db.repos import activity_repo, health_repo, profile_repo, sync_repo
@@ -114,28 +116,23 @@ def sync_all() -> dict:
         since = datetime.fromtimestamp(since_ts - 86400, timezone.utc)  # 重叠 1 天防漏
         # fetch_activities 内部按 Garmin 页偏移翻页拉全量（历史不再被截断）
         created = 0
-        new_acts: list[tuple[str, int]] = []
         for a in adapter.fetch_activities(since, limit=100):
             _, is_new = activity_repo.upsert_activity(_activity_to_row(a))
             created += 1 if is_new else 0
-            if is_new:
-                new_acts.append((a.external_id, a.start_ts))
         stats["activities"] = created
 
         # 2.5) 详情回填：采样曲线（心率/配速/步频）+ 训练内容分段
         #      （间歇/休息识别）。仅真实模式；窗口内「新活动 + 已存但缺详情
         #      的旧活动」都回填——分页修复前的老数据只有概要，圈级/课程级
         #      信息缺失。单条失败不影响整体（下轮重试）。
+        #      missing 直接查 DB 投影（本轮新活动概要已落库，自然含在其中），
+        #      判据带 detail_attempted：真实无采样的活动拉过即不再重拉。
         if not settings_service.is_mock_mode():
             cutoff = int((datetime.now(timezone.utc)
                           - timedelta(days=DETAIL_BACKFILL_WINDOW_DAYS)).timestamp())
-            missing = [(a["external_id"], a["start_ts"]) for a in
-                       activity_repo.list_activities(source=SOURCE, limit=3000)
-                       if a["start_ts"] >= cutoff and not a["has_samples"]]
-            new_ids = {eid for eid, _ in new_acts}
-            to_fill = new_acts + [(eid, ts) for eid, ts in missing if eid not in new_ids]
-            if to_fill:
-                filled = _backfill_activity_details(adapter, to_fill)
+            missing = activity_repo.list_detail_missing(cutoff, SOURCE)
+            if missing:
+                filled = _backfill_activity_details(missing)
                 if filled:
                     stats["details_backfilled"] = filled
 
@@ -146,7 +143,7 @@ def sync_all() -> dict:
         end = min(dates.today(), start + timedelta(days=HEALTH_DAYS_PER_SYNC - 1))
         if start <= end:
             try:
-                days = adapter.fetch_daily_health(start, end)
+                days = _fetch_health_chunks(adapter, start, end)
             except AdapterError as e:
                 # 健康拉取失败不再中断整个同步（活动增量/课表重建已完成）：
                 # 断点不动，下轮重试同一批
@@ -236,12 +233,9 @@ def _save_activity_detail(detail: RawActivity, structure: list[dict]) -> int:
     """详情入库：采样曲线 + 训练内容结构。返回活动 id。"""
     from ..domain.workout_analysis import analyze_structure
     row = _activity_to_row(detail)
-    # 保留已存活动的主体字段（start_ts 以已存为准）
-    existing = None
-    for a in activity_repo.list_activities(source=SOURCE, limit=1000):
-        if a["external_id"] == detail.external_id:
-            existing = a
-            break
+    # 保留已存活动的主体字段（start_ts 以已存为准）。
+    # UNIQUE(source, external_id) 索引直达，替代此前全表线性扫描（N 活动 O(N²)）
+    existing = activity_repo.get_by_external(SOURCE, detail.external_id)
     if existing:
         row["start_ts"] = existing["start_ts"]
         row["tz_offset_min"] = existing["tz_offset_min"]
@@ -274,24 +268,91 @@ def _save_activity_detail(detail: RawActivity, structure: list[dict]) -> int:
     return aid
 
 
-def _backfill_activity_details(adapter: GarminAdapter, new_acts: list[tuple[str, int]]) -> int:
-    """新活动详情回填（近 180 天窗口内），单条失败不影响整体。返回回填数。"""
+def _backfill_activity_details(missing: list[dict]) -> int:
+    """缺详情活动回填（DETAIL_BACKFILL_WINDOW_DAYS 窗口内），并行加速。
+
+    - 速度：串行 2 请求/活动改为小线程池（3 worker，各自独立登录实例——
+      garmin client 非线程安全不能跨线程共享；Cloudflare 防护下并发不宜过大）。
+      首同步数百活动时墙钟约省 75%。
+    - 准确：单条失败不影响整体（下轮重试）；成功即打 detail_attempted 标记，
+      真实无采样的活动不再每轮被重复拉取（断掉永久重拉环）。
+    """
     from ..domain.workout_analysis import analyze_structure
+    if not missing:
+        return 0
     cutoff = int((datetime.now(timezone.utc)
                   - timedelta(days=DETAIL_BACKFILL_WINDOW_DAYS)).timestamp())
-    filled = 0
-    for external_id, start_ts in new_acts:
-        if start_ts < cutoff:
-            continue
+
+    # 每个线程独立持有一个已登录适配器（threading.local 缓存，线程池复用）
+    _local = threading.local()
+
+    def _adapter() -> GarminAdapter:
+        a = getattr(_local, "adapter", None)
+        if a is None:
+            a = get_adapter()
+            a.login()
+            _local.adapter = a
+        return a
+
+    def _fill_one(m: dict) -> int:
+        if m["start_ts"] < cutoff:
+            return 0
+        external_id = m["external_id"]
         try:
-            detail = adapter.fetch_activity_detail(external_id)
+            detail = _adapter().fetch_activity_detail(external_id)
             structure = analyze_structure(detail.laps, detail.duration_s, detail.distance_m,
                                           samples=detail.samples)
-            _save_activity_detail(detail, structure)
-            filled += 1
+            aid = _save_activity_detail(detail, structure)
+            activity_repo.mark_detail_attempted(aid)
+            return 1
         except Exception as e:
-            log.warning("活动 %s 详情回填失败（非致命）: %s", external_id, e)
+            log.warning("活动 %s 详情回填失败（非致命，下轮重试）: %s", external_id, e)
+            return 0
+
+    filled = 0
+    workers = min(3, len(missing))
+    if workers <= 1:
+        for m in missing:
+            filled += _fill_one(m)
+        return filled
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for n in ex.map(_fill_one, missing):
+            filled += n
     return filled
+
+
+def _fetch_health_chunks(adapter: GarminAdapter, start: date, end: date) -> list[RawDailyHealth]:
+    """健康逐日拉取：mock 串行（演示实例已登录）；真实模式切 3 段并行。
+
+    每段独立登录实例（client 非线程安全）。段内单日失败由适配器跳过
+    （断点按成功日推进）；整段失败仅日志——该段断点不推进，下轮重拉该段，
+    不拖累其余成功段。
+    """
+    total_days = (end - start).days + 1
+    if isinstance(adapter, MockAdapter) or total_days <= 1:
+        return adapter.fetch_daily_health(start, end)
+    spans = []
+    seg_days = max(1, (total_days + 2) // 3)
+    s = start
+    while s <= end:
+        e = min(end, s + timedelta(days=seg_days - 1))
+        spans.append((s, e))
+        s = e + timedelta(days=1)
+
+    def _seg(s0: date, s1: date) -> list:
+        a = get_adapter()
+        a.login()
+        return a.fetch_daily_health(s0, s1)
+
+    days: list = []
+    with ThreadPoolExecutor(max_workers=len(spans)) as ex:
+        futures = [ex.submit(_seg, s0, s1) for s0, s1 in spans]
+        for f in futures:
+            try:
+                days.extend(f.result())
+            except AdapterError as e:
+                log.warning("健康分片拉取失败（该分段下轮重试）: %s", e)
+    return days
 
 
 def fetch_activity_detail(external_id: str) -> int:
@@ -299,4 +360,7 @@ def fetch_activity_detail(external_id: str) -> int:
     adapter = get_adapter()
     adapter.login()
     detail = adapter.fetch_activity_detail(external_id)
-    return _save_activity_detail(detail, None)
+    aid = _save_activity_detail(detail, None)
+    # 无论详情有无采样都标记：无采样活动不被后续同步永久重拉
+    activity_repo.mark_detail_attempted(aid)
+    return aid

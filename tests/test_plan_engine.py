@@ -307,9 +307,103 @@ def test_double_days_threshold_split():
     # 上午段与下午段配速必须不同：LT1（84%VDOT）比 T/LT2（88%）慢——区间区隔开
     for w in res.workouts:
         if w.kind in ("T1", "T"):
-            # LT1 单练为 4×8'=32'，LT2 单练 5×5'=25'，均 ≤ 单段阈值时长上限
+            # 形态菜单轮换后仍是短段拆分：分钟制段总和 ≤35（LT1 30–32′/LT2 24–25′）
             tempo_min = sum(s["duration_min"] for s in w.segments if s["type"] == "tempo")
             assert tempo_min <= 35
+
+
+def test_subt_menus_rotate_all_12_combos():
+    """双阈值形态轮换（批19）：AM 3 形 × PM 4 形互素取模，12 个 idx 的
+    (LT1, LT2) 组合一轮内不重复；距离类菜单各不相同。"""
+    from runtrainer.domain.workout_catalog import double_threshold_pair
+    for cls in ("5K", "10K", "HM", "FM"):
+        seen = [double_threshold_pair(cls, i) for i in range(12)]
+        combos = {(am.key, pm.key) for am, pm in seen}
+        assert len(combos) == 12, (cls, len(combos))          # 12 组合全不重复
+        assert len({am.key for am, _ in seen}) == 3, cls      # AM 3 形都出场
+        assert len({pm.key for pm in [p for _, p in seen]}) == 4, cls  # PM 4 形都出场
+    # 5K 偏短组（含 400m）、全马偏长巡航：AM 形态集合与优先级不同
+    k5_ams = [am.key for i in range(3) for am, _ in [double_threshold_pair("5K", i)]]
+    fm_ams = [am.key for i in range(3) for am, _ in [double_threshold_pair("FM", i)]]
+    assert k5_ams[0] == "subt_am_5x6" and fm_ams[0] == "subt_am_3x10"
+    assert "subt_pm_10x400" in {pm.key for pm in
+                                [p for _, p in [double_threshold_pair("5K", i) for i in range(4)]]}
+
+
+def test_subt_lt2_reps_clamped_for_low_vdot():
+    """LT2 距离制组按跑力缩量（批19）：主体 ≤35 分钟；高跑力不减组不误伤；
+    缩量时名称/描述组数同步改写。"""
+    from runtrainer.domain.workout_catalog import (clamp_subt_main, double_threshold_pair,
+                                                   subt_main_min)
+    for cls in ("5K", "10K", "HM", "FM"):
+        for i in range(4):
+            _, pm = double_threshold_pair(cls, i)
+            for vdot in (30, 35, 45, 60, 85):
+                cl = clamp_subt_main(pm, vdot)
+                assert subt_main_min(cl, vdot) <= 35 + 1e-6, (cls, pm.key, vdot)
+            # 跑力足够时不缩量（6×1000@45 约 29′、10×400 更短），组数原样
+            cl45 = clamp_subt_main(pm, 45)
+            assert cl45.reps == pm.reps or pm.tempo_sets
+            # 低跑力确有缩量触发（6×1000@30 > 35′）→ 改写组数文字
+    pm1000 = double_threshold_pair("HM", 2)[1]   # HM PM 菜单第 3 形 = 6×1000
+    assert pm1000.key == "subt_pm_6x1000"
+    cl30 = clamp_subt_main(pm1000, 30)
+    n30 = cl30.reps[0][0]
+    assert n30 < 6 and subt_main_min(cl30, 30) <= 35
+    assert f"{n30}×1000m" in cl30.name and f"{n30}×1000m" in cl30.description
+
+
+def test_q_tables_distance_specialization():
+    """距离专项菜单表（批20）：final/taper 按类分化（5K/10K 保速度刺激、
+    HM/FM 长 T 巡航 30–40′）；base/early 全类同构；休息科学落表。"""
+    from runtrainer.domain.workout_catalog import Q_TABLES
+    t = Q_TABLES
+
+    def keys(cls, q, ph):
+        return [x.key for x in t[cls][q][ph]]
+
+    def kinds(cls, q, ph):
+        return [x.kind for x in t[cls][q][ph]]
+
+    # final Q1：5K 保短 I（+T 课）、10K 混 T+I；HM/FM 清一色 T 且更长
+    assert "I" in kinds("5K", "q1", "final") and "T" in kinds("5K", "q1", "final")
+    assert set(keys("5K", "q1", "final")) == {"t2x8", "i4x800", "i5x600"}
+    assert set(keys("10K", "q1", "final")) == {"t2x10", "i4x1200", "t20"}
+    assert all(x.kind == "T" for x in t["HM"]["q1"]["final"])
+    assert all(x.kind == "T" for x in t["FM"]["q1"]["final"])
+    # 长巡航带只给长距离：t25 HM/FM、t30 仅全马
+    assert "t25" in keys("HM", "q1", "final") and "t30" not in keys("HM", "q1", "final")
+    assert {"t25", "t30"} <= set(keys("FM", "q1", "final"))
+    assert "t30" not in keys("5K", "q1", "final") and "t30" not in keys("10K", "q1", "final")
+    # taper：5K/10K 上 200m 组保持速度；HM/FM 保持轻 6×200
+    assert "r10x200" in keys("5K", "q1", "taper")
+    assert "r10x200" not in keys("FM", "q1", "taper")
+    # base/early 全距离类同一批模板（同构起点）
+    for cls in ("5K", "10K", "HM", "FM"):
+        for q in ("q1", "q2"):
+            for ph in ("base", "early"):
+                assert keys(cls, q, ph) == keys("HM", q, ph), (cls, q, ph)
+    # 休息科学：I 组间恢复≈等时长慢跑（组长→慢跑距离），T 巡航组间≈组长 1/4
+    by_key = {x.key: x for x in t["HM"]["q2"]["transition"]}
+    assert by_key["i4x1200"].rest_m == 600 and by_key["i3x1600"].rest_m == 700
+    assert {x.key: x for x in t["HM"]["q1"]["early"]}["i6x800"].rest_m == 400
+    by_fm = {x.key: x for x in t["FM"]["q1"]["final"]}
+    assert by_fm["t2x12"].tempo_rest_min == 3          # 12′ 组 ~3′ 休（1/4）
+
+
+def test_lr_m_blocks_final_fm_weekly_hm_every_other():
+    """M 段长距离（批20）：全马 final 每周嵌 M 段（LR-M 为全马核心刺激），
+    半马隔周（防过载）；5K/10K final 无 M 段。"""
+    fm = generate_plan(_spec(goal_distance_m=42195, weeks=16, base_weekly_km=60))
+    hm = generate_plan(_spec(goal_distance_m=21097, weeks=14))
+    k5 = generate_plan(_spec(goal_distance_m=5000, weeks=12))
+    fm_z = [w.pace_zone for w in fm.workouts if w.phase == "final" and w.kind == "LR"]
+    hm_z = [w.pace_zone for w in hm.workouts if w.phase == "final" and w.kind == "LR"]
+    k5_z = [w.pace_zone for w in k5.workouts if w.phase == "final" and w.kind == "LR"]
+    assert len(fm_z) >= 2 and fm_z.count("M") >= 2      # 几乎每周都是 M 段
+    assert fm_z.count("E") <= 1                          # 至多测试周退化 1 次
+    assert "M" in hm_z and "E" in hm_z                   # 隔周交替
+    assert k5_z and set(k5_z) == {"E"}                   # 短距离 final 纯有氧长跑
 
 
 def test_double_days_easy_evening():
