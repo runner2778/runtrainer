@@ -9,6 +9,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 import webview
 
+from . import companion
 from . import config
 from .api.bridge import Api
 from .db import database
@@ -148,6 +149,10 @@ def run() -> None:
         raise FileNotFoundError(f"前端目录缺失：{index}")
     url = _start_web_server()
     log.info("前端页面: %s", url)
+    # 手机伴侣屏（默认关）：开关开启时启动 LAN 服务；失败仅日志，不阻断启动
+    from .services import settings_service
+    if settings_service.get_companion_enabled() and not companion.ensure_started():
+        log.warning("手机伴侣服务启动失败：%s", companion.status()["error"])
     window = webview.create_window(
         config.APP_TITLE,
         url,
@@ -170,3 +175,5 @@ def run() -> None:
         log.exception("窗口启动失败")
         _fallback_error(str(e))
         raise
+    finally:
+        companion.stop()

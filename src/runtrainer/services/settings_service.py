@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 
 import keyring
 
@@ -150,3 +151,40 @@ def is_garmin_cn() -> bool:
 
 def set_garmin_cn(enabled: bool) -> None:
     kv_repo.set_setting(S_GARMIN_CN, "1" if enabled else "0")
+
+
+# ---- 手机伴侣屏（同 Wi-Fi 手机访问）----
+S_COMPANION_ENABLED = "companion_enabled"
+K_COMPANION_PIN = "companion_pin"
+
+
+def get_companion_enabled() -> bool:
+    """LAN 手机伴侣服务开关（默认关，安全起见）。"""
+    return kv_repo.get_setting(S_COMPANION_ENABLED, "0") == "1"
+
+
+def set_companion_enabled(enabled: bool) -> None:
+    kv_repo.set_setting(S_COMPANION_ENABLED, "1" if enabled else "0")
+
+
+def get_companion_pin() -> str | None:
+    """6 位配对 PIN（keyring，凭据层）。"""
+    return _get(K_COMPANION_PIN)
+
+
+def generate_companion_pin() -> str:
+    """生成新的 6 位 PIN 并覆盖落库，返回明文（只此一次）。"""
+    pin = f"{secrets.randbelow(1_000_000):06d}"
+    _set(K_COMPANION_PIN, pin)
+    return pin
+
+
+def get_or_create_companion_pin() -> str:
+    """取现有 PIN，没有则生成。关开关不删 PIN，重开免重新配对。"""
+    pin = get_companion_pin()
+    return pin if pin else generate_companion_pin()
+
+
+def reset_companion_pin() -> str:
+    """强制重置 PIN（覆盖生成）。handler 每请求读最新，即时生效。"""
+    return generate_companion_pin()

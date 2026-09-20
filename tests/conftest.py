@@ -8,6 +8,27 @@ import pytest
 os.environ["RUNTRAINER_DATA_DIR"] = tempfile.mkdtemp(prefix="runtrainer_test_")
 
 
+@pytest.fixture
+def fake_keyring(monkeypatch):
+    """keyring 打桩为内存 dict：companion PIN 等凭据测试用，不碰系统凭据。"""
+    from runtrainer.services import settings_service
+    store: dict[str, str] = {}
+
+    def _get(entry):
+        return store.get(entry)
+
+    def _set(entry, value):
+        store[entry] = value
+
+    def _delete(entry):
+        store.pop(entry, None)
+
+    monkeypatch.setattr(settings_service, "_get", _get)
+    monkeypatch.setattr(settings_service, "_set", _set)
+    monkeypatch.setattr(settings_service, "_delete", _delete)
+    return store
+
+
 @pytest.fixture(autouse=True)
 def _fresh_db():
     """每个用例前：迁移 + 清空全部业务表 + 重置自增序列。
