@@ -207,10 +207,10 @@ def test_health_chunks_spans_real_mode(monkeypatch):
     monkeypatch.setattr(settings_service, "is_mock_mode", lambda: False)
     monkeypatch.setattr(sync_service, "get_adapter", lambda: fake)
     today = date(2026, 9, 8)
-    # 12 天 → 3 段 (4/4/4)；每段覆盖无缝隙
+    # 12 天 → 3 段 (4/4/4)；每段覆盖无缝隙（分段并行完成顺序不定，按区间排序比对）
     days = sync_service._fetch_health_chunks(fake, today - timedelta(days=11), today)
     assert len(days) == 12
-    assert [f"{s}→{e}" for s, e in fake.health_calls] == [
+    assert sorted(f"{s}→{e}" for s, e in fake.health_calls) == [
         "2026-08-28→2026-08-31", "2026-09-01→2026-09-04", "2026-09-05→2026-09-08"]
     # 同日范围：并发切段无意义，走串行单次调用
     fake.health_calls.clear()

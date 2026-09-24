@@ -1,11 +1,16 @@
 """当前水平预估（各距离）：综合手表 VO2max、近几个月配速-心率趋势、
-间歇/节奏跑能力与近期比赛成绩，输出各距离等效成绩与建议 VDOT。
+间歇/节奏跑能力、近一月长跑最快分段与近期比赛成绩，输出各距离等效成绩
+与建议 VDOT。
 
 设计参考手表/训练平台的能力模型：
-- 比赛成绩 = 硬证据（权重最高）
+- 比赛成绩 = 硬证据（权重随距今时间衰减：60 天内全额，180 天降到下限）
 - 手表 VO2max = 长期能力底数
-- 阈值配速（88% HRmax 对应的配速）来自近 90 天配速-心率回归，反映有氧能力趋势
-- 间歇 work 段配速反映最大摄氧量上限
+- 阈值配速（88% HRmax 对应的配速）来自近 90 天配速-心率加权回归（半衰期
+  28 天），反映当下有氧能力趋势
+- 间歇 work 段配速反映最大摄氧量上限（近期课加权主导）
+- 近一月长跑滑窗切出的最快分段（Best Effort）= 当下能力证据
+各分量样本均按距今半衰期加权（第十八批）：近期训练主导预估、旧数据兜底，
+预估随每一次训练即时灵敏更新。
 纯函数层：接收活动列表与档案读数，不碰 DB。
 """
 from __future__ import annotations
@@ -98,6 +103,27 @@ HR_TREND_WINDOW_DAYS = 180
 HR_TREND_VDOT_PER_BPM = 0.35   # 同一配速下心率每降 1 bpm ≈ 0.35 VDOT（保守经验值）
 HR_TREND_ADJ_MIN = -0.5        # 心率上升惩罚下限（天气/疲劳也可能抬心率，不重罚）
 HR_TREND_ADJ_MAX = 1.5         # 进步奖励上限（趋势是软证据，保守加分）
+# ---- 时间衰减权重（第十八批）：预估更灵敏捕捉近期训练、更灵敏更新 ----
+# 各分量在窗口内不再等权聚合：样本按距今半衰期衰减（0.5^(age/hl)），
+# 加权中位/加权 Theil-Sen 让近几周训练主导、旧数据只作兜底底数——进步
+# 不被旧样本稀释、退步不被旧成绩拖住（真实库曾见 152 个旧有氧样本把
+# HRR 分量钉在 4:50/km，而近期间歇已跑进 3:32/km）。
+TREND_HALF_LIFE_DAYS = 28      # 阈值回归 / 巡航分量
+INTERVAL_HALF_LIFE_DAYS = 30   # 间歇分量
+QT_HALF_LIFE_DAYS = 14         # 专项强度课（35 天窗口内再偏最近两周）
+# 近一月长跑最快分段（Best Effort）分量：滑窗切出的「当下」能力证据
+EFFORT_WINDOW_DAYS = 30
+EFFORT_HALF_LIFE_DAYS = 14
+EFFORT_WEIGHT = 0.14
+# 比赛时效：60 天内全额计权、上限 +2；此后线性衰减到 180 天（权重下限
+# 0.12、上限放宽到 +3.5）——旧比赛不该把当下水平钉死（真实库曾见半马
+# 53.5+2 把预估钉在 55.5，而巡航/间歇证据已达 56.5/55.0）
+RACE_WEIGHT = 0.28
+RACE_FULL_DAYS = 60
+RACE_WEIGHT_FLOOR = 0.12
+RACE_CAP_BASE = 2.0
+RACE_CAP_GROW = 1.5
+RACE_CAP_GROW_DAYS = 120
 
 
 def _theil_sen(xs: list[float], ys: list[float]) -> tuple[float, float] | None:
@@ -122,6 +148,86 @@ def _theil_sen(xs: list[float], ys: list[float]) -> tuple[float, float] | None:
     slope = slopes[len(slopes) // 2]
     intercepts = sorted(ys[i] - slope * xs[i] for i in range(n))
     return slope, intercepts[len(intercepts) // 2]
+
+
+def _recency(age: float, half_life: float) -> float:
+    """半衰期权重：age 天前的样本权重 0.5^(age/hl)（今天=1，hl 天前=0.5）。"""
+    return 0.5 ** (max(age, 0.0) / half_life)
+
+
+def _rec_age_days(rec: dict, as_of: date | None) -> float:
+    """记录（date iso 串 | 数值时间戳 | start_ts）距 as_of 的天数；解析失败 0。"""
+    day = None
+    v = rec.get("date")
+    if isinstance(v, str):
+        try:
+            day = date.fromisoformat(v[:10])
+        except ValueError:
+            day = None
+    elif isinstance(v, (int, float)):
+        day = _ts_to_day(v)
+    if day is None and rec.get("start_ts"):
+        day = _ts_to_day(rec["start_ts"])
+    if day is None:
+        return 0.0
+    return float(max(((as_of or date.today()) - day).days, 0))
+
+
+def _ts_to_day(ts) -> date | None:
+    from ..utils import dates
+    try:
+        return dates.ts_to_date(ts)
+    except Exception:
+        return None
+
+
+def _weighted_median(vals: list[float], weights: list[float]) -> float:
+    """加权中位数：按值排序累加权重，首个累计权重 ≥ 总权重一半的值。
+
+    等权时退化为普通中位数（偶数取靠前中位）；近期权重大时由近期样本主导。
+    """
+    if not vals:
+        raise ValueError("empty vals")
+    pairs = sorted(zip(vals, weights), key=lambda p: p[0])
+    total = sum(w for _, w in pairs)
+    if total <= 0:
+        return pairs[len(pairs) // 2][0]
+    acc = 0.0
+    for v, w in pairs:
+        acc += w
+        if acc >= total / 2:
+            return v
+    return pairs[-1][0]
+
+
+def _weighted_theil_sen(xs: list[float], ys: list[float],
+                        weights: list[float]) -> tuple[float, float] | None:
+    """加权 Theil-Sen：两两斜率按 min(w_i, w_j) 取加权中位（截距同理）。
+
+    min() 配对权重让含任一新近样本的配对不被完全压低（近期信号可上浮），
+    同时离群点仍被多数好对压住——GPS 漂移/心率异常样本的鲁棒性保持
+    （近期离群点权重虽高，坏对总权重仍低于全体一半）。点不足 3 或无
+    有效斜率返回 None。
+    """
+    n = len(xs)
+    if n < 3:
+        return None
+    slopes: list[tuple[float, float]] = []
+    intercepts: list[tuple[float, float]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = xs[j] - xs[i]
+            if dx != 0:
+                w = min(weights[i], weights[j])
+                slopes.append(((ys[j] - ys[i]) / dx, w))
+                # 过 (x_i,y_i)(x_j,y_j) 直线的截距 = (y_i*x_j - y_j*x_i)/(x_j - x_i)
+                intercepts.append(((ys[i] * xs[j] - ys[j] * xs[i]) / dx, w))
+    if not slopes:
+        return None
+    slope = _weighted_median([s for s, _ in slopes], [w for _, w in slopes])
+    intercept = _weighted_median([s for s, _ in intercepts],
+                                 [w for _, w in intercepts])
+    return slope, intercept
 
 
 def _vdot_for_pace(pace_s_km: float, pct: float) -> float:
@@ -154,27 +260,36 @@ def _is_interval_day(structure) -> bool:
     return sum(1 for s in segs if s.get("type") == "work") >= 2
 
 
-def threshold_pace_from_trend(activities: list[dict], max_hr: float) -> dict | None:
-    """近 90 天配速-心率线性回归 → 88% HRmax（阈值）对应配速。
+def threshold_pace_from_trend(activities: list[dict], max_hr: float,
+                              as_of: date | None = None) -> dict | None:
+    """近 90 天配速-心率加权回归 → 88% HRmax（阈值）对应配速。
 
     只采用稳定配速样本：间歇课的整场 avg_pace 被快段拉低而 avg_hr 不高，
     混入会让回归斜率失真、外推阈值配速虚高——间歇能力已由 interval_ability
-    分量单独反映，此处排除；心率 <100 的失真样本一并剔除。
+    分量单独反映，此处排除；心率 <100 的失真样本一并剔除。样本按距今
+    半衰期加权（加权 Theil-Sen）：近期训练主导回归，旧数据只兜底。
     """
     if not max_hr:
         return None
-    pts = [(a["avg_pace_s_km"], a["avg_hr"]) for a in activities
-           if a.get("avg_pace_s_km") and a.get("avg_hr")
-           and a["avg_hr"] >= TREND_MIN_HR
-           and (a.get("duration_s") or 0) >= TREND_MIN_DURATION_S
-           and TREND_PACE_MIN_S_KM <= a["avg_pace_s_km"] <= TREND_PACE_MAX_S_KM
-           and not _is_interval_day(a.get("structure"))]
+    pts = []
+    for a in activities:
+        age = _rec_age_days(a, as_of)
+        if age > 90:
+            continue
+        if (not a.get("avg_pace_s_km") or not a.get("avg_hr")
+                or a["avg_hr"] < TREND_MIN_HR
+                or (a.get("duration_s") or 0) < TREND_MIN_DURATION_S
+                or not (TREND_PACE_MIN_S_KM <= a["avg_pace_s_km"] <= TREND_PACE_MAX_S_KM)
+                or _is_interval_day(a.get("structure"))):
+            continue
+        pts.append((a["avg_pace_s_km"], a["avg_hr"],
+                    _recency(age, TREND_HALF_LIFE_DAYS)))
     if len(pts) < TREND_MIN_RUNS:
         return None
-    hrs = [h for _, h in pts]
+    hrs = [h for _, h, _ in pts]
     if max(hrs) - min(hrs) < TREND_MIN_HR_SPAN:
         return None
-    reg = _theil_sen([p for p, _ in pts], hrs)
+    reg = _weighted_theil_sen([p for p, _, _ in pts], hrs, [w for _, _, w in pts])
     if not reg:
         return None
     slope, intercept = reg
@@ -481,11 +596,13 @@ def _interval_type(works: list[dict], rests: list[dict], max_hr: float | None) -
 _PCT_BY_INTERVAL_TYPE = {"threshold": vd.T_PCT, "vo2max": vd.I_PCT, "speed": vd.R_PCT}
 
 
-def interval_ability(activities: list[dict], max_hr: float | None = None) -> dict | None:
+def interval_ability(activities: list[dict], max_hr: float | None = None,
+                     as_of: date | None = None) -> dict | None:
     """间歇能力（按刺激类型 + 恢复时间变量）：逐课先按心率/休息结构/段落
     长度识别类型（乳酸阈值/最大摄氧量/无氧冲刺），再以该类型对应 %VDOT
     反算单课 VDOT；休息越短、快段越快 → 水平越高（恢复比修正）。返回总体
-    中位数 vdot（跨类型合并抗单课噪声）与各类型分项 types，供分量与展示用。"""
+    加权中位 vdot（按距今半衰期衰减——近期课主导，跨类型合并抗单课噪声）
+    与各类型分项 types，供分量与展示用。"""
     workouts: list[dict] = []
     by_type: dict[str, list[dict]] = {"threshold": [], "vo2max": [], "speed": []}
     for a in activities:
@@ -516,26 +633,25 @@ def interval_ability(activities: list[dict], max_hr: float | None = None) -> dic
         if ratio is not None:
             v *= 1 + INTERVAL_REST_K * (INTERVAL_REST_REF - ratio)
         rec = {"vdot": v, "ratio": ratio, "pace_s_km": med_pace,
-               "n": len(works), "type": itype}
+               "n": len(works), "type": itype,
+               "age": _rec_age_days(a, as_of)}
         workouts.append(rec)
         by_type[itype].append(rec)
     if not workouts:
         return None
-    vdots = sorted(w["vdot"] for w in workouts)
-    med_v = vdots[len(vdots) // 2]
+    vw = [_recency(w["age"], INTERVAL_HALF_LIFE_DAYS) for w in workouts]
+    med_v = _weighted_median([w["vdot"] for w in workouts], vw)
     ratios = [w["ratio"] for w in workouts if w["ratio"] is not None]
     med_ratio = sorted(ratios)[len(ratios) // 2] if ratios else None
-    seg_paces = sorted(w["pace_s_km"] for w in workouts)
-    med_pace = seg_paces[len(seg_paces) // 2]
+    med_pace = _weighted_median([w["pace_s_km"] for w in workouts], vw)
 
     def _type_median(key: str) -> dict | None:
         recs = by_type[key]
         if not recs:
             return None
-        vs = sorted(r["vdot"] for r in recs)
-        ps = sorted(r["pace_s_km"] for r in recs)
-        return {"vdot": round(vs[len(vs) // 2], 1),
-                "pace_s_km": round(ps[len(ps) // 2], 1),
+        tw = [_recency(r["age"], INTERVAL_HALF_LIFE_DAYS) for r in recs]
+        return {"vdot": round(_weighted_median([r["vdot"] for r in recs], tw), 1),
+                "pace_s_km": round(_weighted_median([r["pace_s_km"] for r in recs], tw), 1),
                 "n_workouts": len(recs),
                 "n_segments": sum(r["n"] for r in recs)}
 
@@ -548,13 +664,15 @@ def interval_ability(activities: list[dict], max_hr: float | None = None) -> dic
             "vdot": round(med_v, 1), "types": types}
 
 
-def cruise_ability(activities: list[dict], max_hr: float) -> dict | None:
+def cruise_ability(activities: list[dict], max_hr: float,
+                   as_of: date | None = None) -> dict | None:
     """节奏跑/巡航能力：连续（非间歇、非比赛）15–60min 匀速跑，平均心率
-    84–94% HRmax → 阈值课特征。多课取中位配速按 T（88% VDOT）反算——
-    作为「阈值配速回归」缺失时的替代分量（同一生理信号的另一种测法）。"""
+    84–94% HRmax → 阈值课特征。多课取加权中位配速（距今半衰期衰减）按
+    T（88% VDOT）反算——作为「阈值配速回归」缺失时的替代分量（同一生理
+    信号的另一种测法）。"""
     if not max_hr:
         return None
-    paces = []
+    pts: list[tuple[float, float]] = []
     for a in activities:
         if not a.get("avg_pace_s_km") or not a.get("avg_hr"):
             continue
@@ -571,44 +689,53 @@ def cruise_ability(activities: list[dict], max_hr: float) -> dict | None:
         name = (a.get("name") or "").lower()
         if any(h in name for h in RACE_NAME_HINTS):
             continue  # 比赛/测试跑不进巡航样本
+        w = _recency(_rec_age_days(a, as_of), TREND_HALF_LIFE_DAYS)
         if (a.get("distance_m") or 0) >= 3000 and hr_ratio >= 0.88:
             for std, tol in RACE_BANDS:
                 if abs(a["distance_m"] - std) / std <= tol:
                     break  # 心率够高且距离落在标准比赛带 → 按比赛剔除
             else:
-                paces.append(a["avg_pace_s_km"])
+                pts.append((a["avg_pace_s_km"], w))
         else:
-            paces.append(a["avg_pace_s_km"])
-    if len(paces) < CRUISE_MIN_RUNS:
+            pts.append((a["avg_pace_s_km"], w))
+    if len(pts) < CRUISE_MIN_RUNS:
         return None
-    paces.sort()
-    med_pace = paces[len(paces) // 2]
-    return {"pace_s_km": round(med_pace, 1), "n_runs": len(paces),
+    med_pace = _weighted_median([p for p, _ in pts], [w for _, w in pts])
+    return {"pace_s_km": round(med_pace, 1), "n_runs": len(pts),
             "vdot": _vdot_for_pace(med_pace, vd.T_PCT)}
 
 
-def hrr_ability(activities: list[dict], max_hr: float, rest_hr: float) -> dict | None:
-    """储备心率(HRR)对应配速：有氧样本的 配速~HRR 回归 → 70% HRR 对应配速。
+def hrr_ability(activities: list[dict], max_hr: float, rest_hr: float,
+                as_of: date | None = None) -> dict | None:
+    """储备心率(HRR)对应配速：有氧样本的 配速~HRR 加权回归 → 70% HRR 对应配速。
 
     HRR 剔除了静息心率的个体差异与波动，比绝对心率更可比；同一 HRR 下
     配速更快 = 有氧能力更强。%HRR≈%VO2max（Karvonen），换算 %vVO2 后反算
-    VDOT。同样排除含 work 段的间歇日（整场配速被快段拉低失真）。
+    VDOT。同样排除含 work 段的间歇日（整场配速被快段拉低失真）；样本按
+    距今半衰期加权（加权 Theil-Sen），近期有氧跑主导。
     """
     if not max_hr or not rest_hr or max_hr <= rest_hr:
         return None
-    pts = [(a["avg_pace_s_km"], (a["avg_hr"] - rest_hr) / (max_hr - rest_hr))
-           for a in activities
-           if a.get("avg_pace_s_km") and a.get("avg_hr")
-           and (a.get("duration_s") or 0) >= TREND_MIN_DURATION_S
-           and TREND_PACE_MIN_S_KM <= a["avg_pace_s_km"] <= TREND_PACE_MAX_S_KM
-           and not _is_interval_day(a.get("structure"))]
+    pts = []
+    for a in activities:
+        age = _rec_age_days(a, as_of)
+        if age > 90:
+            continue
+        if (not a.get("avg_pace_s_km") or not a.get("avg_hr")
+                or (a.get("duration_s") or 0) < TREND_MIN_DURATION_S
+                or not (TREND_PACE_MIN_S_KM <= a["avg_pace_s_km"] <= TREND_PACE_MAX_S_KM)
+                or _is_interval_day(a.get("structure"))):
+            continue
+        pts.append((a["avg_pace_s_km"],
+                    (a["avg_hr"] - rest_hr) / (max_hr - rest_hr),
+                    _recency(age, TREND_HALF_LIFE_DAYS)))
     if len(pts) < TREND_MIN_RUNS:
         return None
-    hrrs = [h for _, h in pts]
+    hrrs = [h for _, h, _ in pts]
     if max(hrrs) - min(hrrs) < HRR_MIN_SPAN:
         return None
     # x=HRR, y=配速：HRR 越高配速越快（斜率负）；异常斜率弃用
-    reg = _theil_sen(hrrs, [p for p, _ in pts])
+    reg = _weighted_theil_sen(hrrs, [p for p, _, _ in pts], [w for _, _, w in pts])
     if not reg or reg[0] >= 0:
         return None
     slope, intercept = reg
@@ -650,8 +777,9 @@ def quality_workout_evidence(activities: list[dict], max_hr: float | None,
     选择「稳定跑完了的」高强度课：整场平均心率在 82–95% HRmax（心率佐证
     确实在阈值带内）、配速 3:00–8:20/km、时长 10–75 min、非间歇日。单课
     按 T 强度反算 VDOT（保守：若实际以更高强度完成，等效阈值只会更快），
-    取中位数抗个别失真课。返回 None 表示样本不足（<QT_MIN_RUNS）——
-    此时该分量不参与，不给旧比赛上限抬线。
+    取加权中位（距今半衰期 14 天——35 天窗口内再偏最近两周）抗个别失真课。
+    返回 None 表示样本不足（<QT_MIN_RUNS）——此时该分量不参与，不给旧
+    比赛上限抬线。
     """
     if not max_hr:
         return None
@@ -660,7 +788,9 @@ def quality_workout_evidence(activities: list[dict], max_hr: float | None,
         from ..utils import dates
         lo_ts = dates.date_to_ts(as_of - timedelta(days=QT_WINDOW_DAYS))
     votes: list[float] = []
+    vweights: list[float] = []
     paces: list[float] = []
+    pweights: list[float] = []
     hrs: list[float] = []
     for a in activities:
         if (not a.get("avg_pace_s_km") or not a.get("avg_hr")
@@ -675,16 +805,47 @@ def quality_workout_evidence(activities: list[dict], max_hr: float | None,
         pct_hr = a["avg_hr"] / max_hr
         if not (QT_HR_WIN[0] <= pct_hr <= QT_HR_WIN[1]):
             continue
+        w = _recency(_rec_age_days(a, as_of), QT_HALF_LIFE_DAYS)
         votes.append(_vdot_for_pace(a["avg_pace_s_km"], vd.T_PCT))
+        vweights.append(w)
         paces.append(a["avg_pace_s_km"])
+        pweights.append(w)
         hrs.append(a["avg_hr"])
     if len(votes) < QT_MIN_RUNS:
         return None
-    vs = sorted(votes)
-    ps = sorted(paces)
-    return {"vdot": vs[len(vs) // 2], "n_runs": len(votes),
-            "pace_s_km": ps[len(ps) // 2],
+    return {"vdot": _weighted_median(votes, vweights), "n_runs": len(votes),
+            "pace_s_km": _weighted_median(paces, pweights),
             "hr_lo": int(min(hrs)), "hr_hi": int(max(hrs))}
+
+
+def _recent_efforts_evidence(year_bests: list[dict] | None,
+                             as_of: date | None = None) -> dict | None:
+    """近一月长跑最快分段（Best Effort）分量（第十八批）。
+
+    year_bests（distance_bests 输出）中 source=="effort" 且距今 ≤
+    EFFORT_WINDOW_DAYS 的分段是「当下」能力证据——比旧比赛/手表读数更贴
+    现状，滑窗心率门（≥82% 最大心率）已防散步/漂移段。取加权中位
+    （半衰期 14 天）抗单次失真段；无近期分段返回 None。
+    """
+    if not year_bests:
+        return None
+    recs = []
+    for r in year_bests:
+        if r.get("source") != "effort" or not r.get("vdot"):
+            continue
+        age = _rec_age_days(r, as_of)
+        if age > EFFORT_WINDOW_DAYS:
+            continue
+        recs.append((r, age))
+    if not recs:
+        return None
+    v = _weighted_median([r["vdot"] for r, _ in recs],
+                         [_recency(a, EFFORT_HALF_LIFE_DAYS) for _, a in recs])
+    # 取与中位值最接近的记录做展示标签
+    label = min(recs, key=lambda ra: abs(ra[0]["vdot"] - v))[0]
+    return {"vdot": round(v, 1), "n_efforts": len(recs),
+            "distance": label.get("distance"), "age": int(min(a for _, a in recs)),
+            "best_seconds": label.get("best_seconds")}
 
 
 def _weighted(components: list[dict]) -> float | None:
@@ -709,24 +870,29 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                 best_seconds/source）；显著快于当前估计时给保守加分（带时间衰减）。
     plan_exec: quality_execution() 输出（课表质量课 done/total/ratio）；
                代表「课程内容 + 完成情况」——训练分量（阈值趋势/HRR/间歇/
-               完成度）合计权重占大头，近期训练主导估计；该调整在趋势之后、
-               PB 加分之前施加（缺勤多 → 下调，完成好 → 小幅上调）。
+               最快分段/完成度）合计权重占大头，近期训练主导估计；该调整
+               在趋势之后、PB 加分之前施加（缺勤多 → 下调，完成好 → 小幅上调）。
+    第十八批：各分量样本按距今半衰期加权（阈值回归/HRR/巡航/间歇/专项课），
+    比赛权重与上限容差随距今时间衰减（60 天内 +2，180 天放宽到 +3.5），
+    year_bests 中近一月 fastest segments 作为独立分量参与——预估随每次
+    训练即时灵敏更新，旧数据只兜底。
     返回 {"vdot", "predictions", "zones", "evidence", "max_hr", "as_of"}；
     无任何依据时 vdot=None。
     """
     max_hr = estimate_max_hr(profile_max_hr, activities)
     race = best_recent_race(activities, max_hr)
-    threshold = threshold_pace_from_trend(activities, max_hr) if max_hr else None
-    intervals = interval_ability(activities, max_hr)
-    hrr = hrr_ability(activities, max_hr, rest_hr) if max_hr and rest_hr else None
+    threshold = threshold_pace_from_trend(activities, max_hr, as_of) if max_hr else None
+    intervals = interval_ability(activities, max_hr, as_of)
+    hrr = hrr_ability(activities, max_hr, rest_hr, as_of) if max_hr and rest_hr else None
     quality = quality_workout_evidence(activities, max_hr, as_of) if max_hr else None
+    efforts = _recent_efforts_evidence(year_bests, as_of)
     # 阈值分量三来源按可靠性递补：心率-配速回归（整场稳定样本，最全）→
     # 节奏/巡航跑中位配速（连续匀速课）→ 乳酸阈值型间歇（短休长段）。
     # 后者即便存在也仅作替代——混入会让单一阈值槽被多次加权。
     threshold_src = None
     t_typed = (intervals.get("types") or {}).get("threshold") if intervals else None
     if not threshold:
-        cruise = cruise_ability(activities, max_hr) if max_hr else None
+        cruise = cruise_ability(activities, max_hr, as_of) if max_hr else None
         if cruise:
             threshold, threshold_src = cruise, "cruise"
         elif t_typed:
@@ -740,12 +906,23 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     # 退居硬底数。_weighted 按权重占比归一化——缺失分量自动放大剩余占比。
     evidence: list[dict] = []
     components: list[dict] = []
+    race_age = _rec_age_days(race, as_of) if race else None
     if race:
-        components.append({"vdot": race["vdot"], "weight": 0.28, "kind": "race"})
+        # 比赛权重随龄衰减（第十八批）：60 天内全额 0.28，180 天线性降到
+        # 0.12——旧比赛仍有资格做证据，但不再与近期比赛等权
+        race_w = RACE_WEIGHT if race_age <= RACE_FULL_DAYS else max(
+            RACE_WEIGHT_FLOOR,
+            RACE_WEIGHT - (RACE_WEIGHT - RACE_WEIGHT_FLOOR)
+            * (race_age - RACE_FULL_DAYS) / (180 - RACE_FULL_DAYS))
+        race_detail = f"近期最佳比赛 {race['distance_m']}m"
+        if race_age > RACE_FULL_DAYS:
+            race_detail += f"（{int(race_age)} 天前，权重按时间衰减）"
+        components.append({"vdot": race["vdot"], "weight": round(race_w, 3),
+                           "kind": "race"})
         evidence.append({
             "source": "recent_race",
             "vdot": race["vdot"],
-            "detail": f"近期最佳比赛 {race['distance_m']}m",
+            "detail": race_detail,
             "race": race,
         })
     if vo2max:
@@ -757,30 +934,32 @@ def compute_ability(activities: list[dict], vo2max: float | None,
         if threshold_src == "cruise":
             evidence.append({"source": "cruise_ability", "vdot": threshold["vdot"],
                              "detail": f"节奏/巡航跑中位配速 {_fmt_pace(threshold['pace_s_km'])}/km"
-                                       f"（{threshold['n_runs']} 课，平均心率 84–94% HRmax）",
+                                       f"（{threshold['n_runs']} 课，平均心率 84–94% HRmax，"
+                                       f"近期样本加权）",
                              "pace_s_km": threshold["pace_s_km"]})
         elif threshold_src == "t_intervals":
             evidence.append({"source": "t_intervals", "vdot": threshold["vdot"],
                              "detail": f"乳酸阈值型间歇（短休长段）中位配速 "
                                        f"{_fmt_pace(threshold['pace_s_km'])}/km"
-                                       f"（{threshold['n_runs']} 课）",
+                                       f"（{threshold['n_runs']} 课，近期样本加权）",
                              "pace_s_km": threshold["pace_s_km"]})
         else:
             evidence.append({"source": "threshold_trend", "vdot": threshold["vdot"],
                              "detail": f"阈值配速 {_fmt_pace(threshold['pace_s_km'])}/km"
-                                       f"（{threshold['n_runs']} 次心率-配速回归）",
+                                       f"（{threshold['n_runs']} 次心率-配速回归，"
+                                       f"近期样本加权）",
                              "pace_s_km": threshold["pace_s_km"]})
     if hrr:
         components.append({"vdot": hrr["vdot"], "weight": 0.10, "kind": "hrr"})
         evidence.append({"source": "hrr_pace", "vdot": hrr["vdot"],
                          "detail": f"{int(hrr['hrr_pct'] * 100)}% HRR 对应配速 "
                                    f"{_fmt_pace(hrr['pace_s_km'])}/km"
-                                   f"（{hrr['n_runs']} 次有氧样本，静息心率 {hrr['rest_hr']}）",
+                                   f"（{hrr['n_runs']} 次有氧样本加权，静息心率 {hrr['rest_hr']}）",
                          "pace_s_km": hrr["pace_s_km"]})
     if intervals:
         components.append({"vdot": intervals["vdot"], "weight": 0.12, "kind": "interval"})
         detail = (f"间歇 {_fmt_pace(intervals['pace_s_km'])}/km"
-                  f"（{intervals['n_workouts']} 课 {intervals['n_segments']} 段")
+                  f"（{intervals['n_workouts']} 课 {intervals['n_segments']} 段，近期样本加权")
         if intervals.get("rest_ratio") is not None:
             detail += f"，休息/快跑比 {intervals['rest_ratio']}（越短水平越高）"
         types = intervals.get("types") or {}
@@ -798,13 +977,23 @@ def compute_ability(activities: list[dict], vo2max: float | None,
             "detail": f"近一月专项强度课 {quality['n_runs']} 堂中位配速 "
                       f"{_fmt_pace(quality['pace_s_km'])}/km"
                       f"（平均心率 {quality['hr_lo']}–{quality['hr_hi']} bpm，"
-                      f"82–95% HRmax 阈值带内稳定完成）",
+                      f"82–95% HRmax 阈值带内稳定完成，近期样本加权）",
         })
-    # 缺比赛时重新分配权重：训练分量（阈值趋势/HRR/间歇）占大头绝对主导，
-    # 手表 VO2max 只作底数（无比赛在场时读数的「上限」属性最值得怀疑）
+    if efforts:
+        components.append({"vdot": efforts["vdot"], "weight": EFFORT_WEIGHT,
+                           "kind": "efforts"})
+        evidence.append({
+            "source": "recent_efforts", "vdot": efforts["vdot"],
+            "detail": f"近一月长跑最快分段 {efforts['distance']} "
+                      f"{_fmt_time(efforts['best_seconds'])}"
+                      f"（{efforts['age']} 天前）等效 VDOT {efforts['vdot']}",
+        })
+    # 缺比赛时重新分配权重：训练分量（阈值趋势/HRR/间歇/最快分段）占大头
+    # 绝对主导，手表 VO2max 只作底数（无比赛在场时读数的「上限」属性最
+    # 值得怀疑）
     if not race and components:
-        weights = {"vo2max": 0.12, "threshold": 0.32, "quality": 0.22,
-                   "hrr": 0.16, "interval": 0.18, "race": 0.40}
+        weights = {"vo2max": 0.10, "threshold": 0.30, "quality": 0.20,
+                   "hrr": 0.14, "interval": 0.16, "efforts": 0.15, "race": 0.40}
         for c in components:
             c["weight"] = weights[c["kind"]]
     vdot_val = _weighted(components)
@@ -869,15 +1058,19 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                                   f"VDOT {pb['vdot']} 高于当前估计 → 上调 "
                                   f"+{boost:.1f}（PB 加成，按 {int(recency * 100)}% 计权）",
                     })
-    # 上限钳制（条件放松）：预估不高于「已跑出的最佳比赛成绩等效 VDOT + 2」，
-    # 防手表 VO2max 读数偏高（如 63 vs 比赛等效 48.9）时把课表配速拉到无法
-    # 完成的水平。但旧比赛是几个月前的状态——近一月持续稳定完成专项区间
-    # 强度课（≥QT_MIN_RUNS 堂，阈值带配速心率佐证）且训练证据中位高于旧
-    # 上限时，按 max(旧上限, min(未封顶加权, 训练中位 + QT_LIFT)) 抬线，
-    # 让训练进步不被过期比赛成绩钉死；偶发快课/单堂冲刺不给抬线。
+    # 上限钳制（条件放松）：预估不高于「已跑出的最佳比赛成绩等效 VDOT +
+    # 上限容差」，防手表 VO2max 读数偏高（如 63 vs 比赛等效 48.9）时把课表
+    # 配速拉到无法完成的水平。容差本身随比赛年龄放宽（第十八批）：60 天内
+    # +2.0，180 天线性放宽到 +3.5——旧比赛不再把当下水平钉死。另外近一月
+    # 持续稳定完成专项区间强度课（≥QT_MIN_RUNS 堂，阈值带配速心率佐证）
+    # 且训练证据中位高于旧上限时，按 max(旧上限, min(未封顶加权, 训练中位
+    # + QT_LIFT)) 抬线，让训练进步不被过期比赛成绩钉死；偶发快课/单堂
+    # 冲刺不给抬线。
     cap_note = None
     if race and vdot_val:
-        race_cap = race["vdot"] + 2.0
+        cap_slack = RACE_CAP_BASE + RACE_CAP_GROW * max(
+            0.0, race_age - RACE_FULL_DAYS) / RACE_CAP_GROW_DAYS
+        race_cap = race["vdot"] + cap_slack
         uncapped = vdot_val
         cand = None
         if quality:
@@ -888,14 +1081,16 @@ def compute_ability(activities: list[dict], vo2max: float | None,
             vdot_val = round(lifted, 1)
             if lifted > race_cap + 0.05:
                 cap_note = ("专项区间强度课持续达成且配速中位高于旧比赛水平 "
-                            f"（{race['vdot']:.0f} 等效 → 上限 {race_cap:.0f}）"
+                            f"（{race['vdot']:.0f} 等效 → 上限 {race_cap:.1f}）"
                             f"，按训练证据抬线至 {lifted:.1f}")
         else:
             vdot_val = round(min(vdot_val, race_cap), 1)
             if quality and vdot_val >= race_cap - 0.05:
                 cap_note = ("仍以近期最佳比赛等效 VDOT 为硬上限"
-                            f"（{race['vdot']:.0f} + 2 = {race_cap:.0f}）；"
-                            "近一月专项课训练证据未越过该线")
+                            f"（{race['vdot']:.0f} 等效，上限 {race_cap:.1f}")
+                if cap_slack > RACE_CAP_BASE:
+                    cap_note += "，旧比赛上限已按时间放宽"
+                cap_note += "）；近一月专项课训练证据未越过该线"
     if cap_note:
         evidence.append({"source": "cap_check", "vdot": vdot_val,
                          "detail": "上限校验：" + cap_note})

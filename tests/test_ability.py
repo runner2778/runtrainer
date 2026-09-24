@@ -132,10 +132,11 @@ def test_interval_rest_ratio_adjusts_vdot():
     assert "vo2max" not in ev_short["types"]
     assert "threshold" not in ev_long["types"]
     assert ev_long["types"]["vo2max"]["n_workouts"] == 1
-    # 混合两课：中位数聚合（偶数取上中位 → 短休课拉高）
+    # 混合两课：加权中位按距今半衰期——长休课（4 天前）比短休课（6 天前）
+    # 更近，近期训练优先，由长休课主导（旧中位聚合取上中位是短休课拉高）
     mixed = ab.interval_ability(short_rest + long_rest)
     assert mixed["n_workouts"] == 2
-    assert abs(mixed["vdot"] - round(base_t * 1.08, 1)) < 0.21
+    assert abs(mixed["vdot"] - round(base_i * (1 + 0.2 * (0.6 - 400 / 600)), 1)) < 0.21
 
 
 def test_interval_hr_gate_labels_high_hr_as_vo2max():
@@ -569,3 +570,155 @@ def test_quality_execution_counts_auto_matched():
     assert r1 == {"done": 3, "total": 4, "ratio": 0.75}
     r2 = ab.quality_execution(rows, auto_done={3})        # skipped 不算
     assert r2["done"] == 1 and r2["total"] == 4
+
+
+# ---- 第十八批：时间衰减权重 / 比赛时效 / 近月最快分段 ----
+
+def test_recency_and_weighted_median_helpers():
+    """半衰期权重与加权中位：今天 1.0、一个半衰期 0.5；权重过半者胜。"""
+    assert ab._recency(0, 28) == 1.0
+    assert abs(ab._recency(28, 28) - 0.5) < 1e-12
+    assert abs(ab._recency(56, 28) - 0.25) < 1e-12
+    assert ab._weighted_median([10, 20], [1, 1]) == 10       # 等权 → 靠前中位
+    assert ab._weighted_median([10, 20], [0.9, 0.1]) == 10   # 权重过半者胜
+    assert ab._weighted_median([5, 15, 25], [1, 1, 1]) == 15
+
+
+def test_trend_recency_weights_recent_block():
+    """阈值回归按半衰期加权：旧慢段（斜率 −0.4）+ 新快段（斜率 −0.5）混合时
+    近期块权重过半，结果 ≈ 仅近期块回归的 281.3 s/km；近期样本不足时
+    保持保守（≈ 旧段单独回归 350.4）。"""
+    acts = [_act(80 - i * 5, p, h, 210, 10000, 3000, name=f"旧跑 {i}")
+            for i, (p, h) in enumerate(
+                [(460, 126), (450, 130), (440, 134), (430, 138),
+                 (420, 142), (410, 146)])]
+    acts += [_act(14 - i * 2, p, h, 210, 10000, 3000, name=f"新跑 {i}")
+             for i, (p, h) in enumerate(
+                 [(331, 145), (321, 150), (311, 155), (301, 160),
+                  (291, 165), (283, 169)])]
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    thr = next(ev for ev in est["evidence"] if ev["source"] == "threshold_trend")
+    # 88%×193=169.84 → 近期线 (169.84−310.5)/(−0.5)=281.3；旧线 350.4
+    assert abs(thr["pace_s_km"] - 281.3) < 2
+    assert thr["pace_s_km"] < 350.4 - 40
+    # 3 条近期快样本同时落在专项课心率带（82–95%）→ quality 分量参与
+    # （无比赛权重表：阈值 0.30 / 专项课 0.20），结果仍明显快于旧段水平
+    q_ev = next(ev for ev in est["evidence"] if ev["source"] == "quality_workouts")
+    assert abs(est["vdot"] - round((thr["vdot"] * 0.30 + q_ev["vdot"] * 0.20) / 0.50, 1)) < 0.11
+    assert est["vdot"] < 45
+    # 反向：只有 2 条近期快样本 → 权重不足过半，仍由旧段主导（防单次漂移）
+    acts2 = [_act(80 - i * 5, p, h, 210, 10000, 3000, name=f"旧跑 {i}")
+             for i, (p, h) in enumerate(
+                 [(460, 126), (450, 130), (440, 134), (430, 138),
+                  (420, 142), (410, 146), (400, 150), (390, 154)])]
+    acts2 += [_act(5, 291, 165, 210, 10000, 3000, name="新跑 a"),
+              _act(3, 283, 169, 210, 10000, 3000, name="新跑 b")]
+    est2 = ab.compute_ability(acts2, None, profile_max_hr=193)
+    thr2 = next(ev for ev in est2["evidence"] if ev["source"] == "threshold_trend")
+    assert abs(thr2["pace_s_km"] - 350.4) < 2
+
+
+def test_trend_weighting_keeps_outlier_robustness():
+    """加权回归仍抗离群：心率异常低的假样本即使最近（权重最高），坏对
+    总权重仍低于一半——回归不被拉偏。"""
+    acts = []
+    for i, (pace, hr) in enumerate([(310, 145), (300, 150), (295, 152.5), (290, 155),
+                                    (280, 160), (270, 165), (265, 167.5), (260, 170)]):
+        acts.append(_act(80 - i * 5, pace, hr, 210, 10000, 3000, name=f"跑 {i}"))
+    # 5/3 天前（半衰期权重最高）的心率异常样本：配速在窗口内、心率远低于真值
+    acts.append(_act(5, 300, 110, 210, 6000, 1400, name="心率漂移"))
+    acts.append(_act(3, 306, 115, 210, 6000, 1600, name="心率漂移2"))
+    est = ab.compute_ability(acts, None, profile_max_hr=193)
+    thr = next(ev for ev in est["evidence"] if ev["source"] == "threshold_trend")
+    # 88%×193=169.84 → 真线 (169.84−300)/(−0.5)=260.3
+    assert abs(thr["pace_s_km"] - 260.3) < 3
+    assert thr["pace_s_km"] > 255
+
+
+def test_interval_recent_workout_dominates():
+    """间歇分量近期课主导：3 堂 60–90 天前的旧慢课 + 1 堂 4 天前的新快课
+    → 加权中位（半衰期 30 天）落到新快课水平（旧课权重 0.55 < 一半）。"""
+    slow = [{"type": "work", "distance_m": 800, "elapsed_s": 232, "pace_s_km": 290},
+            {"type": "work", "distance_m": 800, "elapsed_s": 233, "pace_s_km": 291},
+            {"type": "work", "distance_m": 800, "elapsed_s": 231, "pace_s_km": 289}]
+    fast = [{"type": "work", "distance_m": 800, "elapsed_s": 200, "pace_s_km": 250},
+            {"type": "work", "distance_m": 800, "elapsed_s": 201, "pace_s_km": 251},
+            {"type": "work", "distance_m": 800, "elapsed_s": 199, "pace_s_km": 249}]
+    acts = [_act(90, 320, 140, 185, 8000, 43 * 60, structure=slow),
+            _act(75, 320, 140, 185, 8000, 43 * 60, structure=slow),
+            _act(60, 320, 140, 185, 8000, 43 * 60, structure=slow),
+            _act(4, 320, 140, 185, 8000, 43 * 60, structure=fast)]
+    ev = ab.interval_ability(acts)
+    recent_v = round(ab._vdot_for_pace(250, vd.I_PCT), 1)
+    assert abs(ev["vdot"] - recent_v) < 0.2
+    assert ev["n_workouts"] == 4
+
+
+def test_race_weight_decays_with_age():
+    """比赛权重随龄衰减：同一条 10K（42:00）在 10 天前 vs 150 天前——
+    旧比赛对预估的向心力更弱，结果更靠近手表读数；文案标注时间衰减。"""
+    def est_for(days_ago):
+        return ab.compute_ability(
+            [_act(days_ago, 259, 182, 200, 9800, 42 * 60)], 50.0)
+    est_new = est_for(10)
+    est_old = est_for(150)
+    race_vdot = round(vd.estimate_vdot(9800, 42 * 60), 1)
+    # 读数 50 高于比赛等效 47.9：比赛是把结果往下拉的锚。新比赛权重 0.28
+    # （vs 读数 0.16）拉得狠；旧比赛衰减到 0.16 → 向心力更弱、结果更贴读数
+    assert abs(est_new["vdot"] - race_vdot) < abs(est_old["vdot"] - race_vdot)
+    assert abs(est_old["vdot"] - 50.0) < abs(est_new["vdot"] - 50.0)
+    assert est_old["vdot"] > est_new["vdot"]
+    ev_new = next(e for e in est_new["evidence"] if e["source"] == "recent_race")
+    assert "衰减" not in ev_new["detail"]
+    ev_old = next(e for e in est_old["evidence"] if e["source"] == "recent_race")
+    assert "衰减" in ev_old["detail"]
+
+
+def test_old_race_cap_relaxes_with_age():
+    """旧比赛上限按时间放宽：150 天前 10K（55:00，VDOT≈34.9）+ 近期
+    5:45/km 强度课（VDOT≈34.4，低于旧比赛不触发抬线）+ 虚高读数 63 →
+    上限 = 比赛 + 3.1（旧规则 +2 会钉死），预估被钳到放宽后的上限。"""
+    acts = [_q(345, d) for d in (1, 3, 6)]
+    acts.append(_act(150, 337, 182, 200, 9800, 55 * 60))  # 10K 55:00 ≈ VDOT 34.9
+    est = ab.compute_ability(acts, 63.0, profile_max_hr=193)
+    race_ev = next(ev for ev in est["evidence"] if ev["source"] == "recent_race")
+    q_ev = next(ev for ev in est["evidence"] if ev["source"] == "quality_workouts")
+    slack = ab.RACE_CAP_BASE + ab.RACE_CAP_GROW * (150 - ab.RACE_FULL_DAYS) / ab.RACE_CAP_GROW_DAYS
+    assert abs(slack - 3.125) < 1e-9
+    cap = race_ev["vdot"] + slack
+    # 加权（旧比赛 0.16 / 巡航阈值 0.22 / 强度课 0.16 / 读数 0.16）超过放宽上限 → 钳制
+    weighted = round((race_ev["vdot"] * ab.RACE_WEIGHT_FLOOR
+                      + q_ev["vdot"] * 0.22 + q_ev["vdot"] * 0.16 + 63 * 0.16)
+                     / (ab.RACE_WEIGHT_FLOOR + 0.22 + 0.16 + 0.16), 1)
+    assert weighted > cap
+    assert abs(est["vdot"] - round(cap, 1)) < 0.11
+    # 旧规则 race+2 已挡不住读数——上限本身随比赛变旧而抬升
+    assert est["vdot"] > race_ev["vdot"] + ab.RACE_CAP_BASE + 0.05
+    cap_ev = next(ev for ev in est["evidence"] if ev["source"] == "cap_check")
+    assert "放宽" in cap_ev["detail"]
+
+
+def test_recent_efforts_component_boosts_estimate():
+    """近一月长跑最快分段（effort）作为独立分量参与预估并出证据。"""
+    d = dates.today() - timedelta(days=10)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 50.5}
+    est = ab.compute_ability([], 50.0, year_bests=[eff])
+    ev = next(e for e in est["evidence"] if e["source"] == "recent_efforts")
+    assert "最快分段" in ev["detail"] and "10K" in ev["detail"]
+    # 无比赛权重表：读数 0.10 + 分段 0.15 → (50×0.10+50.5×0.15)/0.25 = 50.3
+    # （分段与读数差 0.2 ≤ PB_MIN_GAP，不触发 PB 加成——只测分量本身）
+    assert abs(est["vdot"] - round((50 * 0.10 + 50.5 * 0.15) / 0.25, 1)) < 0.11
+    assert est["vdot"] > 50.0
+
+
+def test_stale_efforts_not_used():
+    """最快分段超过 30 天窗口 → 不进预估分量（旧分段不代表当下水平）；
+    PB 加成是另一条通路，一年内的记录仍按 PB 规则计。"""
+    d = dates.today() - timedelta(days=60)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 55.0}
+    est = ab.compute_ability([], 50.0, year_bests=[eff])
+    assert not any(e["source"] == "recent_efforts" for e in est["evidence"])
+    # PB 加成仍生效：gap 5.0×0.35=1.75 → 封顶 +1.5 → 51.5
+    assert est["vdot"] == 51.5

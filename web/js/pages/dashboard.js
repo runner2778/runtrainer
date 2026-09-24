@@ -322,7 +322,8 @@ export function initDashboard() {
                interval_ability: '间歇能力', quality_workouts: '近期专项强度课',
                cap_check: '上限校验', year_best: '近一年最佳',
                hr_trend: '配速-心率趋势',
-               plan_execution: '课表完成度' }[src] || src;
+               plan_execution: '课表完成度',
+               recent_efforts: '近期最快分段' }[src] || src;
     },
     weekLoadNote() {
       const w = (this.d || {}).week_load;
