@@ -143,6 +143,12 @@ const HTML = `
           <span>中国区账号（connect.garmin.cn 独立服务器）</span>
         </label>
       </div>
+      <div class="form-row">
+        <label class="flex">
+          <input type="checkbox" style="width:auto" x-model="autoSyncEnabled" @change="saveAutoSync()">
+          <span>自动同步（应用开着时每 5 分钟拉取 Garmin 新数据，成绩预测与心率对照表自动刷新）</span>
+        </label>
+      </div>
       <p class="muted mt8">官方 Health API 暂不接受新申请，本应用通过账号凭据自动拉取数据；若同步失败可随时手动导入 FIT 文件。</p>
     </div>
 
@@ -199,6 +205,7 @@ export function initSettings() {
     garminPassword: '',
     hasGarminPassword: false,
     garminCn: true,
+    autoSyncEnabled: true,
     aiProvider: 'deepseek',
     aiProviders: [],
     aiKeys: {},
@@ -218,6 +225,7 @@ export function initSettings() {
       this.garminUsername = data.garmin_username || '';
       this.hasGarminPassword = data.has_garmin_password;
       this.garminCn = data.garmin_cn;
+      this.autoSyncEnabled = data.auto_sync_enabled;
       this.aiProvider = data.ai_provider || 'deepseek';
       this.aiProviders = data.ai_providers || [];
       this.aiKeys = data.ai_keys || {};
@@ -396,5 +404,9 @@ export function initSettings() {
       this.$dispatch('toast', { text: this.aiWebSearch ? '已开启联网检索（知识类问题生效）' : '已关闭联网检索' });
     },
     async saveGarminCn() { await tryCall('set_setting', 'garmin_cn', this.garminCn ? '1' : '0'); },
+    async saveAutoSync() {
+      await tryCall('set_setting', 'auto_sync_enabled', this.autoSyncEnabled ? '1' : '0');
+      this.$dispatch('toast', { text: this.autoSyncEnabled ? '已开启自动同步（每 5 分钟）' : '已关闭自动同步' });
+    },
   }));
 }

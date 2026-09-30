@@ -79,16 +79,27 @@ async function loadBackendPrefs(store) {
   } catch (e) { /* 后端不可用时维持本地主题 */ }
 }
 
-async function autoSync(store) {
-  // 启动自动同步：已配置真实 Garmin 账号且非 mock 模式时拉一次最新数据
+// 自动同步：启动时拉一次 + 运行期间每 5 分钟一轮（受设置页开关控制）。
+// 成绩预测与心率对照表都是「每次拉取即现算」，所以同步一完成就广播 sync-done
+// 让所有页面重绘 —— 这是「数据实时」的唯一触发点。
+const AUTO_SYNC_INTERVAL_MS = 300000;
+let syncLoopBusy = false;  // 上一轮未结束（如首次全量同步耗时较长）时跳过本轮，避免堆叠
+
+async function runSyncOnce(store, { announce = false, settings = null } = {}) {
+  // 整轮同步（含等待）只允许一个：启动同步可能超 120s，周期 tick 撞上来时
+  // 直接跳过，避免重复发起 sync_garmin（后端锁只能挡住并发线程，挡不住重复请求）
+  if (syncLoopBusy) return;
+  syncLoopBusy = true;
+  let call;
   try {
-    const { call } = await import('./api.js');
-    const s = await call('get_settings');
-    if (!s) return;
-    if (!s.has_garmin_password || s.mock_mode) return;
+    try { ({ call } = await import('./api.js')); } catch (e) { return; }
+    const s = settings || await call('get_settings').catch(() => null);
+    if (!s || !s.has_garmin_password || s.mock_mode) return;
     const before = (s.sync_states || []).find((x) => x.source === 'garmin') || {};
-    store.syncBanner = '🔄 正在同步 Garmin 数据…';
-    await call('sync_garmin');
+    if (announce) store.syncBanner = '🔄 正在同步 Garmin 数据…';
+    const res = await call('sync_garmin').catch(() => null);
+    // 后端锁：已有同步在跑，本轮静默跳过（其结果由在跑的那轮负责广播）
+    if (res && res.data && res.data.already_running) return;
     // 轮询等待本次同步结束（last_sync_ts 变化 = 本次尝试完成）
     const prevTs = before.last_sync_ts || 0;
     const deadline = Date.now() + 120000;
@@ -98,26 +109,47 @@ async function autoSync(store) {
       try { rows = await call('get_sync_states'); } catch (e) { continue; }
       const row = (rows || []).find((x) => x.source === 'garmin');
       if (!row || (row.last_sync_ts || 0) === prevTs) continue;
-      const st = (row.meta && row.meta.last_stats) || {};
-      if (row.last_error) {
-        store.syncBanner = `⚠️ 同步失败：${row.last_error}`;
-      } else {
-        const parts = [];
-        if (st.activities) parts.push(`新增活动 ${st.activities} 条`);
-        if (st.health_days) parts.push(`健康数据 ${st.health_days} 天`);
-        if (st.health_backfill) parts.push(st.health_backfill);
-        if (st.health_error) parts.push(`健康数据本轮未拉到（${st.health_error.slice(0, 40)}）`);
-        if (st.plan_rebuilt) parts.push(`课表已按最新 VDOT ${st.plan_vdot} 动态更新`);
-        store.syncBanner = `✅ 同步完成${parts.length ? '：' + parts.join('，') : ''}`;
+      if (announce) {
+        const st = (row.meta && row.meta.last_stats) || {};
+        if (row.last_error) {
+          store.syncBanner = `⚠️ 同步失败：${row.last_error}`;
+        } else {
+          const parts = [];
+          if (st.activities) parts.push(`新增活动 ${st.activities} 条`);
+          if (st.health_days) parts.push(`健康数据 ${st.health_days} 天`);
+          if (st.health_backfill) parts.push(st.health_backfill);
+          if (st.health_error) parts.push(`健康数据本轮未拉到（${st.health_error.slice(0, 40)}）`);
+          if (st.plan_rebuilt) parts.push(`课表已按最新 VDOT ${st.plan_vdot} 动态更新`);
+          store.syncBanner = `✅ 同步完成${parts.length ? '：' + parts.join('，') : ''}`;
+        }
       }
-      // 同步结束（可能重建了课表/更新了数据）→ 通知当前页刷新
+      // 同步结束（可能重建了课表/更新了数据）→ 通知所有页面重绘
       window.dispatchEvent(new Event('sync-done'));
       return;
     }
-    store.syncBanner = '⏳ 同步仍在进行中，请稍后在设置页查看';
-  } catch (e) {
-    store.syncBanner = '';
+    // 超时（首次全量同步可能超 120s）：本轮结果未知，但数据层现算无缓存，
+    // 重绘无害，且下一轮周期会自然补上 —— 必须广播，否则页面卡在旧数据
+    if (announce) store.syncBanner = '⏳ 同步仍在进行中，请稍后在设置页查看';
+    window.dispatchEvent(new Event('sync-done'));
+  } finally {
+    syncLoopBusy = false;
   }
+}
+
+async function autoSync(store) {
+  // 启动自动同步：已配置真实 Garmin 账号且非 mock 模式时拉一次最新数据
+  try { await runSyncOnce(store, { announce: true }); }
+  catch (e) { store.syncBanner = ''; }
+}
+
+async function periodicSync(store) {
+  // 周期自动同步：应用运行期间每 5 分钟一轮，静默进行（不打扰 banner）
+  try {
+    const { call } = await import('./api.js');
+    const s = await call('get_settings').catch(() => null);
+    if (!s || !s.auto_sync_enabled || !s.has_garmin_password || s.mock_mode) return;
+    await runSyncOnce(store, { announce: false, settings: s });
+  } catch (e) { /* 静默：下一轮重试 */ }
 }
 
 function boot() {
@@ -198,6 +230,9 @@ function boot() {
   window.Alpine.start();
   loadBackendPrefs(store);
   autoSync(store);
+  // 应用运行期间每 5 分钟自动同步一轮（受设置页「自动同步」开关控制），
+  // 保证成绩预测与心率对照表随新数据自动重绘，无需手动点同步
+  setInterval(() => periodicSync(store), AUTO_SYNC_INTERVAL_MS);
 }
 
 boot();

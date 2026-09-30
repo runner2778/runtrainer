@@ -122,8 +122,7 @@ export function initHealth() {
     },
     async load() {
       this._lastLoad = Date.now();
-      const start = this.daysAgo(parseInt(this.range));
-      const { ok, data, error } = await tryCall('list_health', start);
+      const start = this.daysAgo(parseInt(this.range));      const { ok, data, error } = await tryCall('list_health', start);
       if (!ok) { this.$dispatch('toast', { text: '读取健康数据失败: ' + error }); return; }
       this.rows = data || [];
       // 配速-心率与时间范围选择器联动（不再固定一年）：选 30 天就只看
@@ -136,6 +135,8 @@ export function initHealth() {
       await this.$nextTick();
       this.renderCharts();
     },
+    // 同步完成（可能是周期自动同步）→ 强制重拉，心率对照表随新数据重绘
+    async syncRefresh() { await this.load(); },
     daysAgo(n) {
       const d = new Date(); d.setDate(d.getDate() - n);
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;

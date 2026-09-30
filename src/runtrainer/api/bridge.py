@@ -13,6 +13,10 @@ from ..services import settings_service
 
 log = logging.getLogger(__name__)
 
+# 后台同步进行中标志：周期自动同步 + 手动点击可能撞车，重叠会并发跑两个
+# sync_all（数据层有 UNIQUE 去重，但断点游标读改写可能互相覆盖）
+_SYNCING = False
+
 
 def _sync_states_with_meta() -> list[dict]:
     """同步状态 + 解码 meta_json（含 last_stats 供 UI 展示真实同步结果）。"""
@@ -77,6 +81,7 @@ class Api:
             "mock_mode": settings_service.is_mock_mode(),
             "ai_web_search": settings_service.get_ai_web_search(),
             "garmin_cn": settings_service.is_garmin_cn(),
+            "auto_sync_enabled": settings_service.is_auto_sync_enabled(),
             "sync_states": _sync_states_with_meta(),
         }
 
@@ -135,6 +140,8 @@ class Api:
             settings_service.set_ai_web_search(value == "1")
         elif key == "garmin_cn":
             settings_service.set_garmin_cn(value == "1")
+        elif key == "auto_sync_enabled":
+            settings_service.set_auto_sync_enabled(value == "1")
         else:
             kv_repo.set_setting(key, value)
         return {"saved": True}
@@ -427,13 +434,21 @@ class Api:
             if not username or not password:
                 raise RuntimeError("尚未保存 Garmin 账号，请先在设置页填写账号密码并点击「保存账号」")
 
+        global _SYNCING
+        if _SYNCING:
+            return {"started": False, "already_running": True}
+        _SYNCING = True
+
         def _run():
+            global _SYNCING
             try:
                 stats = sync_service.sync_all()
                 log.info("同步线程完成: %s", stats)
             except Exception:
                 # 失败原因已由 sync_service 写入 sync_state.last_error，UI 轮询可见
                 log.exception("同步线程失败")
+            finally:
+                _SYNCING = False
 
         threading.Thread(target=_run, daemon=True, name="garmin-sync").start()
         return {"started": True}

@@ -23,6 +23,7 @@ S_AI_MODEL = "ai_model"
 S_AI_PROVIDER = "ai_provider"
 S_MOCK_MODE = "mock_mode"
 S_GARMIN_CN = "garmin_cn"
+S_AUTO_SYNC = "auto_sync_enabled"  # 应用开着时每 5 分钟自动拉取 Garmin 数据
 S_AI_WEB_SEARCH = "ai_web_search"  # 教练知识类问题联网检索开关（智谱 search_std 约 0.01 元/次）
 S_GARMIN_USERNAME_VISIBLE = "garmin_username_visible"  # 账号名非敏感，明文存便于回显
 
@@ -151,6 +152,15 @@ def is_garmin_cn() -> bool:
 
 def set_garmin_cn(enabled: bool) -> None:
     kv_repo.set_setting(S_GARMIN_CN, "1" if enabled else "0")
+
+
+def is_auto_sync_enabled() -> bool:
+    """应用运行期间每 5 分钟自动同步 Garmin 的开关（默认开）。"""
+    return kv_repo.get_setting(S_AUTO_SYNC, "1") == "1"
+
+
+def set_auto_sync_enabled(enabled: bool) -> None:
+    kv_repo.set_setting(S_AUTO_SYNC, "1" if enabled else "0")
 
 
 # ---- 手机伴侣屏（同 Wi-Fi 手机访问）----
