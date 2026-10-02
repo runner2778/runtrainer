@@ -1,6 +1,10 @@
 import { tryCall } from '../api.js';
 import { baseAxis, chartColors, disposeChart, initChart, resizeIn, tooltip } from '../charts.js';
 
+// 与后端 workout_analysis.HR_TREND_FLAT_BPM 一致：|Δ| < 3bpm 视为「没变」，
+// 前端配色/文案与后端结论句因此不会互相矛盾。
+const HR_TREND_FLAT_BPM = 3;
+
 const HTML = `
 <div class="flex mb8">
   <div class="flex">
@@ -22,13 +26,30 @@ const HTML = `
   <div class="card"><h3>静息心率（bpm）</h3><div class="chart" id="health-rhr-chart"></div></div>
   <div class="card"><h3>睡眠结构（小时）</h3><div class="chart" id="health-sleep-chart"></div></div>
   <div class="card"><h3>压力（0-100）</h3><div class="chart" id="health-stress-chart"></div></div>
-  <div class="card"><h3>同配速不同时期平均心率对照</h3>
-    <p class="muted">配速按 30s/km 分档；同一档位下，越近的时期心率越低 = 有氧能力进步</p>
-    <p class="pacehr-summary" x-show="paceBins.summary && paceBins.summary.note"
-       x-text="'📊 ' + paceBins.summary.note"></p>
-    <p class="muted" x-show="paceBins.periods && !paceBins.periods.length"
+  <div class="card"><h3>同配速平均心率 · 近 16 周</h3>
+    <div class="flex mb8">
+      <label class="muted">配速档</label>
+      <select x-model.number="paceBinSel" @change="renderPaceBinChart()" style="width:auto"
+              :disabled="!paceWeekly.bins.length">
+        <template x-for="b in paceWeekly.bins" :key="b.start_s">
+          <option :value="b.start_s"
+                  x-text="b.label + '/km（' + b.segs + ' 段 · ' + b.distance_km + ' km）'"></option>
+        </template>
+      </select>
+      <div class="spacer"></div>
+      <span class="muted" x-text="paceBinCoverage()"></span>
+    </div>
+    <p class="muted">同一配速档下，越近的周心率越低 = 有氧能力进步</p>
+    <p class="pacehr-summary" x-show="selPaceBin()" :style="paceBinTrendStyle()"
+       x-text="'📊 ' + (selPaceBin() ? selPaceBin().note : '')"></p>
+    <p class="muted" x-show="!paceWeekly.bins.length"
        x-text="'⚠️ ' + paceBinEmptyNote()"></p>
-    <p class="muted">虚线 = 最初时期，实线加粗 = 最近时期</p>
+    <p class="muted" x-show="paceWeekly.bins.length">
+      粗线 = 滚动 4 周均值（含当周及之前 3 周，距离加权，稀疏周也不断）；圆点 = 当周实测（该档 ≥2 段才有点）；浅柱 = 当周该档段数（右轴）</p>
+    <p class="muted" x-show="paceWeekly.bins.length">
+      色带 = 最初 4 周 ↔ 最近 4 周均值之间的落差，带高就是心率变化量；绿=心率降（进步）、黄=心率升（退步）</p>
+    <p class="muted" x-show="paceWeekly.bins.length">
+      按每段（间歇课的快跑段/匀速跑整段）的配速对齐心率，不取整场平均——3:20 这类快档只有分段才看得到</p>
     <div class="chart" id="health-pacehr-chart"></div>
   </div>
   <div class="card"><h3>配速-心率明细</h3>
@@ -92,7 +113,8 @@ export function initHealth() {
     range: '120',
     rows: [],
     paceHr: [],
-    paceBins: { bins: [], periods: [] },
+    paceWeekly: { bins: [], weeks: [] },
+    paceBinSel: null,
 
     async init() {
       await this.load();
@@ -130,8 +152,17 @@ export function initHealth() {
       const days = parseInt(this.range) || 120;
       const ph = await tryCall('list_weekly_pace_hr', days);
       this.paceHr = ph.ok ? (ph.data || []) : [];
-      const pb = await tryCall('list_pace_bin_hr', days);
-      this.paceBins = pb.ok ? (pb.data || { bins: [], periods: [] }) : { bins: [], periods: [] };
+      // 同配速心率卡固定看近 16 个自然周（与上方时间范围解耦）：周刻度
+      // 才是这个功能要的精度，跟着 7 天/30 天摆动没有意义
+      const pb = await tryCall('list_pace_bin_weekly', 16);
+      this.paceWeekly = pb.ok ? (pb.data || { bins: [], weeks: [] })
+        : { bins: [], weeks: [] };
+      const starts = (this.paceWeekly.bins || []).map((b) => b.start_s);
+      // 保留用户已选的档；档位消失（跑量变化）或首次加载才回落到默认档
+      if (!starts.includes(this.paceBinSel)) {
+        this.paceBinSel = this.paceWeekly.default_start_s != null
+          ? this.paceWeekly.default_start_s : (starts.length ? starts[0] : null);
+      }
       await this.$nextTick();
       this.renderCharts();
     },
@@ -142,9 +173,42 @@ export function initHealth() {
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     },
     hrvLabel(s) { return { balanced: '平衡', unbalanced: '不平衡', low: '偏低' }[s] || s; },
+    selPaceBin() {
+      return (this.paceWeekly.bins || [])
+        .find((b) => b.start_s === this.paceBinSel) || null;
+    },
+    paceBinCoverage() {
+      const b = this.selPaceBin();
+      if (!b) return '';
+      const total = (this.paceWeekly.weeks || []).length;
+      const n = b.hr_roll.filter((v) => v != null).length;
+      const m = b.hr.filter((v) => v != null).length;
+      return `${n}/${total} 周有趋势点 · ${m} 周有实测`;
+    },
+    // 这一档的走向：'down' 心率降（进步）/ 'up' 升（退步）/ 'flat' 无明显变化。
+    // 阈值与后端 HR_TREND_FLAT_BPM 一致（3 bpm），前后端结论句不会打架。
+    paceBinTrend(bin) {
+      const b = bin || this.selPaceBin();
+      if (!b || b.drop == null) return 'flat';
+      if (b.drop <= -HR_TREND_FLAT_BPM) return 'down';
+      if (b.drop >= HR_TREND_FLAT_BPM) return 'up';
+      return 'flat';
+    },
+    paceBinTrendColor(bin) {
+      const t = this.paceBinTrend(bin);
+      if (t === 'down') return 'var(--st-good)';      // 同配速心率更低 = 进步
+      if (t === 'up') return 'var(--st-warning)';
+      return 'var(--accent)';
+    },
+    // 结论句跟着走向换色：绿色一眼就是「好消息」，不用去读数字
+    paceBinTrendStyle() {
+      const t = this.paceBinTrend();
+      return t === 'down' ? 'color: var(--st-good)'
+        : t === 'up' ? 'color: var(--st-warning)' : '';
+    },
     paceBinEmptyNote() {
-      return `所选 ${parseInt(this.range) || 120} 天内跑步次数太少`
-        + '（同配速档每时期至少 2 次才有对照）——放宽时间范围后再看';
+      return '近 16 周该配速档的样本太稀（4 周窗口内凑不满 2 段）'
+        + '——先在同一个配速多练几次，这里才画得出趋势';
     },
     hrvColor(s) { return { balanced: 'var(--st-good)', unbalanced: 'var(--st-warning)', low: 'var(--st-critical)' }[s] || 'var(--text-muted)'; },
     hrvClass(s) { return { balanced: 'st-good', unbalanced: 'st-warning', low: 'st-critical' }[s] || ''; },
@@ -212,59 +276,9 @@ export function initHealth() {
           symbolSize: 5,
         }],
       });
-      // 同配速不同时期心率对照：x=配速 30s 梯度档（左快右慢，档位全部
-      // 展示保证梯度均匀），每条线 = 一个时期，最新时期在最前（最直观）。
-      // 同一档位看线的高低差即是有氧能力变化。
-      const bins = this.paceBins.bins || [];
-      const periods = this.paceBins.periods || [];
-      const paceBinOpt = mk({
-        // 底部图例需额外留白，否则图例与 x 轴配速档标签重叠
-        grid: { left: 40, right: 12, top: 24, bottom: 46 },
-        xAxis: {
-          ...baseAxis(colors), type: 'category',
-          data: bins.map((b) => this.fmtPaceAxis(b.start_s)),
-          // 30s 梯度档全部展示，隐藏部分标签会让梯度看起来忽疏忽密
-          axisLabel: { ...baseAxis(colors).axisLabel, interval: 0 },
-        },
-        yAxis: { ...baseAxis(colors), type: 'value', name: '平均心率 (bpm)' },
-        legend: { bottom: 0, textStyle: { color: colors.muted, fontSize: 10 }, itemGap: 10 },
-        tooltip: tooltip(colors, {
-          trigger: 'item',
-          formatter: (p) => {
-            const pr = periods[p.seriesIndex];
-            const b = bins[p.dataIndex];
-            if (!pr || !b) return '';
-            const hr = pr.hr[p.dataIndex];
-            if (hr == null) return '';
-            const latest = periods[0].hr[p.dataIndex];
-            const lines = [`<b>${pr.start} ~ ${pr.end}</b><br/>配速 ${this.fmtPaceAxis(b.start_s)}–`
-              + `${this.fmtPaceAxis(b.end_s)} /km<br/>平均心率 ${hr.toFixed(0)} bpm<br/>`
-              + `跑量 ${pr.distance_km[p.dataIndex]} km · ${pr.runs[p.dataIndex]} 次`];
-            if (p.seriesIndex > 0 && latest != null) {
-              const d = hr - latest;
-              lines.push(`较最近时期 <b>${d >= 0 ? '+' : ''}${d.toFixed(0)}</b> bpm`);
-            }
-            return lines.join('<br/>');
-          },
-        }),
-        series: periods.map((pr, i) => {
-          const isNewest = i === 0;   // 最新在前：加粗高亮 + 面积底
-          const isOldest = i === periods.length - 1;  // 最初：灰色虚线
-          const col = colors.period[i % colors.period.length];
-          return {
-            type: 'line', name: pr.label, data: pr.hr,
-            connectNulls: false,
-            lineStyle: isOldest
-              ? { color: colors.muted, width: 2, type: 'dashed' }
-              : { color: col, width: isNewest ? 4 : 2 },
-            itemStyle: { color: isOldest ? colors.muted : col },
-            // 只有最新时期画点：多条线在同一档位的符号会叠成一团
-            showSymbol: isNewest, symbolSize: isNewest ? 7 : 0,
-            z: isNewest ? 5 : 1,
-            areaStyle: isNewest ? { opacity: 0.10, color: col } : undefined,
-          };
-        }),
-      });
+      // 同配速心率：选定一个配速档 → 该档近 16 个自然周的心率折线
+      // （档宽 15s，比旧的多时期 30s 对照更细、刻度更密）
+      const paceBinOpt = this.paceBinOption(colors);
       const els = ['health-hrv-chart', 'health-rhr-chart', 'health-sleep-chart',
                    'health-stress-chart', 'health-pacehr-chart'];
       els.forEach((id, i) => {
@@ -274,16 +288,137 @@ export function initHealth() {
         initChart(el, [hrvChart, rhrChart, sleepChart, stressChart, paceBinOpt][i]);
       });
     },
+    // 选定配速档的近 16 周心率趋势。三层信息叠加，解决「图不直观、有断点、
+    // 有跨度没数据」：
+    //   浅柱（右轴）= 当周该档实际段数 —— 哪周真练了一眼可见
+    //   小圆点     = 当周实测心率（≥2 段才出点，稀疏但真实）
+    //   粗实线     = 4 周滚动均值（该周及之前 3 周距离加权）—— 主曲线，不断点
+    // 再叠一条**首末 4 周均值之间的色带**：带高即变化量，带色即方向（绿=进步），
+    // 比两条细横线直观——「好没好」不靠读数字，靠看出来。
+    paceBinOption(colors) {
+      const wks = this.paceWeekly.weeks || [];
+      const roll = this.paceWeekly.roll_weeks || 4;
+      const bin = this.selPaceBin();
+      const ax = baseAxis(colors);
+      const maxSegs = bin ? Math.max(2, ...bin.week_segs) : 2;
+      const trendColor = this.paceBinTrendColor(bin);
+      // 「没变」时色带用中性灰：红色带会被读成「退步」，而这里只是没变化
+      const bandColor = this.paceBinTrend(bin) === 'flat' ? colors.muted : trendColor;
+      const out = {
+        grid: { left: 46, right: 34, top: 34, bottom: 30 },
+        legend: {
+          top: 0, itemWidth: 12, itemHeight: 8, itemGap: 10,
+          textStyle: { color: colors.muted, fontSize: 10 },
+          data: ['滚动4周均值', '当周实测', '当周段数'],
+        },
+        xAxis: {
+          ...ax, type: 'category', data: wks.map((w) => w.label),
+          // 16 个周标签在窄卡片里会重叠 → 隔一个显示一个
+          axisLabel: { ...ax.axisLabel, interval: wks.length > 10 ? 1 : 0 },
+        },
+        // scale: 心率只在 120–155 波动，从 0 起画会把变化压平看不出来
+        yAxis: [
+          { ...ax, type: 'value', name: '平均心率 (bpm)', nameTextStyle: { color: colors.muted, fontSize: 10 }, scale: true },
+          { ...ax, type: 'value', name: '段数', nameTextStyle: { color: colors.muted, fontSize: 10 },
+            min: 0, max: maxSegs, minInterval: 1, splitLine: { show: false } },
+        ],
+        tooltip: tooltip(colors, {
+          formatter: (ps) => {
+            if (!ps || !ps.length || !bin) return '';
+            const i = ps[0].dataIndex;
+            const w = wks[i];
+            const segs = bin.week_segs[i] || 0;
+            const lines = [
+              `<b>${w.start} ~ ${w.end}</b>${w.partial ? '（本周进行中）' : ''}`,
+            ];
+            if (bin.hr[i] != null) {
+              lines.push(`当周实测 <b>${bin.hr[i].toFixed(0)}</b> bpm（${segs} 段）`);
+            } else {
+              lines.push(segs ? `当周 ${segs} 段（不足 2 段，不出实测点）` : '当周该档没跑');
+            }
+            if (bin.hr_roll[i] != null) {
+              lines.push(`${roll} 周滚动 <b>${bin.hr_roll[i].toFixed(0)}</b> bpm`);
+            }
+            // 只在末端 4 周提示与最初 4 周的差——中间点比这个没有意义
+            if (bin.early_hr != null && bin.hr_roll[i] != null
+                && i >= wks.length - 4) {
+              const d = bin.hr_roll[i] - bin.early_hr;
+              lines.push(`较最初 4 周 <b>${d >= 0 ? '+' : ''}${d.toFixed(0)}</b> bpm`);
+            }
+            return lines.join('<br/>');
+          },
+        }),
+        series: [
+          { // 当周段数：浅柱垫底，右轴。跨周空白一眼可见，这是「不直观」的根子
+            type: 'bar', name: '当周段数', yAxisIndex: 1, z: 1,
+            data: bin ? bin.week_segs : [],
+            barMaxWidth: 14,
+            itemStyle: { color: colors.muted, opacity: 0.18 },
+            emphasis: { itemStyle: { opacity: 0.38 } },
+          },
+          { // 当周实测：只画点不连线（点少时连线会伪造出并不存在的趋势）。
+            // 空心圆 + 趋势色描边：从属于主曲线，不再像「脏点」
+            type: 'line', name: '当周实测', z: 3,
+            data: bin ? bin.hr : [],
+            connectNulls: false,
+            lineStyle: { width: 0 },
+            symbol: 'circle', symbolSize: 6,
+            itemStyle: { color: colors.bg, borderColor: colors.muted,
+                         borderWidth: 1.5, opacity: 0.9 },
+          },
+          { // 主曲线：4 周滚动距离加权均值，稀疏周也能连成一条
+            type: 'line', name: '滚动4周均值', z: 4,
+            data: bin ? bin.hr_roll : [],
+            connectNulls: false,   // 窗口内不足 2 段仍断，但不假装连续
+            lineStyle: { color: trendColor, width: 2.5 },
+            itemStyle: { color: trendColor },
+            symbolSize: 6,
+            areaStyle: { opacity: 0.07, color: trendColor },
+          },
+        ],
+      };
+      // 首/末各 4 周的距离加权均值：色带填在两线之间，带高 = 变化量，
+      // 带色 = 方向；两条边线保留（虚线 = 最初，实线 = 最近）作为标尺。
+      if (bin && bin.early_hr != null && bin.recent_hr != null) {
+        const d = bin.drop;
+        const deltaTxt = d == null ? ''
+          : `${d <= -1 ? '↓' : d >= 1 ? '↑' : '≈'} ${Math.abs(d).toFixed(0)} bpm`;
+        out.series[2].markArea = {
+          silent: true,
+          itemStyle: { color: bandColor, opacity: 0.12 },
+          label: {
+            show: !!deltaTxt, position: 'insideTopRight',
+            color: bandColor, fontSize: 11, fontWeight: 'bold',
+            formatter: deltaTxt,
+          },
+          data: [[{ yAxis: bin.early_hr }, { yAxis: bin.recent_hr }]],
+        };
+        out.series[2].markLine = {
+          silent: true, symbol: 'none',
+          label: { position: 'insideEndTop', color: colors.muted, fontSize: 10,
+                   formatter: (p) => p.name },
+          data: [
+            { yAxis: bin.early_hr, name: `最初4周 ${bin.early_hr.toFixed(0)}`,
+              lineStyle: { color: colors.muted, type: 'dashed', width: 1.5 } },
+            { yAxis: bin.recent_hr, name: `最近4周 ${bin.recent_hr.toFixed(0)}`,
+              lineStyle: { color: trendColor, type: 'solid', width: 1.5 } },
+          ],
+        };
+      }
+      return out;
+    },
+    // 切换配速档时只重画这一张图，不必把同页 5 张图全部重建
+    renderPaceBinChart() {
+      const el = document.getElementById('health-pacehr-chart');
+      if (!el || !el.offsetWidth) return;   // 页面隐藏中：shown() 会补渲染
+      disposeChart(el);
+      initChart(el, this.paceBinOption(chartColors()));
+    },
     fmtPace(s) {
       if (!s) return '—';
       // 先四舍五入再拆分，避免 59.6s 进位出「4:60」
       const t = Math.round(s), m = Math.floor(t / 60), sec = t % 60;
       return `${m}:${String(sec).padStart(2, '0')}/km`;
-    },
-    fmtPaceAxis(v) {
-      if (v == null) return '';
-      const t = Math.round(v), m = Math.floor(t / 60), sec = t % 60;
-      return `${m}:${String(sec).padStart(2, '0')}`;
     },
   }));
 }

@@ -1,11 +1,13 @@
 """训练内容分析：间歇/休息分段识别与配速-心率周聚合（纯函数）。"""
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 from runtrainer.domain.workout_analysis import (
     analyze_structure, classify_workout, estimate_max_hr,
-    pace_bin_hr, summarize_structure, weekly_pace_hr,
+    pace_bin_hr, pace_bin_weekly, pace_hr_segments, summarize_structure,
+    weekly_pace_hr,
 )
 
 
@@ -220,6 +222,351 @@ def test_pace_bin_hr_clamps_non_running_paces():
     # 30 天窗口 → 2 期；两条正常跑都在近期（第 2 期），空的第一期被丢弃
     assert len(out["periods"]) == 1
     assert out["periods"][0]["hr"] == [150.5]
+
+
+# ---- 周化同配速心率（pace_bin_weekly）----
+
+END = date(2026, 10, 2)   # 周五；周刻度按 ISO 自然周（周一为起点）
+
+
+def _mondays(end, weeks):
+    end_mon = end - timedelta(days=end.weekday())
+    return [end_mon - timedelta(weeks=weeks - 1 - i) for i in range(weeks)]
+
+
+def test_pace_bin_weekly_iso_week_buckets_and_min_runs():
+    """周化：按自然周切桶（每周一点），每档每周不足 2 次不出点。"""
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        # 最早一周：300 档 2 次（10km+30km，距离加权）；330 档仅 1 次
+        _act(dates.date_to_ts(mons[0]), 302.0, 150.0, 10000),
+        _act(dates.date_to_ts(mons[0] + timedelta(days=2)), 310.0, 152.0, 30000),
+        _act(dates.date_to_ts(mons[0] + timedelta(days=3)), 335.0, 140.0),
+        # 本周（部分周）：300 档 2 次，心率更低
+        _act(dates.date_to_ts(mons[15]), 300.0, 143.0),
+        _act(dates.date_to_ts(mons[15] + timedelta(days=1)), 305.0, 145.0),
+    ]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    assert out["bin_s"] == 20          # 3:00/3:20/3:40… 把 3:20 做成档界
+    assert [w["start"] for w in out["weeks"]] == [m.isoformat() for m in mons]
+    assert out["weeks"][-1]["end"] == END.isoformat()
+    assert out["weeks"][-1]["partial"] is True    # 本周只到周五
+    assert out["weeks"][0]["partial"] is False
+
+    b300 = next(b for b in out["bins"] if b["start_s"] == 300)
+    # 距离加权：(150×10k + 152×30k) / 40k = 151.5
+    assert b300["hr"][0] == 151.5
+    assert b300["hr"][15] == 144.0
+    assert all(v is None for v in b300["hr"][1:15])   # 中间 14 周无数据
+    assert b300["week_segs"][0] == 2 and b300["week_segs"][8] == 0
+    assert b300["distance_km"] == 60.0
+    # 330 档只有一个周有 2 次 → 连不成趋势线，不进候选
+    assert [b["start_s"] for b in out["bins"]] == [300]
+
+
+def test_pace_bin_weekly_early_recent_block_drop():
+    """首/末各 4 周距离加权对照：同配速心率下降 → 负 drop + 进步结论。"""
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = []
+    for wi in range(16):
+        hr = 150.0 if wi < 4 else 140.0    # 首 4 周 150，其余 140
+        for d in (1, 2):
+            acts.append(_act(dates.date_to_ts(mons[wi] + timedelta(days=d)), 300.0, hr))
+    out = pace_bin_weekly(acts, END, weeks=16)
+    b = out["bins"][0]
+    assert b["label"] == "5:00"
+    assert b["early_hr"] == 150.0 and b["recent_hr"] == 140.0
+    assert b["drop"] == -10.0
+    assert "下降 10 bpm" in b["note"] and "有氧能力进步" in b["note"]
+    assert out["default_start_s"] == 300
+
+
+def test_pace_bin_weekly_block_drop_is_distance_weighted():
+    """首/末 4 周块用距离加权——短慢跑不把档位均值带偏。"""
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        # 首 4 周内：1 次 30km @148 + 1 次 10km @156 → 加权 150.0
+        _act(dates.date_to_ts(mons[0]), 300.0, 148.0, 30000),
+        _act(dates.date_to_ts(mons[0] + timedelta(days=1)), 300.0, 156.0, 10000),
+        # 末 4 周内：1 次 30km @136 + 1 次 10km @144 → 加权 138.0
+        _act(dates.date_to_ts(mons[15]), 300.0, 136.0, 30000),
+        _act(dates.date_to_ts(mons[15] + timedelta(days=1)), 300.0, 144.0, 10000),
+    ]
+    b = pace_bin_weekly(acts, END, weeks=16)["bins"][0]
+    assert b["early_hr"] == 150.0 and b["recent_hr"] == 138.0
+    assert b["drop"] == -12.0
+
+
+def test_pace_bin_weekly_20s_gradient_splits_neighbours():
+    """20s 梯度：302/314/316 同属 5:00 档，320 起是 5:20 档（30s 档会把 316/329 合并）。"""
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = []
+    for wi in (0, 15):
+        acts += [
+            _act(dates.date_to_ts(mons[wi]), 302.0, 150.0),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=1)), 314.0, 148.0),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=2)), 316.0, 145.0),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=3)), 329.0, 143.0),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=4)), 324.0, 143.0),
+        ]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    assert [b["start_s"] for b in out["bins"]] == [300, 320]
+    b300, b320 = out["bins"]
+    assert (b300["label"], b320["label"]) == ("5:00", "5:20")
+    assert b300["end_s"] == 320 and b320["end_s"] == 340
+    assert b300["hr"][0] == 147.7      # (150+148+145)/3
+    assert b320["hr"][0] == 143.0      # (143+143)/2
+
+
+def test_pace_bin_weekly_default_picks_highest_distance_bin():
+    """下拉默认档 = 跑量最大的档，**不是**样本段数最多的档。
+
+    真实库里间歇课的快段又短又多：3:20 档 41 段却只有 16.6km，主配速 5:00 档
+    35 段有 314km。按段数排序会把默认档停在间歇配速上，必须按里程排。
+    """
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = []
+    for wi in (0, 15):
+        acts += [
+            # 5:00 档：每周 2 段 × 20km = 40km（长距离匀速跑：段少但里程大）
+            _act(dates.date_to_ts(mons[wi]), 300.0, 150.0, 20000),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=1)), 300.0, 151.0, 20000),
+            # 5:20 档：每周 3 段 × 5km = 15km（间歇：段多但里程小）
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=2)), 330.0, 140.0, 5000),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=3)), 330.0, 141.0, 5000),
+            _act(dates.date_to_ts(mons[wi] + timedelta(days=4)), 330.0, 142.0, 5000),
+        ]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    assert [b["start_s"] for b in out["bins"]] == [300, 320]   # 里程多者在前
+    assert out["default_start_s"] == 300
+    b300, b320 = out["bins"]
+    assert b300["distance_km"] == 80.0 and b320["distance_km"] == 30.0
+    assert b300["segs"] == 4 and b320["segs"] == 6   # 段数与里程相反，里程说了算
+
+
+def test_pace_bin_weekly_hides_thin_bins_below_min_segs():
+    """总样本低于 MIN_BIN_SEGS 的档不进下拉框——一次课的几个段会摊出假趋势。
+
+    真实库里 6:40 档只有 2 段 · 1.5km，滚动窗照样能给它算出 3 个点，
+    画出来像「趋势」，其实是同一次课的两段。
+    """
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        # 5:00 档：4 段（够厚）→ 保留
+        _act(dates.date_to_ts(mons[0]), 300.0, 150.0),
+        _act(dates.date_to_ts(mons[0] + timedelta(days=1)), 300.0, 151.0),
+        _act(dates.date_to_ts(mons[10]), 300.0, 149.0),
+        _act(dates.date_to_ts(mons[10] + timedelta(days=1)), 300.0, 148.0),
+        # 6:40 档：只有 2 段（薄）→ 挡掉
+        _act(dates.date_to_ts(mons[15]), 400.0, 130.0, 1000),
+        _act(dates.date_to_ts(mons[15] + timedelta(days=1)), 400.0, 131.0, 1000),
+    ]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    assert [b["start_s"] for b in out["bins"]] == [300]
+    assert out["default_start_s"] == 300
+
+
+def test_pace_bin_weekly_total_includes_pre_window_weeks():
+    """薄样本下限看的是**总**样本：展示窗之前 roll-1 周的数据也算数。
+
+    那些周不进画布，但滚动曲线的前几个点靠它们才立得住，若只数窗内样本
+    会把「前几周练过、窗内还没练」的档误杀。
+    """
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        # wi=-1 与 wi=-2 各 2 段：窗内 0 段，但总样本 4 → 该档必须保留
+        _act(dates.date_to_ts(mons[0] - timedelta(days=7)), 300.0, 160.0),
+        _act(dates.date_to_ts(mons[0] - timedelta(days=6)), 300.0, 160.0),
+        _act(dates.date_to_ts(mons[0] - timedelta(days=14)), 300.0, 162.0),
+        _act(dates.date_to_ts(mons[0] - timedelta(days=13)), 300.0, 162.0),
+    ]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    assert [b["start_s"] for b in out["bins"]] == [300]
+    assert out["bins"][0]["segs"] == 0          # 窗内确实没有样本
+    assert out["bins"][0]["hr_roll"][0] == 161.0  # 但窗内第 1 点靠窗前数据立住
+
+
+def test_pace_bin_weekly_clamps_bad_paces_and_ignores_out_of_window():
+    """走路/坏数据配速与窗口外的活动都不参与，不撑偏坐标轴与均值。"""
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        _act(dates.date_to_ts(mons[0]), 300.0, 150.0),
+        _act(dates.date_to_ts(mons[0] + timedelta(days=1)), 300.0, 150.0),
+        _act(dates.date_to_ts(mons[15]), 300.0, 140.0),
+        _act(dates.date_to_ts(mons[15] + timedelta(days=1)), 300.0, 140.0),
+        # 走路/通勤配速（>15:00/km）与坏数据（<3:00/km，心率还异常低）
+        _act(dates.date_to_ts(mons[0]), 2000.0, 100.0, 3000),
+        _act(dates.date_to_ts(mons[15]), 120.0, 100.0, 500),
+        # 比最早一周还早 30 天：在窗口外
+        _act(dates.date_to_ts(mons[0] - timedelta(days=30)), 300.0, 190.0),
+    ]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    assert [b["start_s"] for b in out["bins"]] == [300]
+    b = out["bins"][0]
+    assert b["segs"] == 4                 # 190 bpm 那条没被算进来
+    assert b["hr"][0] == 150.0 and b["hr"][15] == 140.0
+
+
+def test_pace_bin_weekly_empty_and_week_clamp():
+    out = pace_bin_weekly([], END)
+    assert out["bins"] == [] and out["default_start_s"] is None
+    assert len(out["weeks"]) == 16
+    # 周数边界钳制：最小 2 周、最多 52 周
+    assert len(pace_bin_weekly([], END, weeks=1)["weeks"]) == 2
+    assert len(pace_bin_weekly([], END, weeks=999)["weeks"]) == 52
+
+
+def test_pace_bin_weekly_roll_fills_weeks_with_a_single_run():
+    """主曲线走滚动窗口：每周只跑 1 次的周，当周点 hr 为 None，滚动点仍有值。
+
+    这正是消除「断点 / 有跨度没数据」的机制——真实库里多数周每档就 1–2 次。
+    """
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [_act(dates.date_to_ts(mons[w]), 300.0, 150.0) for w in (4, 5, 6, 7)]
+    out = pace_bin_weekly(acts, END, weeks=16)
+    b = out["bins"][0]
+    assert out["roll_weeks"] == 4
+    # 当周口径：这 4 周每周都只有 1 次 → 全部不出点
+    assert all(b["hr"][w] is None for w in (4, 5, 6, 7))
+    assert sum(1 for v in b["hr"] if v is not None) == 0
+    # 滚动口径：窗口 {1..4} 只有 1 次仍不足；{2..5} 起攒够 2 次
+    assert b["hr_roll"][4] is None
+    assert b["hr_roll"][5] == 150.0
+    assert b["hr_roll"][7] == 150.0        # 窗口 {4..7} = 4 次
+    assert sum(1 for v in b["hr_roll"] if v is not None) >= 3
+
+
+def test_pace_bin_weekly_roll_is_distance_weighted_across_weeks():
+    """滚动点 = 窗口内所有跑步的距离加权均值（跨周合并，不是各周均值再平均）。"""
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        _act(dates.date_to_ts(mons[4]), 300.0, 140.0, 30000),   # 30km @140
+        _act(dates.date_to_ts(mons[5]), 300.0, 160.0, 10000),   # 10km @160
+        # 第 10 周补 2 次：同一档、离上面两个窗口都远，不影响原有断言；
+        # 总样本 ≥ MIN_BIN_SEGS 才进 bins，否则这档会被薄样本下限挡掉
+        _act(dates.date_to_ts(mons[10]), 300.0, 150.0, 10000),
+        _act(dates.date_to_ts(mons[10] + timedelta(days=1)), 300.0, 150.0, 10000),
+    ]
+    b = pace_bin_weekly(acts, END, weeks=16)["bins"][0]
+    assert b["hr_roll"][4] is None         # 窗口 {1..4} 只有 30km 一次 → 不足 2 次
+    assert b["hr_roll"][5] == 145.0        # 窗口 {2..5}：跨周加权 (140×30k+160×10k)/40k
+    assert b["hr_roll"][7] == 145.0        # 窗口 {4..7} 仍含两次
+    assert b["hr_roll"][8] is None         # 窗口 {5..8} 只剩 10km 一次 → 滑出窗口
+    assert b["hr_roll"][10] == 150.0       # 第 10 周自己那两次
+
+
+def test_pace_bin_weekly_roll_reaches_before_display_window():
+    """最早的几个点也要等宽滚动窗：展示窗之前 roll-1 周的数据必须算进来。
+
+    （对应 bridge 多取 roll-1 周的取数契约；漏了这段，前几个点会偏薄。）
+    """
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    acts = [
+        # 展示窗开始前 3 周（wi=-3）：2 次 @160
+        _act(dates.date_to_ts(mons[0] - timedelta(days=21)), 300.0, 160.0),
+        _act(dates.date_to_ts(mons[0] - timedelta(days=20)), 300.0, 160.0),
+        # 展示窗第 1 周：2 次 @150
+        _act(dates.date_to_ts(mons[0]), 300.0, 150.0),
+        _act(dates.date_to_ts(mons[0] + timedelta(days=1)), 300.0, 150.0),
+    ]
+    b = pace_bin_weekly(acts, END, weeks=16)["bins"][0]
+    # wi=0 的窗口 {-3..0}：窗前的 2 次 + 当周 2 次 → 等权 155.0
+    assert b["hr_roll"][0] == 155.0
+    # 但当周实际值与统计量只认展示窗内的数据
+    assert b["hr"][0] == 150.0
+    assert b["segs"] == 2
+
+
+# ---- 次内分段口径（pace_hr_segments）----
+
+
+def test_pace_hr_segments_flattens_structure_and_skips_rest():
+    """间歇课摊平成段级行：rest 剔除、recovery（热身冷身）保留、继承父活动时间戳。"""
+    acts = [{
+        "start_ts": 1000, "distance_m": 12000, "avg_pace_s_km": 300.0,
+        "avg_hr": 150.0, "max_hr": 180.0,
+        "structure_json": json.dumps([
+            {"type": "recovery", "distance_m": 2000, "duration_s": 720,
+             "pace_s_km": 360.0, "avg_hr": 130.0},
+            {"type": "work", "distance_m": 4000, "duration_s": 800,
+             "pace_s_km": 200.0, "avg_hr": 172.0},
+            {"type": "rest", "distance_m": 2000, "duration_s": 900,
+             "pace_s_km": 450.0, "avg_hr": 140.0},
+            {"type": "work", "distance_m": 4000, "duration_s": 800,
+             "pace_s_km": 198.0, "avg_hr": 174.0},
+        ]),
+    }]
+    rows = pace_hr_segments(acts)
+    assert [r["type"] for r in rows] == ["recovery", "work", "work"]  # rest 剔除
+    assert {r["start_ts"] for r in rows} == {1000}   # 段级继承父活动时间戳
+    assert {r["max_hr"] for r in rows} == {180.0}    # 段级没有峰值，借整场的
+    assert [r["avg_pace_s_km"] for r in rows] == [360.0, 200.0, 198.0]
+    assert [r["avg_hr"] for r in rows] == [130.0, 172.0, 174.0]
+    assert rows[1]["distance_m"] == 4000
+
+
+def test_pace_hr_segments_falls_back_to_whole_run_without_structure():
+    """无 structure（CSV/FIT 手动导入不生成结构）回退整场一行，不丢整次跑。"""
+    rows = pace_hr_segments([{
+        "start_ts": 1000, "distance_m": 10000, "avg_pace_s_km": 305.0,
+        "avg_hr": 148.0, "max_hr": 170.0, "structure_json": None,
+    }])
+    assert len(rows) == 1
+    assert rows[0]["type"] == "whole"
+    assert rows[0]["avg_pace_s_km"] == 305.0 and rows[0]["distance_m"] == 10000
+    assert rows[0]["max_hr"] == 170.0 and rows[0]["start_ts"] == 1000
+
+
+def test_pace_hr_segments_falls_back_when_structure_is_only_rest():
+    """结构里只剩休息段（极端课表）同样回退整场，不产出空档。"""
+    rows = pace_hr_segments([{
+        "start_ts": 1000, "distance_m": 3000, "avg_pace_s_km": 400.0,
+        "avg_hr": 120.0, "max_hr": 150.0,
+        "structure_json": json.dumps([
+            {"type": "rest", "distance_m": 3000, "duration_s": 1200,
+             "pace_s_km": 400.0, "avg_hr": 120.0},
+        ]),
+    }])
+    assert [r["type"] for r in rows] == ["whole"]
+
+
+def test_pace_bin_weekly_interval_segments_reach_fast_bins():
+    """整场口径看不到的快档：间歇课的 work 段被分段口径救出来。
+
+    同一场 4:40/km 的间歇课（整场均值落在 4:40 档），其 work 段是 3:20——
+    这正是「不单是一次跑步的平均配速，要精确到每次跑步内时段」的效果。
+    """
+    from runtrainer.utils import dates
+    mons = _mondays(END, 16)
+    whole_rows, seg_rows = [], []
+    for wi in (0, 15):
+        for d in (1, 2):
+            a = _act(dates.date_to_ts(mons[wi] + timedelta(days=d)),
+                     280.0, 150.0, 12000)
+            whole_rows.append(a)
+            # 每次跑拆出 2 个 3:20/km 的 work 段（各 4km，共 8km）
+            seg_rows += [{**a, "avg_pace_s_km": 200.0, "avg_hr": 170.0,
+                          "distance_m": 4000, "type": "work"}] * 2
+    fast = next(b for b in pace_bin_weekly(seg_rows, END, weeks=16)["bins"]
+                if b["start_s"] == 200)
+    assert fast["label"] == "3:20"
+    assert fast["week_segs"][0] == 4 and fast["week_segs"][15] == 4
+    assert fast["hr"][0] == 170.0
+    # 整场口径同一批数据里连 3:20 档都不存在
+    whole_bins = [b["start_s"]
+                  for b in pace_bin_weekly(whole_rows, END, weeks=16)["bins"]]
+    assert 200 not in whole_bins and 280 in whole_bins
 
 
 # ---- 课程分类 ----

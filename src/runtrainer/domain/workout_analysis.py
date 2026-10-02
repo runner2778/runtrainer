@@ -333,6 +333,23 @@ PACE_BIN_S = 30          # 配速梯度档宽（s/km）
 PACE_BIN_MIN_S = 180     # 3:00/km：更快的是坏数据/短冲刺测试，不参与对照
 PACE_BIN_MAX_S = 900     # 15:00/km：更慢的不是跑步（走路/通勤），不参与对照
 MIN_BIN_RUNS = 2         # 每档每期至少 2 次才出点（单次跑噪声太大）
+# 整档最少样本数：一次课的两个段就能被滚动窗摊成 3 个点，画出「假趋势」
+# （真实库里 6:40 档只有 2 段·1.5km）。样本太薄的档不进下拉框。
+MIN_BIN_SEGS = 4
+
+# ---- 周化同配速心率视图（比 pace_bin_hr 更细的梯度 + 自然周刻度）----
+PACE_BIN_WEEKLY_S = 20       # 周化视图档宽：20s/km（3:00/3:20/3:40… 正好把 3:20 做成档界）
+PACE_BIN_WEEKS = 16          # 默认窗口：近 16 个自然周
+# 次内分段口径：整场平均配速会把间歇课抹平（3:20/km 的重复跑整场看是 4:30），
+# 改用 structure_json 的段级 pace_s_km/avg_hr 后，快档才有样本。实测
+# （2026-10-02 真实库近 16 周）：整场口径 3:20–3:45 档完全为空，段级口径
+# 3:00/3:20/3:40 分别有 16/42/11 段、出点 13/13/11 周。
+PACE_SEG_SKIP_TYPES = ("rest",)  # 组间休息段不进分桶（走路恢复的心率被前一组快跑污染）
+# 4 周窗口：既是首/末对照的块宽，也是周曲线每个点的滚动窗宽。
+# 实测（2026-10-02 真实库）：当周单点口径下主配速档 16 周只有 8 周出点，
+# 曲线断成一段段；改滚动 4 周后 5:00/5:30/4:45 档拉满 16/16。
+PACE_TREND_EDGE_WEEKS = 4
+HR_TREND_FLAT_BPM = 3        # 同配速心率持平带（±3 bpm 内视为无变化）
 
 # ---- 课程分类 ----
 SPRINT_MAX_DIST_M = 500.0    # ≤500m 的跑段才可能算冲刺段（R 距离区间）
@@ -506,16 +523,198 @@ def _pace_hr_summary(periods: list[dict], bin_starts: list[int]) -> dict:
     drop, _w, b = best
     m, sec = divmod(b, 60)
     label = f"{m}:{sec:02d}"
-    if drop <= -3:
+    if drop <= -HR_TREND_FLAT_BPM:
         return {"note": f"同一配速（{label}/km）下平均心率较最初时期下降 {abs(drop):.0f} bpm"
                         f"——有氧能力进步",
                 "best_drop": round(drop, 1), "best_label": label}
-    if drop >= 3:
+    if drop >= HR_TREND_FLAT_BPM:
         return {"note": f"同一配速（{label}/km）下平均心率较最初时期上升 {drop:.0f} bpm"
                         f"——注意疲劳/恢复不足或天气影响",
                 "best_drop": round(drop, 1), "best_label": label}
     return {"note": "同一配速下平均心率与最初时期基本持平（±3 bpm 内）",
             "best_drop": round(drop, 1), "best_label": label}
+
+
+def _pace_week_note(drop: float | None, label: str, edge: int) -> str:
+    """单档周趋势的结论句（与 pace_bin_hr 同一套 ±3 bpm 阈值）。"""
+    if drop is None:
+        return f"首/末各 {edge} 周样本不足，暂无法对照"
+    if drop <= -HR_TREND_FLAT_BPM:
+        return (f"同一配速（{label}/km）下平均心率较最初 {edge} 周下降 {abs(drop):.0f} bpm"
+                f"——有氧能力进步")
+    if drop >= HR_TREND_FLAT_BPM:
+        return (f"同一配速（{label}/km）下平均心率较最初 {edge} 周上升 {drop:.0f} bpm"
+                f"——注意疲劳/恢复不足或天气影响")
+    return f"同一配速（{label}/km）下平均心率与最初 {edge} 周基本持平（±3 bpm 内）"
+
+
+def pace_hr_segments(activities: list[dict]) -> list[dict]:
+    """把活动行摊平成「次内分段」配速-心率行（同配速心率对照的取数口径）。
+
+    为什么要分段：一次跑步的**整场平均配速**会把间歇课抹平——3:20/km 的
+    重复跑整场看是 4:30，于是快配速档永远没有样本。改用 structure_json 的
+    段级 pace_s_km/avg_hr 后，间歇课被拆成 work/rest 段，快档才画得出趋势。
+    匀速跑的结构本就是一段 continuous（≈整场），所以段级口径完整覆盖整场
+    口径，且各段距离之和仍是整场距离——不会重复计数。
+
+    组间休息（type="rest"，通常是走路恢复）不进分桶：其心率受前一组快跑
+    影响而偏高，会污染「同配速对应心率」的对照；热身/冷身（recovery）是
+    真实的轻松跑，保留。
+
+    无 structure（CSV/FIT 手动导入不生成结构）时回退整场一行，口径与
+    改版前一致，不因缺结构就把整次跑丢掉。
+
+    activities: activity_repo.list_structure_rows 的行。
+    返回行满足 _valid_pace_hr 的字段契约：
+    {start_ts, distance_m, avg_pace_s_km, avg_hr, max_hr, type}。
+    """
+    from ..utils import jsonutil
+    rows = []
+    for a in activities:
+        # 段级没有自己的峰值心率，整场 max 借用：整场心率垃圾的时段级一起剔除
+        base = {"start_ts": a.get("start_ts"), "max_hr": a.get("max_hr")}
+        segs = jsonutil.loads(a.get("structure_json")) or []
+        kept = 0
+        for s in segs:
+            if (s.get("type") or "") in PACE_SEG_SKIP_TYPES:
+                continue
+            rows.append({
+                **base,
+                "distance_m": s.get("distance_m"),
+                "avg_pace_s_km": s.get("pace_s_km"),
+                "avg_hr": s.get("avg_hr"),
+                "type": s.get("type") or "continuous",
+            })
+            kept += 1
+        if not kept:
+            rows.append({
+                **base,
+                "distance_m": a.get("distance_m"),
+                "avg_pace_s_km": a.get("avg_pace_s_km"),
+                "avg_hr": a.get("avg_hr"),
+                "type": "whole",
+            })
+    return rows
+
+
+def pace_bin_weekly(activities: list[dict], end: date, weeks: int = PACE_BIN_WEEKS,
+                    bin_s: int = PACE_BIN_WEEKLY_S) -> dict:
+    """同配速档的近 N 个自然周心率趋势（周化 + 细梯度，供「选定档 → 折线」）。
+
+    与 pace_bin_hr 的取舍不同：这里时期按 ISO 自然周切（每周一个点）、档宽
+    更细（20s），回答「这一个配速档，近 16 周心率怎么变」。周样本天然薄
+    （实测多数周每档仅 1–2 个样本），当周单点会让曲线断成一段段，因此主曲线
+    用**滚动 PACE_TREND_EDGE_WEEKS 周窗口**的距离加权均值（每点 = 该周及之前
+    若干周），逐点连续；当周实际值另存 `hr` 供 tooltip 说明「这周练了没」。
+    每档的首/末各 PACE_TREND_EDGE_WEEKS 周均值（early_hr / recent_hr）与
+    滚动曲线两端重合，结论句和参考线因此自洽。
+
+    activities: 已被 pace_hr_segments 摊平的**段级行**（含 start_ts/
+        avg_pace_s_km/avg_hr/distance_m）。直接喂整场活动行也能跑，但那样
+        间歇课的快段会被整场均值抹平（见 pace_hr_segments 的说明）。
+        **需多喂 roll-1 周的数据**（流水线见 bridge 的 list_pace_bin_weekly），
+        否则最早几个点的滚动窗口会残缺。
+    end: 窗口右端（最后一周为进行中的部分周，标 partial=True）。
+    返回 {bin_s, weeks: [{start, end, label, partial}], roll_weeks,
+    default_start_s, bins: [{start_s, end_s, label, segs, distance_km,
+    hr, hr_roll, week_segs, early_hr, recent_hr, drop, note}]}；bins 按
+    跑量降序（跑得最多的档排最前，UI 默认选它）；滚动点不足 2 个、或总样本
+    少于 MIN_BIN_SEGS 的薄档连不成线，都不进 bins。
+    """
+    from ..utils import dates as dutil
+    weeks = max(2, min(52, int(weeks)))
+    roll = max(1, min(PACE_TREND_EDGE_WEEKS, weeks))
+    end_mon = end - timedelta(days=end.weekday())
+    mons = [end_mon - timedelta(weeks=weeks - 1 - i) for i in range(weeks)]
+    lo = mons[0]
+    # 每个周的滚动窗口要往回看 roll-1 周，故数据接受范围比展示范围早这么多——
+    # 这样 16 个点每个都建立在等宽的 roll 周窗上（前几点不会因窗口残缺而偏薄）
+    lo_data = lo - timedelta(weeks=roll - 1)
+
+    # cells: (week_idx, bin_start) -> [dist_sum, hr_dist_wsum, n]；week_idx 可为负
+    cells: dict[tuple[int, int], list[float]] = {}
+    for a in activities:
+        if not _valid_pace_hr(a):
+            continue
+        p = a["avg_pace_s_km"]
+        if p < PACE_BIN_MIN_S or p > PACE_BIN_MAX_S:
+            continue
+        day = dutil.ts_to_date(a["start_ts"])
+        if day < lo_data or day > end:
+            continue
+        wi = (day - timedelta(days=day.weekday()) - lo).days // 7
+        dist = a.get("distance_m") or 1
+        c = cells.setdefault((wi, int(p // bin_s) * bin_s), [0.0, 0.0, 0])
+        c[0] += dist
+        c[1] += a["avg_hr"] * dist
+        c[2] += 1
+
+    weeks_out = [{
+        "start": m.isoformat(),
+        "end": min(m + timedelta(days=6), end).isoformat(),
+        "label": f"{m.month:02d}/{m.day:02d}",
+        "partial": m + timedelta(days=6) > end,   # 最后一周通常只过了几天
+    } for m in mons]
+
+    edge = min(PACE_TREND_EDGE_WEEKS, weeks // 2)
+
+    def _span(b: int, wi_to: int, n_weeks: int) -> list[float] | None:
+        """[wi_to-n_weeks+1, wi_to] 各周的距离加权均值（不足 MIN_BIN_RUNS 返回 None）。"""
+        d = w = n = 0.0
+        for wi in range(wi_to - n_weeks + 1, wi_to + 1):
+            c = cells.get((wi, b))
+            if c:
+                d += c[0]
+                w += c[1]
+                n += c[2]
+        return round(w / d, 1) if n >= MIN_BIN_RUNS and d else None
+
+    # 每档的总样本数（含展示窗之前的 roll-1 周，那是滚动曲线的真实依据）
+    bin_totals: dict[int, int] = {}
+    for (_w, b), c in cells.items():
+        bin_totals[b] = bin_totals.get(b, 0) + int(c[2])
+
+    bins_out = []
+    for b in sorted({b for (_w, b) in cells}):
+        if bin_totals[b] < MIN_BIN_SEGS:
+            continue  # 样本太薄：一次课的几个段也能摊出「趋势」，那是假信号
+        hr_arr, roll_arr, segs_arr = [], [], []
+        dist_sum = 0.0
+        for wi in range(weeks):
+            c = cells.get((wi, b))
+            # hr：当周实际（横轴的诚实刻度，也用于 tooltip 说明该周练了没）
+            hr_arr.append(round(c[1] / c[0], 1)
+                          if c and c[2] >= MIN_BIN_RUNS else None)
+            # hr_roll：滚动 roll 周距离加权——主曲线用它，逐点连续、不再是断线
+            roll_arr.append(_span(b, wi, roll))
+            segs_arr.append(int(c[2]) if c else 0)
+            dist_sum += c[0] if c else 0.0
+        if sum(1 for v in roll_arr if v is not None) < 2:
+            continue  # 单点连不成趋势线，不进下拉框
+
+        early, recent = _span(b, edge - 1, edge), _span(b, weeks - 1, edge)
+        drop = (round(recent - early, 1)
+                if early is not None and recent is not None else None)
+        m, s = divmod(b, 60)
+        label = f"{m}:{s:02d}"
+        bins_out.append({
+            "start_s": b, "end_s": b + bin_s, "label": label,
+            "segs": int(sum(segs_arr)),
+            "distance_km": round(dist_sum / 1000, 1),
+            "hr": hr_arr, "hr_roll": roll_arr, "week_segs": segs_arr,
+            "early_hr": early, "recent_hr": recent, "drop": drop,
+            "note": _pace_week_note(drop, label, edge),
+        })
+
+    # 跑量最大的档排最前（跑得最多的配速 = 训练主配速）→ UI 默认选中。
+    # 不能用样本段数排序：间歇课的段又短又多，段级口径下 3:20 档有 41 段却只有
+    # 16.6km，而主配速 5:00 档 35 段有 314km——按段数排会把默认档停在间歇配速上。
+    bins_out.sort(key=lambda x: (-x["distance_km"], x["start_s"]))
+    return {
+        "bin_s": bin_s, "weeks": weeks_out, "roll_weeks": roll,
+        "bins": bins_out,
+        "default_start_s": bins_out[0]["start_s"] if bins_out else None,
+    }
 
 
 def _seg_kind(seg: dict, whole_pace: float | None) -> str | None:

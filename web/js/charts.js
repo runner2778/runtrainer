@@ -19,8 +19,6 @@ export function chartColors() {
     kindT: cssVar('--kind-t'),
     kindI: cssVar('--kind-i'),
     kindR: cssVar('--kind-r'),
-    // 时期对比线用独立色相序列（与训练类型色无关的语义）
-    period: [cssVar('--kind-e'), cssVar('--kind-t'), cssVar('--kind-i'), cssVar('--kind-r'), cssVar('--kind-m')],
     ramp: [cssVar('--ramp-0'), cssVar('--ramp-1'), cssVar('--ramp-2'), cssVar('--ramp-3')],
   };
 }

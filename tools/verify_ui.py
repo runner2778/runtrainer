@@ -109,31 +109,135 @@ def loaded():
         out["act_closed"] = json.loads(js(
             "JSON.stringify({masks: document.querySelectorAll('.modal-mask').length})"))
 
-        # 5) 健康页：120 天范围选项 + 配速-心率周均图卡片
+        # 5) 健康页：120 天范围选项 + 同配速心率（选定档 × 近 16 周）卡片
         js("location.hash = '#/health'")
         settle(3)
-        out["health"] = json.loads(js(
-            "JSON.stringify({has120: [...document.querySelectorAll('#page-health select option')]"
-            "  .some(o => o.value === '120'),"
-            " pacehrCard: !!document.querySelector('#health-pacehr-chart'),"
-            " pacehrText: (document.querySelector('#health-pacehr-chart')"
-            "  ? document.querySelector('#health-pacehr-chart').closest('.card').textContent : '')"
-            "  .replace(/\\s+/g,' ').slice(0,60),"
-            " summary: (document.querySelector('.pacehr-summary')||{textContent:''}).textContent"
-            "  .replace(/\\s+/g,' ').trim().slice(0,80),"
-            " noFourSixty: !/\\d:60/.test(document.querySelector('#page-health').textContent||''),"
-            " paceOpt: (echarts.getInstanceByDom(document.getElementById('health-pacehr-chart'))||{})"
-            "  .getOption ? (() => {const o = echarts.getInstanceByDom("
-            "  document.getElementById('health-pacehr-chart')).getOption();"
-            "  const s = o.series || [];"
-            "  return {n: s.length, firstW: (s[0]||{}).lineStyle ? s[0].lineStyle.width : 0,"
-            "  firstSym: !!(s[0]||{}).showSymbol,"
-            "  lastDashed: !!(s[s.length-1]||{}).lineStyle && s[s.length-1].lineStyle.type === 'dashed',"
-            "  axisInterval: o.xAxis[0].axisLabel ? o.xAxis[0].axisLabel.interval : null};})() : {},"
-            " gridBottom: (() => {const g = (id) => {const c = echarts.getInstanceByDom("
+        out["health"] = json.loads(js(r"""JSON.stringify((() => {
+  const el = document.getElementById('health-pacehr-chart');
+  const card = el ? el.closest('.card') : null;
+  const sel = card ? card.querySelector('select') : null;
+  const inst = el ? echarts.getInstanceByDom(el) : null;
+  const o = inst ? inst.getOption() : null;
+  const sBars = (o && o.series) ? o.series[0] : null;     // 当周次数柱
+  const sRoll = (o && o.series && o.series[2]) ? o.series[2] : null;  // 滚动均值主曲线
+  const d = (sRoll && sRoll.data) ? sRoll.data : [];
+  const txt = card ? card.textContent.replace(/\s+/g, ' ').trim() : '';
+  return {
+    has120: [...document.querySelectorAll('#page-health select option')]
+      .some((op) => op.value === '120'),
+    pacehrCard: !!el,
+    noFourSixty: !/\d:60/.test(document.querySelector('#page-health').textContent || ''),
+    noUndef: !/undefined|NaN/.test(txt),
+    cardTxt: txt.slice(0, 160),
+    opts: sel ? sel.options.length : 0,
+    selLabel: (sel && sel.selectedIndex >= 0)
+      ? sel.options[sel.selectedIndex].textContent.trim() : '',
+    nSeries: o ? o.series.length : 0,
+    nYAxis: o ? o.yAxis.length : 0,
+    nPts: d.length,
+    nonNull: d.filter((v) => v != null).length,
+    markLines: (sRoll && sRoll.markLine) ? sRoll.markLine.data.length : 0,
+    markArea: (sRoll && sRoll.markArea) ? sRoll.markArea.data.length : 0,
+    areaColor: (sRoll && sRoll.markArea) ? sRoll.markArea.itemStyle.color : '',
+    areaLabel: (sRoll && sRoll.markArea) ? sRoll.markArea.label.formatter : '',
+    rollColor: sRoll ? sRoll.lineStyle.color : '',
+    trendStyle: (card ? card.querySelector('.pacehr-summary') : null)
+      ? (card.querySelector('.pacehr-summary').getAttribute('style') || '') : '',
+    barType: sBars ? sBars.type : '',
+    barPts: sBars ? sBars.data.length : 0,
+    barSum: sBars ? sBars.data.reduce((a, b) => a + (b || 0), 0) : 0,
+    nCat: o ? o.xAxis[0].data.length : 0,
+    xInterval: o ? o.xAxis[0].axisLabel.interval : null,
+    yScale: o ? o.yAxis[0].scale : null,
+    seriesName: sRoll ? sRoll.name : '',
+  };
+})())"""))
+        # 下拉里的全部档位（确认快档真的在列表里、默认档跟着里程走）
+        out["health_opts"] = json.loads(js(r"""JSON.stringify((() => {
+  const el = document.getElementById('health-pacehr-chart');
+  const sel = el ? el.closest('.card').querySelector('select') : null;
+  return sel ? [...sel.options].map((o) => o.textContent.trim()) : [];
+})())"""))
+        # 切换配速档 → 只重画这张图，数据随之换成该档的周序列，其它图不受影响
+        out["health_switch"] = json.loads(js(r"""JSON.stringify((() => {
+  const el = document.getElementById('health-pacehr-chart');
+  const card = el ? el.closest('.card') : null;
+  const sel = card ? card.querySelector('select') : null;
+  if (!sel || sel.options.length < 2) {
+    return { skipped: sel ? sel.options.length : 0 };
+  }
+  sel.selectedIndex = 1;
+  sel.dispatchEvent(new Event('change', { bubbles: true }));
+  return { switched: true, to: sel.options[1].textContent.trim() };
+})())"""))
+        settle(1.5)
+        out["health_switch_after"] = json.loads(js(r"""JSON.stringify((() => {
+  const el = document.getElementById('health-pacehr-chart');
+  const card = el ? el.closest('.card') : null;
+  const sel = card ? card.querySelector('select') : null;
+  const o = echarts.getInstanceByDom(el).getOption();
+  return {
+    selLabel: sel.options[sel.selectedIndex].textContent.trim(),
+    seriesName: o.series[2].name,
+    nPts: o.series[2].data.length,
+    nonNull: o.series[2].data.filter(function (v) { return v != null; }).length,
+    barSum: o.series[0].data.reduce(function (a, b) { return a + (b || 0); }, 0),
+    chartAlive: !!el.querySelector('canvas'),
+    canvases: document.querySelectorAll('#page-health canvas').length,
+  };
+})())"""))
+        out["health_grid"] = json.loads(js(
+            "JSON.stringify((() => {const g = (id) => {const c = echarts.getInstanceByDom("
             "  document.getElementById(id)); return c ? c.getOption().grid[0].bottom : null;};"
             "  return {pace: g('health-pacehr-chart'), sleep: g('health-sleep-chart'),"
-            "  hrv: g('health-hrv-chart')};})()})"))
+            "  hrv: g('health-hrv-chart')};})())"))
+        # 5.1) 「时刻随运动数据更新」：广播一轮 sync-done（同步完成的真实信号），
+        # 验证这张图确实重拉了 list_pace_bin_weekly 并重绘，且不丢用户选的档。
+        # 判据用「API 被调用次数 + paceWeekly 对象引用被换新」——
+        # `_lastLoad` 经 Alpine.$data() 读回恒为 0（探针侧不可观测），不能当信号。
+        out["health_sync_before"] = json.loads(js(r"""JSON.stringify((() => {
+  const data = window.Alpine.$data(document.getElementById('page-health'));
+  window.__pbBeforeSel = data.paceBinSel;
+  window.__pbWeeklyRef = data.paceWeekly;
+  window.__pbChartData = JSON.stringify(data.paceWeekly.bins);
+  let calls = 0;
+  let wrapped = false;
+  try {
+    const api = window.pywebview.api;
+    const orig = api.list_pace_bin_weekly;
+    api.list_pace_bin_weekly = function (...a) {
+      calls += 1;
+      return orig.apply(api, a);
+    };
+    window.__pbCalls = () => calls;
+    wrapped = true;
+  } catch (e) {
+    wrapped = 'fail:' + e.message;
+  }
+  window.dispatchEvent(new Event('sync-done'));
+  return { wrapped: wrapped, beforeSel: window.__pbBeforeSel };
+})())"""))
+        settle(3)
+        out["health_after_sync"] = json.loads(js(r"""JSON.stringify((() => {
+  const data = window.Alpine.$data(document.getElementById('page-health'));
+  const el = document.getElementById('health-pacehr-chart');
+  const o = echarts.getInstanceByDom(el).getOption();
+  return {
+    calls: window.__pbCalls ? window.__pbCalls() : -1,
+    newPayload: data.paceWeekly !== window.__pbWeeklyRef,
+    payloadSame: JSON.stringify(data.paceWeekly.bins) === window.__pbChartData,
+    selKept: data.paceBinSel === window.__pbBeforeSel,
+    bins: data.paceWeekly.bins.length,
+    weeks: data.paceWeekly.weeks.length,
+    seriesName: o.series[2].name,
+    nPts: o.series[2].data.length,
+    nonNull: o.series[2].data.filter(function (v) { return v != null; }).length,
+    markLines: o.series[2].markLine ? o.series[2].markLine.data.length : 0,
+    barSum: o.series[0].data.reduce(function (a, b) { return a + (b || 0); }, 0),
+    canvasAlive: !!el.querySelector('canvas'),
+    allCanvases: document.querySelectorAll('#page-health canvas').length,
+  };
+})())"""))
 
         # 5.5) 仪表盘：恢复度/倒计时/KPI 瓷砖/三图/教练卡片全部渲染
         js("location.hash = '#/dashboard'")
@@ -243,4 +347,4 @@ window.events.loaded += loaded
 webview.start()
 print("=== UI 验证结果 ===")
 for k, v in out.items():
-    print(f"{k}: {json.dumps(v, ensure_ascii=False)[:300]}")
+    print(f"{k}: {json.dumps(v, ensure_ascii=False)[:600]}")

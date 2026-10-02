@@ -416,6 +416,22 @@ class Api:
         return pace_bin_hr(acts, start, end)
 
     @envelope
+    def list_pace_bin_weekly(self, weeks: int = 16):
+        """同配速档的近 N 个自然周心率趋势（20s 梯度 × 次内分段 × 滚动窗口周曲线）。"""
+        from datetime import date, timedelta
+        from ..db.repos import activity_repo
+        from ..domain.workout_analysis import (
+            PACE_TREND_EDGE_WEEKS, pace_bin_weekly, pace_hr_segments)
+        weeks = max(2, min(52, int(weeks)))   # 边界钳制：前端传值不可信
+        end = date.today()
+        # 多取 roll-1 周：最早的几个点也要有等宽的滚动窗口（见函数说明）
+        start = end - timedelta(weeks=weeks + PACE_TREND_EDGE_WEEKS - 1)
+        # 段级口径：结构里的 work 段才能让 3:20 这类快档有样本（整场均值会把
+        # 间歇课抹平）。无结构的活动由 pace_hr_segments 回退整场，不丢数据。
+        rows = activity_repo.list_structure_rows(start.isoformat(), end.isoformat())
+        return pace_bin_weekly(pace_hr_segments(rows), end, weeks=weeks)
+
+    @envelope
     def read_clipboard(self):
         """读系统剪贴板文本（WebView2 不放开粘贴，前端 Ctrl+V 回填用）。"""
         from ..utils import clipboard

@@ -119,6 +119,30 @@ def list_pace_hr_rows(start_date: str | None = None, end_date: str | None = None
         return [dict(r) for r in conn.execute(sql, args)]
 
 
+def list_structure_rows(start_date: str | None = None, end_date: str | None = None,
+                        limit: int = 5000) -> list[dict]:
+    """「次内分段」配速-心率分析：配速-心率五列 + structure_json。
+
+    与 list_pace_hr_rows 的区别只在多带 structure_json——整场平均配速会把
+    间歇课抹平（3:20/km 的重复跑整场看是 4:30），段级 pace_s_km/avg_hr 才能
+    让快配速档有样本。仍刻意不带 laps_json / samples 两个大字段。
+    无结构的活动（CSV/FIT 手动导入不生成结构）由调用方回退整场口径。
+    """
+    sql = ("SELECT start_ts, distance_m, avg_pace_s_km, avg_hr, max_hr, structure_json"
+           " FROM activities WHERE 1=1")
+    args: list = []
+    if start_date:
+        sql += " AND date(start_ts, 'unixepoch', 'localtime') >= date(?)"
+        args.append(start_date)
+    if end_date:
+        sql += " AND date(start_ts, 'unixepoch', 'localtime') <= date(?)"
+        args.append(end_date)
+    sql += " ORDER BY start_ts DESC LIMIT ?"
+    args.append(limit)
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(sql, args)]
+
+
 def get_activity(activity_id: int) -> dict | None:
     with get_conn() as conn:
         return row_to_dict(conn.execute("SELECT * FROM activities WHERE id = ?", (activity_id,)).fetchone())
