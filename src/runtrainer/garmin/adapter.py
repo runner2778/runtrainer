@@ -36,6 +36,10 @@ class RawActivity:
     elevation_gain_m: float | None = None
     elevation_loss_m: float | None = None
     calories: int | None = None
+    # 主观数据（佳明 Connect 里由运动员自己打的标签，详情接口才有）：
+    # feel 为 5 档主观感受、rpe 为用力程度，原始编码归一交给 domain.activity_edit
+    feel: int | None = None
+    rpe: int | None = None
     laps: list[dict] = field(default_factory=list)  # 规范形 [{distance_m, elapsed_s, avg_hr, pace_s_km}]
     samples: list[dict] = field(default_factory=list)  # [{t_offset_s, hr, speed_mps, cadence, altitude_m}]
 

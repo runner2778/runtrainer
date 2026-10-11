@@ -178,6 +178,47 @@ def repair_recovery_paces(plan_id: int, slow_s_km: float, fast_s_km: float) -> i
     return len(ids)
 
 
+def repace_workouts(plan_id: int, pace_map: dict, since_date: str | None = None,
+                    include_ai: bool = False) -> list[dict]:
+    """把课表里「引擎生成、尚未执行」的课的配速列对齐到新的 VDOT。
+
+    走这条路径而不是整表重建：VDOT 微调不该把已排好的课日期/内容/分段洗牌。
+    只动 pace_zone/pace_slow_s_km/pace_fast_s_km 三列，距离/时长/分段/状态
+    一律不碰。AI 改过的课（source='ai'）默认跳过——那是教练按当天情况特意
+    定的配速，不该被批量覆盖。返回被改动的行摘要（date/slot/zone/新旧配速）。
+    """
+    if not pace_map:
+        return []
+    changed: list[dict] = []
+    with get_conn() as conn:
+        sql = ("SELECT id, date, slot, title, pace_zone, pace_slow_s_km, pace_fast_s_km,"
+               " source FROM planned_workouts WHERE plan_id = ?"
+               " AND status NOT IN ('done', 'skipped') AND pace_zone IS NOT NULL")
+        args: list = [plan_id]
+        if since_date:
+            sql += " AND date >= ?"
+            args.append(since_date)
+        if not include_ai:
+            sql += " AND (source IS NULL OR source != 'ai')"
+        for r in conn.execute(sql, args).fetchall():
+            target = pace_map.get(r["pace_zone"])
+            if not target:
+                continue
+            slow, fast = target
+            if (r["pace_slow_s_km"] is not None
+                    and abs(r["pace_slow_s_km"] - slow) < 1.0
+                    and r["pace_fast_s_km"] is not None
+                    and abs(r["pace_fast_s_km"] - fast) < 1.0):
+                continue
+            conn.execute(
+                "UPDATE planned_workouts SET pace_slow_s_km = ?, pace_fast_s_km = ?"
+                " WHERE id = ?", (slow, fast, r["id"]))
+            changed.append({"id": r["id"], "date": r["date"], "slot": r["slot"],
+                            "zone": r["pace_zone"], "title": r["title"],
+                            "old_slow": r["pace_slow_s_km"], "new_slow": slow})
+    return changed
+
+
 def get_phase_weeks(plan: dict) -> dict:
     """phase_weeks JSON 列 → dict。"""
     return jsonutil.loads(plan["phase_weeks"]) or {}

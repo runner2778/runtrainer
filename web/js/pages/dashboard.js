@@ -115,13 +115,57 @@ const HTML = `
        x-text="d.race && d.race.progress_pct > 0 ? '今天休息 🎉 没有训练安排' : '课表还未开始：开课前的日子没有计划课，可以自由跑'"></p>
   </div>
 
-  <!-- 成绩水平预估：近 30 天数据综合（比赛/手表 VO2max/配速-心率/间歇），
-       每次同步后 syncRefresh → load 自动重算；与目标页 180 天基线不同，
-       这里回答「现在能跑多少」 -->
+  <!-- 主观状态（近 7 天）：手动录入、截图识别、佳明 app 标签三处同权，都汇总在这里。
+       只做展示、不折成负荷数值——标注样本还太少，算出来的数字会显得比实际可靠。 -->
+  <div class="card" x-show="subj() && (d.subjective.rpe_n || d.subjective.feel_n)">
+    <div class="flex mb8" style="flex-wrap:wrap;gap:8px;align-items:center">
+      <h2 style="margin:0">主观状态</h2>
+      <span class="muted" x-text="'近 ' + d.subjective.days + ' 天 · 已标注 ' + d.subjective.rpe_n + ' 次'"></span>
+      <span class="spacer"></span>
+      <span class="muted" x-show="d.subjective.runs" x-text="'期间跑步 ' + d.subjective.runs + ' 次'"></span>
+    </div>
+    <div class="grid cols-3">
+      <div>
+        <div class="muted">平均用力程度 RPE</div>
+        <b x-text="d.subjective.rpe_avg != null ? d.subjective.rpe_avg + ' / 10' : '—'"></b>
+        <div class="t-hint" x-text="rpeNote()"></div>
+      </div>
+      <div>
+        <div class="muted">最高 RPE</div>
+        <b x-text="d.subjective.rpe_max != null ? d.subjective.rpe_max + ' / 10' : '—'"></b>
+        <div class="t-hint">9–10 通常是比赛或全力测试</div>
+      </div>
+      <div>
+        <div class="muted">平均主观感受</div>
+        <b x-text="d.subjective.feel_avg != null ? d.subjective.feel_avg + ' / 5' : '—'"></b>
+        <div class="t-hint">1 很轻松 → 5 非常吃力（佳明标签已换算到本量表）</div>
+      </div>
+    </div>
+    <template x-if="(d.subjective.notes || []).length">
+      <div class="mt8">
+        <div class="muted">最近备注</div>
+        <ul style="padding-left:18px">
+          <template x-for="(n, i) in d.subjective.notes" :key="i">
+            <li><span class="muted" x-text="n.date + ' '"></span><span x-text="n.note"></span></li>
+          </template>
+        </ul>
+      </div>
+    </template>
+  </div>
+
+  <!-- 成绩水平预估：综合比赛/手表 VO2max/配速-心率/间歇能力得出「现在能跑多少」。
+       默认窗口 180 天、每次同步后 syncRefresh → load 自动重算；点「一键评估」
+       则改用最近三周、间歇/速度能力占大头的口径，结果落库成为本卡显示的预估，
+       并在有新活动（含比赛）进库时自动重估。 -->
   <div class="card" x-show="d.ability_30d">
-    <div class="flex mb8" style="flex-wrap:wrap;gap:8px">
+    <div class="flex mb8" style="flex-wrap:wrap;gap:8px;align-items:center">
       <h2 style="margin:0">成绩水平预估</h2>
-      <span class="muted" x-text="'近 ' + (d.ability_30d.window_days || 30) + ' 天 · ' + abilityCaption()"></span>
+      <span class="muted" x-text="abilityCaption()"></span>
+      <span class="spacer"></span>
+      <button class="btn small" :disabled="assessing"
+              :title="'按最近三周训练重估成绩：配速-储备心率区间、有氧配速、间歇/速度能力（占大头）等；结果落库并同步全站页面'"
+              @click="runAssessment()"
+              x-text="assessing ? '评估中…' : assessLabel()"></button>
     </div>
     <template x-if="d.ability_30d.vdot">
       <div>
@@ -133,16 +177,28 @@ const HTML = `
             <p class="muted">按当前水平推算的等效成绩（非训练目标）</p>
             <div class="flex mt8" style="flex-wrap:wrap;gap:6px">
               <template x-for="(sec, label) in d.ability_30d.predictions" :key="label">
-                <span class="badge soft" x-text="label + ' ' + fmtRace(sec)"></span>
+                <span class="badge soft" :title="bandTitle(label, sec)"
+                      x-text="label + ' ' + fmtRace(sec) + bandSuffix(label)"></span>
               </template>
             </div>
+            <p class="muted mt8" x-show="noIntervals()">当前数据不足以支持高精度预测：还没有比赛记录校准预测区间，跑过比赛后自动给出 ±区间。</p>
             <p class="muted mt8" x-show="d.ability_30d.plan_vdot" x-text="planVdotNote()"></p>
+            <!-- 课表配速 vs 当前预估的漂移：水平变了但课表还按旧 VDOT 标注时提示并可一键对齐。
+                 只改未执行课的配速列，不重排日期、不动距离与分段。 -->
+            <template x-if="ps && ps.available && ps.needs_sync">
+              <div class="psync mt8">
+                <span class="badge warn">配速待同步</span>
+                <span class="muted" x-text="psText()"></span>
+                <button class="btn small" :disabled="syncing" @click="syncPaces()"
+                        x-text="syncing ? '同步中…' : (ps.locked ? '同步配速（覆盖手动锁定）' : '同步课表配速')"></button>
+              </div>
+            </template>
           </div>
           <div>
             <p class="muted">依据</p>
             <ul class="mt8" style="padding-left:18px">
               <template x-for="ev in d.ability_30d.evidence" :key="ev.source">
-                <li><span x-text="evName(ev.source)"></span>：<span x-text="ev.detail"></span><span class="muted" x-text="'（VDOT ' + ev.vdot + '）'"></span></li>
+                <li><span x-text="evName(ev.source)"></span>：<span x-text="ev.detail"></span><span class="muted" x-show="ev.vdot" x-text="'（VDOT ' + ev.vdot + '）'"></span></li>
               </template>
             </ul>
           </div>
@@ -166,8 +222,8 @@ const HTML = `
             </template>
           </div>
         </details>
-        <!-- 近一年最佳成绩 + 训练保持度：数据窗口 30 天时不够「现在能跑多少」
-             的参考，这里补上全年硬证据 -->
+        <!-- 近一年最佳成绩 + 训练保持度：支撑「现在能跑多少」的全年硬证据
+             （评估窗口只有几周时，PB 与保持度是窗口外唯一的水平参照） -->
         <div class="mt8">
           <div class="flex" style="flex-wrap:wrap;gap:6px;align-items:center">
             <span class="muted">近一年最佳</span>
@@ -244,14 +300,19 @@ const HTML = `
 
   <div class="card" x-show="d.coach && (d.coach.advice || d.coach.last_chat)">
     <h2>AI 教练</h2>
-    <div x-show="d.coach.advice">
-      <p x-text="d.coach.advice.summary"></p>
-      <ul class="mt8" style="padding-left:18px">
-        <template x-for="s in d.coach.advice.key_signals" :key="s">
-          <li x-text="s"></li>
-        </template>
-      </ul>
-    </div>
+    <!-- 必须用 x-if：x-show 只隐藏元素，内部表达式照常求值，
+         而 get_dashboard 的 coach.advice 可以是 null（尚未生成建议）→
+         每次重绘都抛 TypeError 并打断该子树的响应式。 -->
+    <template x-if="d.coach && d.coach.advice">
+      <div>
+        <p x-text="d.coach.advice.summary"></p>
+        <ul class="mt8" style="padding-left:18px">
+          <template x-for="s in d.coach.advice.key_signals" :key="s">
+            <li x-text="s"></li>
+          </template>
+        </ul>
+      </div>
+    </template>
     <p class="muted" x-show="!d.coach.advice && d.coach.last_chat" x-text="(roleLabel(d.coach.last_chat.role) + '：' + d.coach.last_chat.content) + '…'"></p>
     <p class="muted" x-show="d.coach.advice && d.coach.last_chat"
        x-text="'最近对话（' + roleLabel(d.coach.last_chat.role) + '）：' + d.coach.last_chat.content + '…'"></p>
@@ -266,6 +327,11 @@ export function initDashboard() {
 
   window.Alpine.data('dashboardPage', () => ({
     d: null,
+    assessing: false,
+    // 课表配速漂移状态（{available, plan_vdot, target_vdot, delta, needs_sync,
+    // stale_workouts, total_workouts, locked}），来自 get_pace_sync_status
+    ps: null,
+    syncing: false,
 
     async init() {
       await this.load();
@@ -302,6 +368,52 @@ export function initDashboard() {
       this.d = data || {};
       await this.$nextTick();
       this.renderCharts();
+      this.loadPaceSync();
+    },
+    // 课表配速漂移单独取（不塞进 get_dashboard：这条只在「水平变了但课表没跟上」
+    // 时才显示，属于附加信息，不该拖慢主载荷）
+    async loadPaceSync() {
+      const { ok, data } = await tryCall('get_pace_sync_status');
+      this.ps = ok ? data : null;
+    },
+    psText() {
+      const p = this.ps;
+      if (!p || !p.available) return '';
+      const d = p.delta || 0;
+      return `预估 VDOT ${p.target_vdot} 比课表的 ${p.plan_vdot} `
+        + `${d > 0 ? '高' : '低'} ${Math.abs(d).toFixed(1)}，`
+        + `${p.stale_workouts}/${p.total_workouts} 节未执行课的配速仍是旧值`;
+    },
+    subj() {
+      return (this.d && this.d.subjective) || null;
+    },
+    rpeNote() {
+      const s = this.subj();
+      if (!s || s.rpe_avg == null) {
+        return '还没标过用力程度：录入活动时填一下，或同步佳明 app 里的标签';
+      }
+      if (s.rpe_avg >= 8) return '整体偏「拼」——检查轻松跑是不是也跑太狠了';
+      if (s.rpe_avg >= 6) return '中等偏上，正常训练区间';
+      return '整体偏轻松，基础期正常';
+    },
+    async syncPaces() {
+      if (this.syncing) return;
+      this.syncing = true;
+      try {
+        const force = !!(this.ps && this.ps.locked);
+        const { ok, data, error } = await tryCall('sync_plan_paces', force, false);
+        if (!ok) { this.$dispatch('toast', { text: '同步失败: ' + error }); return; }
+        if (data && data.changed) {
+          this.$dispatch('toast', { text: `已按当前水平同步 ${data.repaced} 节课的配速` });
+          await this.load();
+          window.dispatchEvent(new Event('data-changed'));
+        } else {
+          this.$dispatch('toast', { text: '课表配速已是最新，无需同步' });
+          this.loadPaceSync();
+        }
+      } finally {
+        this.syncing = false;
+      }
     },
 
     fmtKm(v) { return v == null ? '—' : String(Math.round(v * 10) / 10); },
@@ -313,7 +425,67 @@ export function initDashboard() {
     },
     abilityCaption() {
       const a = this.d.ability_30d || {};
-      return '每次同步自动重算 · 更新 ' + (a.as_of || '');
+      const win = '近 ' + (a.window_days || 180) + ' 天';
+      const upd = '更新 ' + (a.as_of || '');
+      if (a.mode !== 'quick') return win + ' · 每次同步自动重算 · ' + upd;
+      const ago = this.elapsedTxt(a.assessed_at);
+      return win + ' · 一键评估' + (ago ? '（' + ago + '）' : '') + ' · ' + upd;
+    },
+    // 一键评估结果的时间戳是本地时区 ISO，直接 Date.parse 即可
+    elapsedTxt(iso) {
+      if (!iso) return '';
+      const t = Date.parse(iso);
+      if (isNaN(t)) return '';
+      const mins = Math.floor((Date.now() - t) / 60000);
+      if (mins < 1) return '刚刚';
+      if (mins < 60) return mins + ' 分钟前';
+      const hrs = Math.floor(mins / 60);
+      return hrs < 24 ? hrs + ' 小时前' : Math.floor(hrs / 24) + ' 天前';
+    },
+    assessLabel() {
+      return (this.d.ability_30d || {}).mode === 'quick'
+        ? '重新评估（最近三周）' : '一键评估（最近三周）';
+    },
+    // 一键评估：调后端按最近三周重估并落库 → 本页重拉 → 广播 data-changed
+    // 让其余页面按同一份新预估刷新（当前页自己已重拉，故不用 sync-done，
+    // 免得再触发一次 get_dashboard）
+    async runAssessment() {
+      if (this.assessing) return;
+      this.assessing = true;
+      try {
+        const { ok, error } = await tryCall('run_quick_assessment');
+        if (!ok) {
+          this.$dispatch('toast', { text: '一键评估失败: ' + error });
+          return;
+        }
+        await this.load();
+        window.dispatchEvent(new Event('data-changed'));
+        const a = (this.d || {}).ability_30d || {};
+        this.$dispatch('toast', { text: a.vdot
+          ? '已按最近三周训练重估：VDOT ' + a.vdot
+          : '评估完成：近三周数据不足，暂按长期口径显示' });
+      } finally {
+        this.assessing = false;
+      }
+    },
+    // 预测区间（按个人比赛误差校准，约 80% 置信）：有该距离记录才显示 ±，
+    // 悬停说明来源；全部没有时卡片给出「数据不足」说明（不装拍出来的区间）
+    bandOf(label) {
+      return ((this.d.ability_30d || {}).prediction_bands || {})[label] || null;
+    },
+    bandSuffix(label) {
+      const b = this.bandOf(label);
+      return b ? ' ±' + this.fmtRace(b.half_s) : '';
+    },
+    bandTitle(label, sec) {
+      const b = this.bandOf(label);
+      if (!b) return label + ' ' + this.fmtRace(sec) + '：暂无该距离的比赛误差记录，不给出预测区间';
+      return label + ' ' + this.fmtRace(sec) + ' ±' + this.fmtRace(b.half_s)
+        + '（约 80% 置信，按你近 ' + b.n + ' 场该距离比赛的真实预测误差推算）';
+    },
+    noIntervals() {
+      const a = this.d.ability_30d || {};
+      return !!(a.vdot && !(a.prediction_bands && Object.keys(a.prediction_bands).length));
     },
     evName(src) {
       return { recent_race: '近期比赛', garmin_vo2max: '手表 VO2max',
@@ -323,7 +495,8 @@ export function initDashboard() {
                cap_check: '上限校验', year_best: '近一年最佳',
                hr_trend: '配速-心率趋势',
                plan_execution: '课表完成度',
-               recent_efforts: '近期最快分段' }[src] || src;
+               recent_efforts: '近期最快分段',
+               personal_weights: '个人分量权重', personal_bias: '个人偏差校准' }[src] || src;
     },
     weekLoadNote() {
       const w = (this.d || {}).week_load;

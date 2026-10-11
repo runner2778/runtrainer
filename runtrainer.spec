@@ -17,6 +17,7 @@ hiddenimports += ["tzdata"]                              # zoneinfo（Windows �
 
 datas = []
 datas += [("web", "web")]                                # 前端（_MEIPASS/web）
+datas += [("assets", "assets")]                          # 窗口图标（config.icon_path）
 datas += [("src/runtrainer/db/migrations", "runtrainer/db/migrations")]  # SQL 迁移
 datas += collect_data_files("tzdata")
 datas += collect_data_files("webview")

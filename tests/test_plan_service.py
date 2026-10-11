@@ -81,7 +81,7 @@ def test_target_vdot_too_ambitious_warns():
 
 def test_vo2max_fallback_and_plan_refresh():
     """无比赛时回退到手表 vo2max（经综合模型，单证据时等价读数）；
-    同步后 VDOT 变化 → active 课表重建。"""
+    同步后 VDOT 变化 → 原地同步配速，不重建课表。"""
     from runtrainer.db.repos import profile_repo
     profile_repo.upsert_profile({"vo2max": 55.0})
     ctx = plan_service.wizard_context()
@@ -93,13 +93,18 @@ def test_vo2max_fallback_and_plan_refresh():
     p1 = plan_service.create_goal_and_plan(_params())
     assert p1["vdot"] == 55.0
     assert p1["vdot_source"] == "ability"
-    assert plan_service.refresh_active_plan() is None   # 无变化不重建
+    assert plan_service.refresh_active_plan() is None   # 无变化不动
 
     _seed_race(30, 5000, 22 * 60)   # 新比赛 → VDOT ≈ 44.5
-    p2 = plan_service.refresh_active_plan()
-    assert p2 is not None and p2["rebuilt"] is True
-    assert plan_repo.get_plan(p1["plan_id"])["status"] == "superseded"
-    assert plan_repo.get_plan(p2["plan_id"])["status"] == "active"
+    before = plan_repo.get_plan(p1["plan_id"])
+    res = plan_service.refresh_active_plan()
+    assert res is not None and res["changed"] is True and res["repaced"] > 0
+    assert res["plan_vdot"] == 55.0 and res["target_vdot"] < 55.0
+    after = plan_repo.get_plan(p1["plan_id"])
+    # 同一张计划原地更新（不再归档重建）：仍是 active，只有 VDOT/配速变了
+    assert after["id"] == before["id"] and after["status"] == "active"
+    assert after["vdot"] < before["vdot"]
+    assert goal_repo.get_goal(before["goal_id"])["vdot"] == after["vdot"]
 
 
 def test_manual_vdot_wins():
@@ -176,15 +181,60 @@ def test_refresh_preserves_start_phase():
     params = _params()
     params["plan"]["start_phase"] = "transition"
     p1 = plan_service.create_goal_and_plan(params)
-    # 新比赛 → 水平变化 → 重建；时期起点应保留
+    # 新比赛 → 水平变化；配速原地同步，时期起点与计划本身都不该被动
     _seed_race(5, 5000, 21 * 60)
-    p2 = plan_service.refresh_active_plan()
-    assert p2 is not None
-    assert p2["start_phase"] == "transition"
-    assert plan_repo.get_plan(p2["plan_id"])["start_phase"] == "transition"
+    res = plan_service.refresh_active_plan()
+    assert res is not None and res["changed"] is True
+    plan = plan_repo.get_plan(p1["plan_id"])
+    assert plan["status"] == "active"
+    assert plan["start_phase"] == "transition"
 
 
 def test_wizard_context_has_phase_suggestion():
     ctx = plan_service.wizard_context()
     assert ctx["phase_suggestion"]["phase"] in ("base", "early", "transition", "final", "taper")
     assert isinstance(ctx["phase_suggestion"]["reasons"], list)
+
+
+# ---- 一键评估（最近三周 + 间歇/速度能力占大头，结果落库） ----
+
+
+def test_quick_assessment_persists_three_week_window():
+    _seed_race(10, 5000, 22 * 60)
+    a = plan_service.quick_assessment()
+    assert a["mode"] == "quick"
+    assert a["window_days"] == 21          # 三周，而非默认 180 天
+    assert a["assessed_at"]
+    assert a["acts_n"] == 1
+    assert a["vdot"] is not None and a["predictions"]
+    # 落库：可展示切片存进 app_state
+    from runtrainer.db.repos import kv_repo
+    from runtrainer.utils import jsonutil
+    stored = jsonutil.loads(kv_repo.get_app_state(plan_service.QUICK_KEY))
+    assert stored["mode"] == "quick" and stored["vdot"] == a["vdot"]
+
+
+def test_quick_assessment_cached_none_before_first_run():
+    _seed_race(10, 5000, 22 * 60)
+    assert plan_service.quick_assessment_cached() is None
+
+
+def test_quick_assessment_cached_reassesses_on_new_activity():
+    """新活动（含比赛）进库 → 条数变化 → 缓存自动失效并重估。"""
+    _seed_race(10, 5000, 22 * 60)
+    first = plan_service.quick_assessment()
+    assert plan_service.quick_assessment_cached()["vdot"] == first["vdot"]
+    _seed_race(3, 5000, 20 * 60, name="新比赛")   # 更快的一场 → 数字必变
+    again = plan_service.quick_assessment_cached()
+    assert again["acts_n"] == 2                  # 条数即失效信号
+    assert again["vdot"] != first["vdot"]
+
+
+def test_quick_assessment_tolerates_corrupt_cache():
+    """存量脏数据不该让仪表盘整页失败：解析不了就当没存过，并清掉免得反复报错。"""
+    from runtrainer.db.repos import kv_repo
+    _seed_race(10, 5000, 22 * 60)
+    kv_repo.set_app_state(plan_service.QUICK_KEY, "{ 不是 JSON")
+    assert plan_service.quick_assessment_cached() is None
+    assert kv_repo.get_app_state(plan_service.QUICK_KEY) is None
+

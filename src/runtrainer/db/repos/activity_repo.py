@@ -10,7 +10,21 @@ ACTIVITY_FIELDS = (
     "duration_s", "distance_m", "avg_pace_s_km", "avg_hr", "max_hr", "avg_cadence",
     "max_cadence", "stride_length_m", "aerobic_te", "anaerobic_te", "exercise_load",
     "elevation_gain_m", "elevation_loss_m", "calories", "laps_json", "structure_json",
-    "has_samples", "created_at",
+    "has_samples", "created_at", "feel", "rpe", "note", "manual",
+)
+
+# activities 表里 NOT NULL 且带 DEFAULT 的列（值缺失时按 DEFAULT 兜底）。
+# 迁移脚本里的 DEFAULT 只在「列未出现在 INSERT 列表」时生效，本函数的
+# INSERT/UPDATE 列全写，所以必须在这里显式补。
+ACTIVITY_NOT_NULL_DEFAULTS = {"tz_offset_min": 0, "has_samples": 0, "manual": 0}
+
+# 可手动编辑的字段（桌面「活动详情」与手动录入用）。距离/用时/配速互相关联，
+# 改了要重算派生量，见 domain.activity_edit.merge_edit。配速本身也在列：截图
+# 识别可能只读到配速、读不到距离/用时，得让用户把它填得进去。
+EDITABLE_FIELDS = (
+    "name", "sport", "distance_m", "duration_s", "avg_pace_s_km",
+    "avg_hr", "max_hr", "calories",
+    "avg_cadence", "stride_length_m", "feel", "rpe", "note",
 )
 
 
@@ -22,6 +36,12 @@ def upsert_activity(a: dict) -> tuple[int, bool]:
     """
     data = dict(a)
     data.setdefault("created_at", datetime.now(timezone.utc).isoformat(timespec="seconds"))
+    # NOT NULL DEFAULT 列要在 INSERT 里显式给值：本函数把 ACTIVITY_FIELDS 全列
+    # 都绑进语句，None 会直接撞 NOT NULL，列的 DEFAULT 根本轮不到生效
+    # （0013 加了 manual NOT NULL DEFAULT 0 后，佳明同步插新活动就整批失败）。
+    for col, default in ACTIVITY_NOT_NULL_DEFAULTS.items():
+        if data.get(col) is None:
+            data[col] = default
     placeholders = ", ".join("?" for _ in ACTIVITY_FIELDS)
     with get_conn() as conn:
         existing = conn.execute(
@@ -119,6 +139,24 @@ def list_pace_hr_rows(start_date: str | None = None, end_date: str | None = None
         return [dict(r) for r in conn.execute(sql, args)]
 
 
+def list_subjective_rows(start_date: str | None = None,
+                         end_date: str | None = None,
+                         limit: int = 5000) -> list[dict]:
+    """主观感受/用力程度的轻量行：只取周聚合需要的四列。"""
+    sql = ("SELECT start_ts, feel, rpe, distance_m FROM activities WHERE 1=1")
+    args: list = []
+    if start_date:
+        sql += " AND date(start_ts, 'unixepoch', 'localtime') >= date(?)"
+        args.append(start_date)
+    if end_date:
+        sql += " AND date(start_ts, 'unixepoch', 'localtime') <= date(?)"
+        args.append(end_date)
+    sql += " ORDER BY start_ts DESC LIMIT ?"
+    args.append(limit)
+    with get_conn() as conn:
+        return [dict(r) for r in conn.execute(sql, args)]
+
+
 def list_structure_rows(start_date: str | None = None, end_date: str | None = None,
                         limit: int = 5000) -> list[dict]:
     """「次内分段」配速-心率分析：配速-心率五列 + structure_json。
@@ -149,13 +187,20 @@ def get_activity(activity_id: int) -> dict | None:
 
 
 def update_activity(activity_id: int, fields: dict) -> None:
-    allowed = {"name", "sport", "distance_m", "duration_s", "avg_hr", "max_hr", "calories"}
-    data = {k: v for k, v in fields.items() if k in allowed}
+    data = {k: v for k, v in fields.items() if k in EDITABLE_FIELDS}
     if not data:
         return
     sets = ", ".join(f"{k} = ?" for k in data)
     with get_conn() as conn:
         conn.execute(f"UPDATE activities SET {sets} WHERE id = ?", (*data.values(), activity_id))
+
+
+def delete_activity(activity_id: int) -> bool:
+    """删除活动（含采样）。手动补录的错录需要能删。返回是否真删到行。"""
+    with get_conn() as conn:
+        cur = conn.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
+        conn.execute("DELETE FROM activity_samples WHERE activity_id = ?", (activity_id,))
+        return cur.rowcount > 0
 
 
 def save_samples(activity_id: int, rows: list[tuple]) -> None:

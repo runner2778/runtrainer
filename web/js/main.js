@@ -5,8 +5,9 @@ import { initDashboard } from './pages/dashboard.js';
 import { initGoal } from './pages/goal.js';
 import { initHealth } from './pages/health.js';
 import { initSettings } from './pages/settings.js';
+import { initVdot } from './pages/vdot.js';
 
-const PAGES = ['dashboard', 'calendar', 'goal', 'coach', 'activities', 'health', 'settings'];
+const PAGES = ['dashboard', 'calendar', 'goal', 'coach', 'activities', 'health', 'vdot', 'settings'];
 
 // 跨页共享状态放在 Alpine.store：
 // 本环境的 WebView2 中，命名 x-data 组件之间不共享父作用域（子组件读不到
@@ -68,6 +69,7 @@ function registerPages() {
   initCalendar();
   initGoal();
   initCoach();
+  initVdot();
 }
 
 async function loadBackendPrefs(store) {

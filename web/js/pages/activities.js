@@ -22,13 +22,15 @@ const HTML = `
     </select>
   </div>
   <div class="spacer"></div>
+  <button class="btn" @click="recognizeShot()">🖼️ 截图识别</button>
+  <button class="btn" @click="openForm()">✏️ 手动录入</button>
   <button class="btn primary" @click="importFiles()">📥 导入 FIT/CSV</button>
 </div>
 <div class="card">
   <table>
     <thead><tr>
       <th>日期</th><th>名称</th><th class="num">距离(km)</th><th class="num">时长</th>
-      <th class="num">配速</th><th class="num">平均心率</th><th>来源</th>
+      <th class="num">配速</th><th class="num">平均心率</th><th class="num">感受/用力</th><th>来源</th>
     </tr></thead>
     <tbody>
       <template x-for="a in list" :key="a.id">
@@ -39,13 +41,14 @@ const HTML = `
           <td class="num" x-text="fmtTime(a.duration_s)"></td>
           <td class="num" x-text="fmtPace(a.avg_pace_s_km)"></td>
           <td class="num" x-text="a.avg_hr ? a.avg_hr.toFixed(0) : '—'"></td>
+          <td class="num" x-text="subjText(a)"></td>
           <td>
             <span class="badge soft" x-text="a.source"></span>
             <span class="badge" :class="kindClass(a.workout)" x-text="a.workout ? a.workout.label : ''"></span>
           </td>
         </tr>
       </template>
-      <tr x-show="!list.length"><td colspan="7" class="muted">暂无活动，点击右上角导入文件</td></tr>
+      <tr x-show="!list.length"><td colspan="8" class="muted">暂无活动，点击右上角导入文件</td></tr>
     </tbody>
   </table>
 </div>
@@ -58,6 +61,13 @@ const HTML = `
     <div class="flex">
       <h3 x-text="detail ? detail.name : ''"></h3>
       <div class="spacer"></div>
+      <button class="btn small" @click="openForm(null, detail)">✏️ 编辑</button>
+      <button class="btn small"
+              x-show="detail && detail.manual"
+              :class="_confirmDel ? 'primary' : ''"
+              @click="deleteActivity()">
+        <span x-text="_confirmDel ? '再点一次确认删除' : '🗑 删除'"></span>
+      </button>
       <button class="btn small" @click="detail=null">✕</button>
     </div>
     <div class="grid cols-4 mb8">
@@ -72,6 +82,15 @@ const HTML = `
       <div><div class="muted">有氧训练效果</div><b x-text="detail && detail.aerobic_te != null ? detail.aerobic_te.toFixed(1) : '—'"></b></div>
       <div><div class="muted">训练负荷</div><b x-text="detail && detail.exercise_load != null ? detail.exercise_load.toFixed(0) : '—'"></b></div>
     </div>
+    <!-- 主观数据：手动录入/截图识别/佳明标签三处同权，都落在这两列 -->
+    <div class="grid cols-3 mb8">
+      <div><div class="muted">主观感受</div><b x-text="feelText(detail)"></b></div>
+      <div><div class="muted">用力程度 RPE</div><b x-text="rpeText(detail)"></b></div>
+      <div><div class="muted">爬升</div><b x-text="detail && detail.elevation_gain_m ? detail.elevation_gain_m.toFixed(0) + ' m' : '—'"></b></div>
+    </div>
+    <p class="mb8" x-show="detail && detail.note">
+      <span class="muted">备注：</span><span x-text="detail ? detail.note : ''"></span>
+    </p>
     <p class="mb8" x-show="detail && detail.workout && detail.workout.label">
       <span class="badge" :class="kindClass(detail.workout)" x-text="detail.workout.label"></span>
       <span class="muted" x-show="detail.workout && detail.workout.hr_pct != null"
@@ -126,6 +145,123 @@ const HTML = `
     </template>
   </div>
 </div>
+</template>
+
+<!-- 手动录入 / 编辑表单（同样必须 x-if） -->
+<template x-if="form">
+<div class="modal-mask" @click.self="closeForm()">
+  <div class="modal wide">
+    <div class="flex">
+      <h3 x-text="form.mode === 'edit' ? '编辑活动' : '手动录入活动'"></h3>
+      <div class="spacer"></div>
+      <button class="btn small" @click="closeForm()">✕</button>
+    </div>
+
+    <div class="flex mb8" x-show="form.mode === 'new'">
+      <button class="btn small" @click="recognizeShot()" :disabled="form.busy">
+        🖼️ 从截图识别填写
+      </button>
+      <span class="muted" style="font-size:12px">
+        识别结果只做预填，请核对后再保存（OCR 有误差，不会直接入库）
+      </span>
+    </div>
+
+    <template x-if="form.ocr">
+      <div class="ocr-panel mb8">
+        <div class="flex">
+          <span class="badge soft">识别原文</span>
+          <div class="spacer"></div>
+          <button class="btn small" @click="form.ocr=null">收起</button>
+        </div>
+        <pre class="ocr-raw" x-text="form.ocr.raw_text"></pre>
+        <template x-if="form.preview">
+          <img class="ocr-preview" :src="form.preview" alt="识别截图">
+        </template>
+        <p class="muted" style="font-size:12px" x-show="ocrMatchedText()"
+           x-text="'识别到：' + ocrMatchedText()"></p>
+        <p class="ocr-warn" x-show="(form.ocr.warnings || []).length"
+           x-text="(form.ocr.warnings || []).join('；')"></p>
+      </div>
+    </template>
+
+    <div class="form-grid">
+      <div class="form-row">
+        <label>名称</label>
+        <input type="text" x-model="form.f.name" placeholder="如：早上轻松跑">
+      </div>
+      <div class="form-row">
+        <label>开始时间</label>
+        <input type="datetime-local" x-model="form.f.start_local">
+      </div>
+      <div class="form-row">
+        <label>距离 (km)</label>
+        <input type="text" x-model="form.f.distance_km" placeholder="如 10.5">
+      </div>
+      <div class="form-row">
+        <label>用时</label>
+        <input type="text" x-model="form.f.duration" placeholder="H:MM:SS 或 MM:SS 或分钟">
+      </div>
+      <div class="form-row">
+        <label>平均心率 (bpm)</label>
+        <input type="text" x-model="form.f.avg_hr">
+      </div>
+      <div class="form-row">
+        <label>最大心率 (bpm)</label>
+        <input type="text" x-model="form.f.max_hr">
+      </div>
+      <div class="form-row">
+        <label>步频 (步/分)</label>
+        <input type="text" x-model="form.f.avg_cadence">
+      </div>
+      <div class="form-row">
+        <label>步幅 (m)</label>
+        <input type="text" x-model="form.f.stride_length_m" placeholder="留空则由配速与步频推算">
+      </div>
+      <div class="form-row">
+        <label>累计爬升 (m)</label>
+        <input type="text" x-model="form.f.elevation_gain_m" placeholder="影响水平预估的坡度折算">
+      </div>
+      <div class="form-row">
+        <label>热量 (kcal)</label>
+        <input type="text" x-model="form.f.calories">
+      </div>
+      <div class="form-row">
+        <label>主观感受</label>
+        <select x-model="form.f.feel">
+          <option value="">未填</option>
+          <option value="1">1 很轻松</option>
+          <option value="2">2 轻松</option>
+          <option value="3">3 一般</option>
+          <option value="4">4 吃力</option>
+          <option value="5">5 非常吃力</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label>用力程度 RPE</label>
+        <select x-model="form.f.rpe">
+          <option value="">未填</option>
+          <template x-for="i in 10" :key="i">
+            <option :value="String(i)" x-text="i + rpeHint(i)"></option>
+          </template>
+        </select>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>备注</label>
+      <textarea rows="2" x-model="form.f.note" placeholder="天气、路线、身体反应…"></textarea>
+    </div>
+    <p class="muted" style="font-size:12px">
+      用时填「45」按 45 分钟算，「52:36」按 52 分 36 秒算。距离与用时至少填一个；
+      两者都填时配速按它们算。主观数据会参与水平预估（标了「很轻松」的强度课影响力会被调低）。
+    </p>
+    <div class="flex mt8">
+      <div class="spacer"></div>
+      <button class="btn" @click="closeForm()">取消</button>
+      <button class="btn primary" @click="submitForm()" :disabled="form.busy"
+              x-text="form.mode === 'edit' ? '保存修改' : '保存活动'"></button>
+    </div>
+  </div>
+</div>
 </template>`;
 
 export function initActivities() {
@@ -137,6 +273,9 @@ export function initActivities() {
     sourceFilter: '',
     list: [],
     detail: null,
+    _confirmDel: false,
+    // 手动录入/编辑表单：{mode, id, f, ocr, preview, busy}
+    form: null,
 
     async init() {
       await this.load();
@@ -169,7 +308,7 @@ export function initActivities() {
       if (!r.ok) { this.$dispatch('toast', { text: '导入失败: ' + r.error }); return; }
       const m = `导入完成：新增 ${r.data.imported} 条，跳过 ${r.data.skipped} 条` +
         (r.data.errors.length ? `，失败 ${r.data.errors.length} 条` : '') +
-        (r.data.plan_rebuilt ? `；水平已更新，课表已按新 VDOT ${r.data.plan_vdot} 自动重建` : '');
+        (r.data.plan_rebuilt ? `；水平已更新，课表配速已按新 VDOT ${r.data.plan_vdot} 同步` : '');
       this.$dispatch('toast', { text: m });
       await this.load();
       // 新活动/新 PB 会改水平预估与课表 → 通知其余页面（仪表盘/日历/目标…）
@@ -180,8 +319,209 @@ export function initActivities() {
       const { ok, data, error } = await tryCall('get_activity', id);
       if (!ok) { this.$dispatch('toast', { text: error }); return; }
       this.detail = data;
+      this._confirmDel = false;
       await this.$nextTick();
       this.renderDetailCharts();
+    },
+
+    // ---- 主观数据（手动录入 / 截图识别 / 佳明标签三处同权）----
+    /** 列表里的「感受/用力」短标签；两者都没填时显示占位符 */
+    subjText(a) {
+      const parts = [];
+      if (a && a.feel) parts.push('感受 ' + a.feel + '/5');
+      if (a && a.rpe) parts.push('RPE ' + a.rpe + '/10');
+      return parts.length ? parts.join(' · ') : '—';
+    },
+    feelText(d) {
+      if (!d || !d.feel) return '—';
+      const names = { 1: '很轻松', 2: '轻松', 3: '一般', 4: '吃力', 5: '非常吃力' };
+      return `${d.feel}/5（${names[d.feel] || '—'}）`;
+    },
+    rpeText(d) {
+      if (!d || !d.rpe) return '—';
+      return `${d.rpe}/10`;
+    },
+    /** RPE 档位提示：低档会被预估系统降权，所以直接标在选项上 */
+    rpeHint(i) {
+      if (i <= 3) return '（很轻松·预估降权）';
+      if (i <= 5) return '（轻松·预估降权）';
+      if (i <= 8) return '（正常）';
+      return '（拼尽全力）';
+    },
+
+    // ---- 手动录入 / 编辑表单 ----
+    openForm(prefill, fromDetail) {
+      const f = fromDetail ? this._formFromRecord(fromDetail)
+                           : this._blankForm();
+      if (prefill) Object.assign(f, prefill);
+      this.form = { mode: fromDetail ? 'edit' : 'new',
+                    id: fromDetail ? fromDetail.id : null,
+                    f, ocr: null, preview: null, busy: false };
+    },
+    closeForm() { this.form = null; },
+    _blankForm() {
+      return { name: '', start_local: this._localInput(), distance_km: '',
+               duration: '', avg_hr: '', max_hr: '', avg_cadence: '',
+               stride_length_m: '', elevation_gain_m: '', calories: '',
+               feel: '', rpe: '', note: '' };
+    },
+    _formFromRecord(a) {
+      const s = (v) => (v == null || v === '' ? '' : String(v));
+      return {
+        name: a.name || '',
+        start_local: this._localInput(a.start_ts),
+        distance_km: a.distance_m ? String(+(a.distance_m / 1000).toFixed(3)) : '',
+        duration: a.duration_s ? this.fmtClock(a.duration_s) : '',
+        avg_hr: a.avg_hr ? String(Math.round(a.avg_hr)) : '',
+        max_hr: a.max_hr ? String(Math.round(a.max_hr)) : '',
+        avg_cadence: a.avg_cadence ? String(Math.round(a.avg_cadence)) : '',
+        stride_length_m: s(a.stride_length_m),
+        elevation_gain_m: a.elevation_gain_m ? String(Math.round(a.elevation_gain_m)) : '',
+        calories: s(a.calories),
+        feel: a.feel ? String(a.feel) : '',
+        rpe: a.rpe ? String(a.rpe) : '',
+        note: a.note || '',
+      };
+    },
+    /** 时间戳 → datetime-local 需要的本地「YYYY-MM-DDTHH:MM」 */
+    _localInput(ts) {
+      const d = ts ? new Date(ts * 1000) : new Date();
+      const p = (n) => String(n).padStart(2, '0');
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+        + `T${p(d.getHours())}:${p(d.getMinutes())}`;
+    },
+    /** 「45」按分钟、「52:36」按分秒、「1:25:30」按时分秒；解析不出返回 null */
+    parseDuration(t) {
+      const s = String(t == null ? '' : t).trim();
+      if (!s) return null;
+      const parts = s.split(':').map((x) => x.trim());
+      if (parts.some((x) => x === '' || !Number.isFinite(Number(x)))) return null;
+      const n = parts.map(Number);
+      if (n.length === 1) return n[0] > 0 ? Math.round(n[0] * 60) : null;
+      if (n.length === 2) return Math.round(n[0] * 60 + n[1]);
+      if (n.length === 3) return Math.round(n[0] * 3600 + n[1] * 60 + n[2]);
+      return null;
+    },
+    _numOrNull(v) {
+      const s = String(v == null ? '' : v).trim();
+      if (!s) return null;
+      const n = Number(s);
+      return Number.isFinite(n) ? n : null;
+    },
+    /** 表单 → 入库字段。留空的一律不带，避免编辑时把已有值抹成 null */
+    buildFields() {
+      const f = this.form.f;
+      const km = this._numOrNull(f.distance_km);
+      const out = {
+        start_local: (f.start_local || '').trim(),
+        distance_m: km != null ? km * 1000 : null,
+        duration_s: this.parseDuration(f.duration),
+        avg_hr: this._numOrNull(f.avg_hr),
+        max_hr: this._numOrNull(f.max_hr),
+        avg_cadence: this._numOrNull(f.avg_cadence),
+        stride_length_m: this._numOrNull(f.stride_length_m),
+        elevation_gain_m: this._numOrNull(f.elevation_gain_m),
+        calories: this._numOrNull(f.calories),
+        feel: this._numOrNull(f.feel),
+        rpe: this._numOrNull(f.rpe),
+        note: (f.note || '').trim(),
+      };
+      if ((f.name || '').trim()) out.name = f.name.trim();
+      return out;
+    },
+    async submitForm() {
+      if (!this.form || this.form.busy) return;
+      const fields = this.buildFields();
+      if (fields.distance_m == null && fields.duration_s == null) {
+        this.$dispatch('toast', { text: '距离和用时至少要填一个' });
+        return;
+      }
+      this.form.busy = true;
+      try {
+        if (this.form.mode === 'edit') {
+          const id = this.form.id;
+          // 编辑走部分更新：null 会被当成「清空」，所以只送真正填了的字段
+          delete fields.start_local;
+          for (const k of Object.keys(fields)) {
+            if (fields[k] == null && k !== 'note') delete fields[k];
+          }
+          const { ok, error } = await tryCall('update_activity_fields', id, fields);
+          if (!ok) { this.$dispatch('toast', { text: '保存失败: ' + error }); return; }
+          this.closeForm();
+          await this.load();
+          if (this.detail && this.detail.id === id) await this.openDetail(id);
+          this.$dispatch('toast', { text: '已保存修改' });
+          window.dispatchEvent(new Event('data-changed'));
+          return;
+        }
+        const { ok, data, error } = await tryCall('add_manual_activity', fields);
+        if (!ok) { this.$dispatch('toast', { text: '录入失败: ' + error }); return; }
+        this.closeForm();
+        await this.load();
+        const ps = data && data.pace_sync;
+        let m = '已录入活动';
+        if (ps && ps.changed) m += `；水平已更新，课表配速同步 ${ps.repaced} 处`;
+        this.$dispatch('toast', { text: m });
+        window.dispatchEvent(new Event('data-changed'));
+      } finally {
+        if (this.form) this.form.busy = false;
+      }
+    },
+
+    // ---- 截图识别：只做预填，不直接入库 ----
+    async recognizeShot() {
+      if (!this.form || this.form.busy) return;
+      this.form.busy = true;
+      try {
+        const { ok, data, error } = await tryCall('recognize_activity_screenshot', null);
+        if (!ok) { this.$dispatch('toast', { text: '识别失败: ' + error, ms: 5000 }); return; }
+        if (!data || data.cancelled) return;
+        this.form.ocr = { raw_text: data.raw_text || '',
+                          warnings: data.warnings || [],
+                          matched: data.matched || {} };
+        this.form.preview = data.preview_data_url || null;
+        this.fillFromOcr(data.fields || {});
+        const n = Object.keys(data.matched || {}).length;
+        this.$dispatch('toast', { text: `识别到 ${n} 项，请核对后保存` });
+      } finally {
+        this.form.busy = false;
+      }
+    },
+    /** 只覆盖识别到的项：用户先手填过、OCR 没读到的字段保持不变 */
+    fillFromOcr(fl) {
+      const f = this.form.f;
+      const set = (k, v) => { if (v != null && v !== '') f[k] = String(v); };
+      if (fl.distance_m != null) f.distance_km = String(+(fl.distance_m / 1000).toFixed(3));
+      if (fl.duration_s != null) f.duration = this.fmtClock(fl.duration_s);
+      set('avg_hr', fl.avg_hr != null ? Math.round(fl.avg_hr) : null);
+      set('avg_cadence', fl.avg_cadence != null ? Math.round(fl.avg_cadence) : null);
+      set('stride_length_m', fl.stride_length_m);
+      set('calories', fl.calories);
+      set('feel', fl.feel);
+      set('rpe', fl.rpe);
+      if (fl.name && !(f.name || '').trim()) f.name = fl.name;
+    },
+    ocrMatchedText() {
+      const m = this.form && this.form.ocr ? this.form.ocr.matched : null;
+      if (!m) return '';
+      const names = { distance_m: '距离', duration_s: '用时', avg_pace_s_km: '配速',
+        avg_hr: '心率', avg_cadence: '步频', stride_length_m: '步幅',
+        calories: '热量', feel: '主观感受', rpe: '用力程度', name: '名称' };
+      return Object.keys(m).filter((k) => names[k])
+        .map((k) => `${names[k]}「${m[k]}」`).join('、');
+    },
+
+    async deleteActivity() {
+      if (!this.detail) return;
+      if (!this._confirmDel) { this._confirmDel = true; return; }
+      const id = this.detail.id;
+      const { ok, error } = await tryCall('delete_activity_record', id);
+      if (!ok) { this.$dispatch('toast', { text: '删除失败: ' + error }); return; }
+      this.detail = null;
+      this._confirmDel = false;
+      await this.load();
+      this.$dispatch('toast', { text: '已删除该活动' });
+      window.dispatchEvent(new Event('data-changed'));
     },
     renderDetailCharts() {
       if (!this.detail) return;

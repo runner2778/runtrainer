@@ -28,6 +28,14 @@ def _num(v):
         return None
 
 
+def _norm_int(v) -> int | None:
+    """0 视为「没打标签」（佳明用 0 表示未填），其余取整。"""
+    n = _num(v)
+    if n is None or n <= 0:
+        return None
+    return int(round(n))
+
+
 def _parse_local_dt(s: str) -> datetime | None:
     """'2026-09-01 06:30:00'（设备本地时间，无时区）→ 本地 datetime。"""
     try:
@@ -206,6 +214,16 @@ class GarminConnectAdapter(GarminAdapter):
             if hrs:
                 avg_hr = round(sum(hrs) / len(hrs), 1)
         samples = self._normalize_samples(self._parse_detail_metrics(detail))
+        feel, rpe = self._parse_detail_subjective(detail)
+        # 主观标签在两种响应形态里位置不同（summaryDTO 子对象 / 顶层）；
+        # _sf 在 summaryDTO 存在时只查子对象，这里显式补一次顶层兜底。
+        # 读不到仍是 None，不会覆盖 detail 的结果。
+        if feel is None:
+            feel = _norm_int(_first(s, "workoutFeel", "directWorkoutFeel")
+                             or _first(summary, "workoutFeel", "directWorkoutFeel"))
+        if rpe is None:
+            rpe = _norm_int(_first(s, "workoutRpe", "directWorkoutRpe")
+                            or _first(summary, "workoutRpe", "directWorkoutRpe"))
         return RawActivity(
             external_id=external_id,
             name=str(_first(summary, "activityName") or "活动"),
@@ -225,9 +243,61 @@ class GarminConnectAdapter(GarminAdapter):
             exercise_load=_num(_sf("exerciseLoad")),
             elevation_gain_m=_num(_sf("elevationGain")),
             calories=int(_sf("calories")) if _sf("calories") else None,
+            feel=feel,
+            rpe=rpe,
             laps=_parse_laps(_first(summary, "splitSummaries", default=[])),
             samples=samples,
         )
+
+    @staticmethod
+    def _parse_detail_subjective(detail: dict) -> tuple[int | None, int | None]:
+        """从 activityDetailMetrics 里取主观感受/用力程度。
+
+        这两列不是逐采样变化的量（整场一个值，只有首行或少数行非空），
+        所以不能按「逐行采样」解析，要独立扫一遍取非空值。
+        两种形态（CN 区描述符列 / 国际区自描述列）都覆盖。
+        """
+        d = detail or {}
+        adm = _first(d, "activityDetailMetrics") or {}
+        keys = ("directWorkoutFeel", "directWorkoutRpe")
+        cols: dict[str, list] = {}
+        if isinstance(adm, list) and not (adm and isinstance(adm[0], dict)
+                                          and adm[0].get("key")):
+            descriptors = (_first(d, "metricDescriptors", default=[]) or
+                           _first(adm, "metricDescriptors", default=[]) or [])
+            idx: dict[str, int] = {}
+            for md in descriptors:
+                if not isinstance(md, dict) or not md.get("key"):
+                    continue
+                pos = md.get("metricsIndex", md.get("index"))
+                if pos is not None:
+                    idx[str(md["key"])] = int(pos)
+            for key in keys:
+                i = idx.get(key)
+                if i is None:
+                    continue
+                vals = []
+                for row in adm:
+                    values = row.get("metrics") if isinstance(row, dict) else row
+                    if isinstance(values, (list, tuple)) and i < len(values):
+                        vals.append(values[i])
+                cols[key] = vals
+        else:
+            rows = (adm.get("metrics") if isinstance(adm, dict) else None) or adm
+            if isinstance(rows, (list, tuple)):
+                for m in rows:
+                    if isinstance(m, dict) and m.get("key") in keys:
+                        cols[str(m["key"])] = list(m.get("metrics") or [])
+        out = []
+        for key in keys:
+            v = None
+            for raw in cols.get(key, []):
+                n = _num(raw)
+                if n:
+                    v = int(round(n))
+                    break
+            out.append(v)
+        return out[0], out[1]
 
     def _parse_detail_metrics(self, detail: dict) -> list[dict]:
         """activityDetailMetrics 采样行解析（兼容 CN 区与国际区形态）。

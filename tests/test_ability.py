@@ -655,19 +655,28 @@ def test_interval_recent_workout_dominates():
 
 
 def test_race_weight_decays_with_age():
-    """比赛权重随龄衰减：同一条 10K（42:00）在 10 天前 vs 150 天前——
-    旧比赛对预估的向心力更弱，结果更靠近手表读数；文案标注时间衰减。"""
+    """比赛权重随龄衰减：同一条 10K（42:00，等效 47.9）在 10 天前 vs
+    150 天前，对照另一个在场分量（近一月最快分段 40.0，比比赛慢）——
+    新比赛权重 0.28 拉得狠，旧比赛衰减到 0.16、向心力更弱，结果更靠近
+    分段；文案标注时间衰减。手表读数 50.0 不参与加权（新语义：只在没有
+    其它分量时兜底）。"""
+    d = dates.today() - timedelta(days=10)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 40.0}
+
     def est_for(days_ago):
         return ab.compute_ability(
-            [_act(days_ago, 259, 182, 200, 9800, 42 * 60)], 50.0)
+            [_act(days_ago, 259, 182, 200, 9800, 42 * 60)], 50.0,
+            year_bests=[eff])
     est_new = est_for(10)
     est_old = est_for(150)
     race_vdot = round(vd.estimate_vdot(9800, 42 * 60), 1)
-    # 读数 50 高于比赛等效 47.9：比赛是把结果往下拉的锚。新比赛权重 0.28
-    # （vs 读数 0.16）拉得狠；旧比赛衰减到 0.16 → 向心力更弱、结果更贴读数
+    # 分段 40.0 是向下拉的锚：新比赛（权重 0.28）拉得狠，结果更贴比赛；
+    # 旧比赛（150 天 → 0.16）向心力更弱，结果更贴分段
     assert abs(est_new["vdot"] - race_vdot) < abs(est_old["vdot"] - race_vdot)
-    assert abs(est_old["vdot"] - 50.0) < abs(est_new["vdot"] - 50.0)
-    assert est_old["vdot"] > est_new["vdot"]
+    assert abs(est_old["vdot"] - 40.0) < abs(est_new["vdot"] - 40.0)
+    assert est_old["vdot"] < est_new["vdot"]
+    assert not any(e["source"] == "garmin_vo2max" for e in est_new["evidence"])
     ev_new = next(e for e in est_new["evidence"] if e["source"] == "recent_race")
     assert "衰减" not in ev_new["detail"]
     ev_old = next(e for e in est_old["evidence"] if e["source"] == "recent_race")
@@ -676,24 +685,29 @@ def test_race_weight_decays_with_age():
 
 def test_old_race_cap_relaxes_with_age():
     """旧比赛上限按时间放宽：150 天前 10K（55:00，VDOT≈34.9）+ 近期
-    5:45/km 强度课（VDOT≈34.4，低于旧比赛不触发抬线）+ 虚高读数 63 →
-    上限 = 比赛 + 3.1（旧规则 +2 会钉死），预估被钳到放宽后的上限。"""
+    5:45/km 强度课（VDOT≈34.4）+ 3:25/km 间歇课（VDOT≈58）→ 加权远超
+    旧规则 +2 上限，被钳到放宽后的上限（+3.125）。手表读数 63 已不参与
+    加权（新语义：只在没有其它分量时兜底——旧版靠虚高读数把加权顶过
+    上限的场景已不存在，由真实训练证据替代）。"""
     acts = [_q(345, d) for d in (1, 3, 6)]
     acts.append(_act(150, 337, 182, 200, 9800, 55 * 60))  # 10K 55:00 ≈ VDOT 34.9
+    acts.append(_interval_act(4, pace=205))  # work 段 3:25/km → 间歇分量 ≈58
     est = ab.compute_ability(acts, 63.0, profile_max_hr=193)
     race_ev = next(ev for ev in est["evidence"] if ev["source"] == "recent_race")
-    q_ev = next(ev for ev in est["evidence"] if ev["source"] == "quality_workouts")
     slack = ab.RACE_CAP_BASE + ab.RACE_CAP_GROW * (150 - ab.RACE_FULL_DAYS) / ab.RACE_CAP_GROW_DAYS
     assert abs(slack - 3.125) < 1e-9
     cap = race_ev["vdot"] + slack
-    # 加权（旧比赛 0.16 / 巡航阈值 0.22 / 强度课 0.16 / 读数 0.16）超过放宽上限 → 钳制
-    weighted = round((race_ev["vdot"] * ab.RACE_WEIGHT_FLOOR
-                      + q_ev["vdot"] * 0.22 + q_ev["vdot"] * 0.16 + 63 * 0.16)
-                     / (ab.RACE_WEIGHT_FLOOR + 0.22 + 0.16 + 0.16), 1)
+    # 在场分量 = 旧比赛 / 巡航阈值 / 间歇 / 专项课——读数 63 被兜底规则剔除
+    assert {c["kind"] for c in est["components"]} == \
+        {"race", "threshold", "interval", "quality"}
+    # 未封顶加权（比赛 0.16 / 阈值 0.22 / 间歇 0.12 / 专项课 0.16）超过放宽上限
+    weighted = round(sum(c["vdot"] * c["weight"] for c in est["components"])
+                     / sum(c["weight"] for c in est["components"]), 1)
     assert weighted > cap
     assert abs(est["vdot"] - round(cap, 1)) < 0.11
-    # 旧规则 race+2 已挡不住读数——上限本身随比赛变旧而抬升
+    # 旧规则 race+2 已挡不住——上限本身随比赛变旧而抬升
     assert est["vdot"] > race_ev["vdot"] + ab.RACE_CAP_BASE + 0.05
+    assert not any(ev["source"] == "garmin_vo2max" for ev in est["evidence"])
     cap_ev = next(ev for ev in est["evidence"] if ev["source"] == "cap_check")
     assert "放宽" in cap_ev["detail"]
 
@@ -706,10 +720,11 @@ def test_recent_efforts_component_boosts_estimate():
     est = ab.compute_ability([], 50.0, year_bests=[eff])
     ev = next(e for e in est["evidence"] if e["source"] == "recent_efforts")
     assert "最快分段" in ev["detail"] and "10K" in ev["detail"]
-    # 无比赛权重表：读数 0.10 + 分段 0.15 → (50×0.10+50.5×0.15)/0.25 = 50.3
-    # （分段与读数差 0.2 ≤ PB_MIN_GAP，不触发 PB 加成——只测分量本身）
-    assert abs(est["vdot"] - round((50 * 0.10 + 50.5 * 0.15) / 0.25, 1)) < 0.11
+    # 新语义：手表读数只在没有其它分量时兜底——分段在场时读数不参与，
+    # 估计 = 分段本身（旧版 (50×0.10+50.5×0.15)/0.25 = 50.3 的摊薄已废除）
+    assert abs(est["vdot"] - 50.5) < 0.11
     assert est["vdot"] > 50.0
+    assert not any(e["source"] == "garmin_vo2max" for e in est["evidence"])
 
 
 def test_stale_efforts_not_used():
@@ -722,3 +737,193 @@ def test_stale_efforts_not_used():
     assert not any(e["source"] == "recent_efforts" for e in est["evidence"])
     # PB 加成仍生效：gap 5.0×0.35=1.75 → 封顶 +1.5 → 51.5
     assert est["vdot"] == 51.5
+
+
+# ---- 「一键评估」口径：最近三周窗口 + 间歇/速度能力占大头 ----
+
+
+def _interval_act(days_ago=5, pace=250):
+    return _act(days_ago, 320, 140, 185, 8000, 43 * 60, name="间歇训练", structure=[
+        {"type": "work", "distance_m": 800, "pace_s_km": pace, "avg_hr": 178},
+        {"type": "rest", "distance_m": 400, "pace_s_km": 430, "avg_hr": 150},
+        {"type": "work", "distance_m": 800, "pace_s_km": pace + 2, "avg_hr": 179},
+        {"type": "rest", "distance_m": 400, "pace_s_km": 432, "avg_hr": 151},
+    ])
+
+
+def test_quick_weights_make_interval_dominant():
+    """同一批数据（间歇课 + 慢速分段锚点）：快评口径下间歇权重 0.34
+    （vs 默认无比赛重排 0.16）更被间歇主导——测的是「被间歇主导」，
+    不是「一定变快」。两种口径的手表读数都已不参与（新语义：只在没有
+    其它分量时兜底）。"""
+    d = dates.today() - timedelta(days=10)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 10.0}
+    acts = [_interval_act()]
+    base = ab.compute_ability(acts, 50.0, profile_max_hr=185, year_bests=[eff])
+    quick = ab.compute_ability(acts, 50.0, profile_max_hr=185, year_bests=[eff],
+                               weight_profile=ab.QUICK_WEIGHTS)
+    iv = next(e for e in quick["evidence"] if e["source"] == "interval_ability")
+    assert abs(quick["vdot"] - iv["vdot"]) < abs(base["vdot"] - iv["vdot"])
+    assert quick["vdot"] > base["vdot"]
+    assert quick["vdot"] != base["vdot"]
+    assert not any(e["source"] == "garmin_vo2max" for e in base["evidence"])
+    assert not any(e["source"] == "garmin_vo2max" for e in quick["evidence"])
+
+
+def test_quick_weights_drop_watch_reading_when_training_evidence_present():
+    """手表读数只作底数：有训练分量在场时不参与加权——否则稀疏的间歇/分段
+    分量一缺席，归一化就把大头让给最不可信的读数（真实库曾算出 58.7，
+    而同年比赛/PB 硬证据只有 ~54）。"""
+    acts = [_interval_act()]
+    est = ab.compute_ability(acts, 68.0, profile_max_hr=185,
+                             weight_profile=ab.QUICK_WEIGHTS)
+    assert not any(e["source"] == "garmin_vo2max" for e in est["evidence"])
+    iv = next(e for e in est["evidence"] if e["source"] == "interval_ability")
+    assert est["vdot"] == iv["vdot"]      # 读数 68 完全不参与
+    assert est["vdot"] < 60.0
+
+
+def test_quick_weights_keep_watch_reading_as_last_resort():
+    """没有任何训练分量时（新手只有手表读数）读数仍兜底，不返回空。"""
+    est = ab.compute_ability([], 68.0, weight_profile=ab.QUICK_WEIGHTS)
+    assert est["vdot"] == 68.0
+    assert any(e["source"] == "garmin_vo2max" for e in est["evidence"])
+
+
+def test_quick_weights_without_interval_fall_to_efforts():
+    """没有带 work/rest 分段的间歇课时，间歇槽缺席 → _weighted 归一化把
+    权重让给「近期最快分段」（速度能力的直接测量），仍是速度能力主导。
+    快评口径分段权重 0.22 vs 默认 0.15——同一批数据下结果更贴近分段值；
+    手表读数不参与（新语义：只在没有其它分量时兜底）。"""
+    d = dates.today() - timedelta(days=10)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 54.0}
+    acts = [_q(300, 5), _q(300, 9)]     # 2 堂巡航课 → 阈值分量（VDOT≈40.9）
+    base = ab.compute_ability(acts, 50.0, profile_max_hr=193, year_bests=[eff])
+    quick = ab.compute_ability(acts, 50.0, profile_max_hr=193, year_bests=[eff],
+                               weight_profile=ab.QUICK_WEIGHTS)
+    assert not any(e["source"] == "interval_ability" for e in quick["evidence"])
+    assert any(e["source"] == "recent_efforts" for e in quick["evidence"])
+    assert quick["vdot"] > base["vdot"]
+    assert abs(quick["vdot"] - 54.0) < abs(base["vdot"] - 54.0)
+    assert not any(e["source"] == "garmin_vo2max" for e in base["evidence"])
+
+
+def test_quick_weights_do_not_touch_components_absent_from_profile():
+    """档案只覆盖列出的 kind：未列分量保留默认权重（不报错、不清零）。"""
+    acts = [_interval_act()]
+    est = ab.compute_ability(acts, 50.0, profile_max_hr=185,
+                             weight_profile={"interval": 0.34})
+    assert est["vdot"] is not None
+
+
+def test_effort_window_days_narrows_effort_component():
+    """effort_window_days 收窄「近期最快分段」的年龄上限：25 天前的分段
+    在默认 30 天窗口内计权，传 21 时被排除（一键评估只看最近三周）。"""
+    d = dates.today() - timedelta(days=25)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 52.0}
+    wide = ab.compute_ability([], 50.0, year_bests=[eff])
+    narrow = ab.compute_ability([], 50.0, year_bests=[eff], effort_window_days=21)
+    assert any(e["source"] == "recent_efforts" for e in wide["evidence"])
+    assert not any(e["source"] == "recent_efforts" for e in narrow["evidence"])
+
+
+# ---- 第十九批：手表读数兜底 / 全力测试跑通道 / 个人误差学习 ----
+
+def test_vo2max_drops_when_other_components_present():
+    """手表读数只在没有其它分量时兜底（默认口径）：有训练分量在场时不参与
+    加权、不出证据——回测实证读数是默认加权里最差的单分量（真实库读数 68
+    vs 比赛等效 ~54，单用它 16 场真实比赛偏差 −637s）。"""
+    d = dates.today() - timedelta(days=10)
+    eff = {"distance": "10K", "best_seconds": 2400, "date": d.isoformat(),
+           "source": "effort", "vdot": 50.5}
+    est = ab.compute_ability([], 68.0, year_bests=[eff])
+    assert abs(est["vdot"] - 50.5) < 0.11
+    assert not any(e["source"] == "garmin_vo2max" for e in est["evidence"])
+    # 没有任何其它分量时读数仍兜底，不返回空
+    est2 = ab.compute_ability([], 68.0)
+    assert est2["vdot"] == 68.0
+    assert any(e["source"] == "garmin_vo2max" for e in est2["evidence"])
+
+
+def test_own_max_channel_requires_intensity_floor_and_no_rest():
+    """比赛第三通道（对照当场峰值 ≥0.94）：必须叠加平均心率 ≥75% 档案
+    最大心率的下限并排除带休息段的间歇结构——轻松跑心率漂移（比值同样
+    好看）不能当比赛锚点（真实库踩过：漂移假比赛把半马预测拖到 43.6）。"""
+    est_max = 193.0
+    # 轻松跑漂移：对照当场峰值 0.944 但 平均/档案最大 0.699 < 0.75 → 不认
+    slow = [_act(10, 330, 135, 143, 10000, 55 * 60, name="慢跑")]
+    assert ab.best_recent_race(slow, est_max) is None
+    # 真·全力计时跑：173/182 = 0.95 且 173/193 = 0.896 → 认（此前被 0.90
+    # 线拒掉，真实库 18:31 的 5K 计时因此没进比赛锚点）
+    timed = [_act(10, 222, 173, 182, 5000, 18 * 60 + 31, name="操场测验")]
+    race = ab.best_recent_race(timed, est_max)
+    assert race is not None and race["distance_m"] == 5000
+    # 带休息段的间歇结构：比值达标也不认
+    interval_race = [_act(4, 320, 170, 180, 10000, 43 * 60, name="间歇", structure=[
+        {"type": "work", "distance_m": 800, "pace_s_km": 250, "avg_hr": 178},
+        {"type": "rest", "distance_m": 400, "pace_s_km": 430, "avg_hr": 150},
+        {"type": "work", "distance_m": 800, "pace_s_km": 252, "avg_hr": 179},
+        {"type": "rest", "distance_m": 400, "pace_s_km": 432, "avg_hr": 151},
+    ])]
+    assert ab.best_recent_race(interval_race, est_max) is None
+    # 同一条去掉休息段（连续全力跑）→ 认
+    continuous = [_act(4, 320, 170, 180, 10000, 43 * 60, name="测验跑",
+                       structure=[{"type": "work", "distance_m": 10000,
+                                   "pace_s_km": 320, "avg_hr": 170}])]
+    assert ab.best_recent_race(continuous, est_max) is not None
+
+
+def test_detect_races_keeps_real_and_filters_drift_fake():
+    """真实比赛检测（个人学习地面真值）：名称提示、或 平均心率 ≥75% 档案
+    最大 且 对照当场峰值 ≥88%；心率漂移慢跑与间歇结构被滤掉。"""
+    est_max = 193.0
+    acts = [
+        _act(30, 222, 173, 182, 5000, 18 * 60 + 31, name="操场计时"),  # 0.95/0.90 → 真
+        _act(20, 330, 127, 135, 10300, 55 * 60, name="轻松跑"),       # 0.94/0.66 → 漂移假比赛
+        _act(10, 260, 180, 190, 10000, 43 * 20, name="10K 比赛"),      # 名称提示 → 真
+        _act(5, 320, 178, 185, 10000, 43 * 60, name="间歇", structure=[
+            {"type": "work", "distance_m": 800, "pace_s_km": 250, "avg_hr": 178},
+            {"type": "rest", "distance_m": 400, "pace_s_km": 430, "avg_hr": 150},
+            {"type": "work", "distance_m": 800, "pace_s_km": 252, "avg_hr": 179},
+            {"type": "rest", "distance_m": 400, "pace_s_km": 432, "avg_hr": 151},
+        ]),
+    ]
+    races = ab.detect_races(acts, est_max)
+    assert [(r["label"], r["name"]) for r in races] == \
+        [("5K", "操场计时"), ("10K", "10K 比赛")]
+    # 按日期升序，且带 day / actual_vdot / 标准距离标签
+    assert [r["day"] for r in races] == sorted(r["day"] for r in races)
+    assert all(r["actual_vdot"] > 0 for r in races)
+
+
+def test_personal_history_applies_bias_and_intervals():
+    """个人误差学习接入预估（批33 证据管线）：无训练/比赛证据时各距离按
+    手表 VO2max 兜底、该距离历史误差校准（EWMA 慢学习 + 样本收缩 n/(n+3)）；
+    预测区间由跨距离池化的去偏残差给出——该距离没比赛也有区间（比赛少
+    ≠ 没有执行噪声基准），数据不足时才不给区间。"""
+    history = [
+        {"day": "2026-01-01", "label": "5K", "actual_vdot": 52.0,
+         "pred_vdot": 50.0, "feats": {}},
+        {"day": "2026-02-01", "label": "5K", "actual_vdot": 53.0,
+         "pred_vdot": 51.0, "feats": {}},
+    ]
+    est = ab.compute_ability([], 50.0, personal_history=history)
+    # 5K 历史误差 +2.0 ×2 → EWMA 0.72；应用 0.72×2/5 = 0.288 → +0.29 VDOT
+    assert est["predictions"]["5K"] == vd.predict_time(5000, 50.3)
+    # 其它距离无历史：不校准（保持 VO2max 兜底的原值）。管线预测用
+    # predict_time 原始公式值（不取整秒），与 equivalent_times 的取整表
+    # 只差亚秒——断言同一函数而不是取整表。
+    assert est["predictions"]["10K"] == vd.predict_time(10000, 50.0)
+    assert est["prediction_intervals"]["5K"]["n"] == 2
+    # 区间半宽 = 1.28 × sqrt(σ²_exec + SE²_center)：σ_exec 为跨距离池化的
+    # 去偏残差 RMSE（两场 5K，时序残差 2.0/1.9 → 1.95）向先验收缩（n=2, K=4）
+    # → sqrt((1.95²×2 + 2.5²×4)/6) ≈ 2.33；无训练证据 SE=0 → 半宽 ≈ 2.98
+    assert abs(est["prediction_intervals"]["5K"]["half_vdot"] - 2.98) < 0.01
+    # 10K 没比过赛也有区间（执行噪声跨距离池化——比赛少 ≠ 没有区间基准）
+    assert abs(est["prediction_intervals"]["10K"]["half_vdot"] - 2.98) < 0.01
+    assert est["prediction_intervals"]["10K"]["n_pooled"] == 2
+    assert any(e["source"] == "个人偏差校准" for e in est["evidence"])
+    assert any(e["source"] == "手表 VO2max 兜底" for e in est["evidence"])

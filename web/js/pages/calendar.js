@@ -64,6 +64,16 @@ const HTML = `
       <p class="muted">阶段：<template x-for="(wks, p) in plan.phase_weeks" :key="p">
         <span class="mr8"><span x-text="PHASE_LABELS[p]"></span> <span x-text="wks"></span> 周</span>
       </template></p>
+      <!-- 课表配速漂移：水平重估后未执行课的配速若还按旧 VDOT，日历上的配速就是错的。
+           一键只对齐配速列，不动日期/距离/分段。 -->
+      <template x-if="ps && ps.available && ps.needs_sync">
+        <div class="psync mt8">
+          <span class="badge warn">配速待同步</span>
+          <span class="muted" x-text="psText()"></span>
+          <button class="btn small" :disabled="syncing" @click="syncPaces()"
+                  x-text="syncing ? '同步中…' : (ps.locked ? '同步配速（覆盖手动锁定）' : '同步课表配速')"></button>
+        </div>
+      </template>
     </div>
 
     <div class="card" x-show="progress">
@@ -105,6 +115,12 @@ const HTML = `
               </button>
             </template>
             <div class="wk rest" x-show="d.isRest && !(byDate[d.date] || []).length">休息</div>
+            <!-- 今日决策徽章（与 AI 教练页同一份本地计算；休息日不显示） -->
+            <span class="badge dec-badge" :class="'st-' + verdictCls(todayDecision.verdict)"
+                  x-show="d.isToday && todayDecision && todayDecision.verdict !== 'rest_day'"
+                  :title="todayDecision.note + (todayDecision.signals && todayDecision.signals.length ? ' · ' + todayDecision.signals.map(s => s.name + '：' + s.evidence).join('；') : '')">
+              ⚡ <span x-text="verdictShort(todayDecision.verdict)"></span>
+            </span>
             <!-- 当日实际跑步标注（六带/结构分类色块，同活动详情徽章）：
                  点击查看活动详情（原生委托分发 data-aid） -->
             <template x-for="a in (actsByDate[d.date] || [])" :key="'a' + a.id">
@@ -279,6 +295,10 @@ export function initCalendar() {
     actModal: null,
     showLink: false,
     sameDayActs: [],
+    // 课表配速漂移（get_pace_sync_status）：{available, plan_vdot, target_vdot,
+    // delta, needs_sync, stale_workouts, total_workouts, locked}
+    ps: null,
+    syncing: false,
 
     get monthLabel() { return `${this.ym.y} 年 ${this.ym.m} 月`; },
     get currentPhase() {
@@ -294,6 +314,20 @@ export function initCalendar() {
       const d = Math.ceil((new Date(this.progress.race_date + 'T00:00:00')
         - new Date(this.progress.today + 'T00:00:00')) / 86400000);
       return Math.max(0, d);
+    },
+    // 今日决策（get_plan_progress 随附，与 AI 教练页同一份本地计算）
+    get todayDecision() {
+      return this.progress && this.progress.today_decision;
+    },
+    // 裁决 → 徽章颜色（与教练页一致：st-ok 绿 / st-warn 黄 / st-bad 红）
+    verdictCls(v) {
+      return { execute: 'ok', execute_caution: 'warn', reduce: 'warn',
+               easy_or_rest: 'bad', rest: 'bad', rest_day: 'pending' }[v] || 'pending';
+    },
+    // 日历格空间小，显示裁决短名；完整说明在 hover 提示
+    verdictShort(v) {
+      return { execute: '按计划执行', execute_caution: '执行·注意体感', reduce: '建议降量',
+               easy_or_rest: '改恢复跑或休息', rest: '休息（伤病指征）' }[v] || v || '';
     },
     get days() {
       const { y, m } = this.ym;
@@ -318,13 +352,49 @@ export function initCalendar() {
 
     async shown() { await this.load(); },
     async init() { await this.load(); },
+
+    // 课表配速漂移：单独取，不塞进 get_active_plan
+    async loadPaceSync() {
+      const { ok, data } = await tryCall('get_pace_sync_status');
+      this.ps = ok ? data : null;
+    },
+    psText() {
+      const p = this.ps;
+      if (!p || !p.available) return '';
+      const d = p.delta || 0;
+      return `预估 VDOT ${p.target_vdot} 比课表的 ${p.plan_vdot} `
+        + `${d > 0 ? '高' : '低'} ${Math.abs(d).toFixed(1)}，`
+        + `${p.stale_workouts}/${p.total_workouts} 节未执行课的配速仍是旧值`;
+    },
+    async syncPaces() {
+      if (this.syncing) return;
+      this.syncing = true;
+      try {
+        const force = !!(this.ps && this.ps.locked);
+        const { ok, data, error } = await tryCall('sync_plan_paces', force, false);
+        if (!ok) { this.$dispatch('toast', { text: '同步失败: ' + error }); return; }
+        if (data && data.changed) {
+          this.$dispatch('toast', { text: `已按当前水平同步 ${data.repaced} 节课的配速` });
+          await this.load();
+          window.dispatchEvent(new Event('data-changed'));
+        } else {
+          this.$dispatch('toast', { text: '课表配速已是最新，无需同步' });
+          this.loadPaceSync();
+        }
+      } finally {
+        this.syncing = false;
+      }
+    },
+
     async load() {
       this.loading = true;
       const r = await tryCall('get_active_plan');
       this.loading = false;
-      if (!r.ok || !r.data) { this.plan = null; this.byDate = {}; return; }
+      if (!r.ok || !r.data) { this.plan = null; this.byDate = {}; this.ps = null; return; }
       this.plan = r.data;
       this.paces = r.data.paces || {};
+      // 配速漂移不阻塞日历绘制：先出格子，徽标随后补上（tryCall 不抛，安全）
+      this.loadPaceSync();
       const goal = await tryCall('get_active_goal');
       const dist = { 5000: '5K', 10000: '10K', 21097: '半马', 42195: '全马' }
         [r.data.goal_distance_m || (goal.ok && goal.data && goal.data.distance_m)] || '';

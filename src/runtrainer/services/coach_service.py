@@ -17,7 +17,8 @@ from ..ai.deepseek_client import (PROVIDERS, DeepSeekClient, MockClient,
 from ..ai import guardrails, prompt_builder
 from ..db.repos import (adjustment_repo, activity_repo, chat_repo, goal_repo, health_repo,
                         kv_repo, plan_repo, profile_repo)
-from ..domain import load_metrics, vdot as vd, workout_analysis
+from ..domain import (athlete_model, load_metrics, stimulus, today_decision,
+                      vdot as vd, workout_analysis)
 from ..domain.plan_engine import PHASE_ORDER
 from ..utils import dates, jsonutil
 
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 
 CACHE_PREFIX = "coach:"
 ADJUSTED_STATUS = {"rest": "skipped", "skip": "skipped"}
+ATHLETE_MODEL_KEY = "athlete_model"
 
 
 def _make_client(extra_requested: bool):
@@ -58,6 +60,147 @@ def _phase_for_week(plan: dict, week_index: int) -> str:
         if week_index < acc:
             return p
     return PHASE_ORDER[-1]
+
+
+def athlete_model_cached(today: date | None = None) -> dict | None:
+    """运动员个人响应模型（app_state 缓存）：活动/健康计数变化或超 24h 才重建。
+
+    重建要读采样曲线（漂移/后程特征），约 2–3 秒——只在数据变化时付这个钱。
+    同步新数据入库后计数即变，下一次教练调用自然重建（预测-反馈闭环的
+    「模型更新」一步）。
+    """
+    today = today or dates.today()
+    acts_n = activity_repo.count_activities()
+    health_n = len(health_repo.get_health("2000-01-01", today.isoformat()))
+    cached_raw = kv_repo.get_app_state(ATHLETE_MODEL_KEY)
+    if cached_raw:
+        cached = jsonutil.loads(cached_raw)
+        if (cached.get("acts_n") == acts_n and cached.get("health_n") == health_n
+                and cached.get("expires_at", "") >= today.isoformat()):
+            return cached.get("model")
+    acts = activity_repo.list_activities(
+        (today - timedelta(weeks=athlete_model.BLOCK_WEEKS
+                           * athlete_model.BLOCK_COUNT)).isoformat(),
+        limit=5000)
+    health = health_repo.get_health(
+        (today - timedelta(days=athlete_model.PACE_HR_DAYS)).isoformat(),
+        today.isoformat())
+    hist_raw = kv_repo.get_app_state("personal_history")
+    hist = jsonutil.loads(hist_raw) if hist_raw else []
+    model = athlete_model.build(acts, health, hist, activity_repo.get_samples,
+                                profile_repo.get_profile(), today)
+    kv_repo.set_app_state(ATHLETE_MODEL_KEY, jsonutil.dumps({
+        "acts_n": acts_n, "health_n": health_n,
+        "expires_at": (today + timedelta(days=1)).isoformat(),
+        "model": model,
+    }))
+    return model
+
+
+def _consecutive_run_days(sessions: list[dict], today: date) -> int:
+    """连续跑步天数（今天已跑则含今天，否则从昨天起算）。"""
+    days = {s["date"] for s in sessions if load_metrics.is_running(s.get("sport"))}
+    d = today if today.isoformat() in days else today - timedelta(days=1)
+    n = 0
+    while d.isoformat() in days:
+        n += 1
+        d -= timedelta(days=1)
+    return n
+
+
+def _yesterday_hard(acts: list[dict], today: date) -> bool:
+    """昨天是否实际跑了强度课（按心率/时长判，与运动员画像口径一致）。"""
+    yest = today - timedelta(days=1)
+    return any(dates.ts_to_date(a["start_ts"]) == yest
+               and (a.get("avg_hr") or 0) >= athlete_model.HARD_HR_MIN
+               and (a.get("duration_s") or 0) >= athlete_model.HARD_DUR_MIN
+               for a in acts)
+
+
+def _monotony_p90(sessions: list[dict], today: date,
+                  lookback_days: int = 90, min_n: int = 14) -> float | None:
+    """个人单调性 P90（近 90 天逐日单调性分布的高分位）。
+
+    群体阈值 2.0 对课表密度高的运动员常年误报（真实库 93% 天数 ≥2.0，
+    中位 3.17）——照搬会把每个质量课日都标「单调性偏高」。用个人分布的
+    P90 校准（today_decision 里与群体下限取 max）；样本不足返回 None，
+    回退群体阈值。
+    """
+    vals = []
+    for i in range(lookback_days):
+        m = load_metrics.monotony(sessions, today - timedelta(days=i))
+        if m is not None:
+            vals.append(m)
+    if len(vals) < min_n:
+        return None
+    vals.sort()
+    return round(vals[int(len(vals) * 0.9)], 2)
+
+
+def _today_decision(today: date, today_workout: dict | None, model: dict | None,
+                    health_rows: list[dict], recent: dict,
+                    race_in_days: int | None) -> dict:
+    """今日决策（本地规则引擎，_gather 与 get_snapshot 共用）。"""
+    base = (model or {}).get("fatigue_hr", {}).get("baseline") or None
+    baseline = ({"rhr": base["rhr_median"], "hrv": base["hrv_median"]}
+                if base else None)
+    return today_decision.decide(
+        today_workout, health_repo.get_health_for_date(today.isoformat()),
+        health_rows, recent, race_in_days, today, baseline=baseline)
+
+
+def decision_snapshot(today: date | None = None) -> dict | None:
+    """今日决策 + 运动员画像（本地规则，无 AI 成本）。
+
+    教练页 get_snapshot 与日历 get_plan_progress 共用同一份计算，保证
+    两处显示的裁决一致。返回 {"model": ..., "decision": ...}；
+    无 active 计划返回 None。画像模型有 app_state 缓存，重建约 2–3 秒
+    只发生在数据变化后（预测-反馈闭环的「模型更新」一步）。
+    """
+    today = today or dates.today()
+    plan = plan_repo.get_active_plan()
+    if not plan:
+        return None
+    model = athlete_model_cached(today)
+    health_rows = health_repo.get_health(
+        (today - timedelta(days=13)).isoformat(), today)
+    acts60 = activity_repo.list_activities(
+        (today - timedelta(days=60)).isoformat(), limit=500)
+    sessions = [
+        {"date": dates.ts_to_date(a["start_ts"]).isoformat(),
+         "distance_km": (a.get("distance_m") or 0) / 1000,
+         "duration_min": (a.get("duration_s") or 0) / 60,
+         "sport": a.get("sport")}
+        for a in acts60 if a.get("distance_m")
+    ]
+    run_sessions = [s for s in sessions
+                    if load_metrics.is_running(s.get("sport"))]
+    recent = {
+        "acwr": load_metrics.acwr(sessions, today),
+        "monotony": load_metrics.monotony(sessions, today),
+        "monotony_p90": _monotony_p90(sessions, today),
+        "consecutive_days": _consecutive_run_days(run_sessions, today),
+        "yesterday_hard": _yesterday_hard(acts60, today),
+    }
+    tws = plan_repo.get_workouts(plan["id"], today.isoformat(),
+                                 today.isoformat())
+    tw = next((w for w in tws if w["date"] == today.isoformat()), None)
+    decision = _today_decision(
+        today, tw, model, health_rows, recent,
+        (date.fromisoformat(plan["race_date"]) - today).days)
+    return {"model": model, "decision": decision}
+
+
+def _goal_distance_label(distance_m: float | None) -> str | None:
+    if not distance_m:
+        return None
+    if distance_m <= 5000:
+        return "5K"
+    if distance_m <= 10000:
+        return "10K"
+    if distance_m <= 22000:
+        return "半马"
+    return "全马"
 
 
 def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
@@ -115,8 +258,11 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "weekly_km": [round(w["km"], 1) for w in weekly],
         "acwr": load_metrics.acwr(sessions, today),
         "monotony": load_metrics.monotony(sessions, today),
+        "monotony_p90": _monotony_p90(sessions, today),
         "strain": load_metrics.strain(sessions, today),
         "compliance_7d": load_metrics.plan_coverage(planned7, runs_day),
+        "consecutive_days": _consecutive_run_days(run_sessions, today),
+        "yesterday_hard": _yesterday_hard(acts, today),
     }
 
     # 最近训练活动精确详情（聊天/自动分析回答训练问题的数据依据，最新在前）。
@@ -214,6 +360,59 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
             "stride": round(sum(stride_list) / len(stride_list), 2) if stride_list else None,
             "n": len(cad_list)}
 
+    # ---- 教练升级：运动员长期画像 + 今日决策 + 训练刺激剖面 + 漏训事件 ----
+    # （规格二/三/七/八：认识这个人、现实可执行、容错、按刺激理解课表）
+    model = athlete_model_cached(today)
+    decision = _today_decision(today, today_workout, model, health_rows, recent,
+                               (race_date - today).days)
+    # 刺激-恢复：过去 90 天实际课表（残留疲劳来源 + 质量课个人基线校准）
+    # + 本周起未来课表（干扰检查）
+    stim_hist = plan_repo.get_workouts(
+        plan["id"], (today - timedelta(days=90)).isoformat(), today.isoformat())
+    stim_all = {w["id"]: w for w in list(stim_hist) + list(plan_workouts)}
+    stim_all_rows = list(stim_all.values())
+    stim_profile = {
+        "today": stimulus.stimulus_of(today_workout) if today_workout else None,
+        "fatigue": stimulus.acute_fatigue(stim_all_rows, today),
+        "quality_flags": stimulus.quality_day_flags(
+            stim_all_rows, today, race_date,
+            baseline=stimulus.quality_baseline(stim_all_rows, today)),
+        "week_balance": stimulus.week_balance(
+            plan_workouts, _goal_distance_label(goal.get("distance_m")),
+            ws_start, today),
+    }
+    # 近 7 天漏训/少跑/多跑事件（按日汇总计划与实际——一天两练的槽位配对
+    # 有歧义，按日合计才是诚实口径；今天还没执行完不算漏训；
+    # 当天全部课都是用户主动休息 = skipped，不算漏训）
+    day_plan: dict[str, dict] = {}
+    for pa in plan_actual:
+        w = pa["w"]
+        if w["date"] >= today.isoformat():
+            continue
+        d = day_plan.setdefault(w["date"], {"planned": 0.0, "actual": 0.0,
+                                            "kinds": [], "all_skipped": True})
+        d["planned"] += float(w.get("distance_km") or 0)
+        d["kinds"].append(w.get("kind"))
+        if w.get("status") != "skipped":
+            d["all_skipped"] = False
+        d["actual"] += sum((a.get("distance_m") or 0) / 1000 for a in pa["acts"])
+    miss_events = []
+    for d, v in sorted(day_plan.items()):
+        if v["planned"] <= 0:
+            continue
+        base = {"date": d, "kind": "/".join(v["kinds"]),
+                "planned_km": round(v["planned"], 1)}
+        if v["all_skipped"]:
+            miss_events.append({**base, "event": "skipped"})
+        elif v["actual"] <= 0:
+            miss_events.append({**base, "event": "missed"})
+        elif v["actual"] < v["planned"] * 0.6:
+            miss_events.append({**base, "event": "short",
+                                "actual_km": round(v["actual"], 1)})
+        elif v["actual"] > v["planned"] * 1.5:
+            miss_events.append({**base, "event": "over",
+                                "actual_km": round(v["actual"], 1)})
+
     applied = adjustment_repo.list_adjustments(plan["id"], status="applied", limit=500)
     add_count = sum(
         1 for a in applied if a.get("action") == "add_easy" and a.get("applies_date")
@@ -243,6 +442,13 @@ def _gather(today: date, extra_requested: bool, user_note: str) -> dict | None:
         "refs": refs,
         "pace_hr_trend": pace_hr_trend,
         "pace_hr_weekly": pace_hr_weekly,
+        # 教练升级：个人画像 / 今日决策 / 刺激剖面 / 漏训事件 / 生活约束
+        "athlete_model": model,
+        "athlete_model_lines": athlete_model.describe(model) if model else [],
+        "today_decision": decision,
+        "stimulus": stim_profile,
+        "miss_events": miss_events,
+        "schedule_note": profile.get("schedule_note"),
         "extra_requested": extra_requested,
         "user_note": user_note,
         # 护栏上下文
@@ -395,8 +601,9 @@ def request_advice(extra_requested: bool = False, user_note: str = "") -> dict:
 
 
 def get_snapshot() -> dict:
-    """教练页数据：今日建议（含缓存）+ 历史。"""
-    today = dates.today().isoformat()
+    """教练页数据：今日建议（含缓存）+ 历史 + 运动员画像与今日决策（本地计算）。"""
+    today_d = dates.today()
+    today = today_d.isoformat()
     plan = plan_repo.get_active_plan()
     advice = None
     cached = kv_repo.get_app_state(f"{CACHE_PREFIX}{today}")
@@ -412,10 +619,18 @@ def get_snapshot() -> dict:
             "model": data.get("model"),
             "adjustments": [_row_view(r) for r in rows if r],
         }
+    # 运动员画像 + 今日决策：本地规则计算，无 AI 成本（页面打开即可见）
+    ds = decision_snapshot(today_d) if plan else None
+    model = (ds or {}).get("model")
+    decision = (ds or {}).get("decision")
+    profile = profile_repo.get_profile() or {}
     return {
         "today": today,
         "has_active_plan": bool(plan),
         "advice": advice,
+        "athlete_model_lines": athlete_model.describe(model) if model else [],
+        "today_decision": decision,
+        "schedule_note": profile.get("schedule_note") or "",
         "history": [_row_view(r) for r in adjustment_repo.list_adjustments(
             plan["id"] if plan else None, limit=30)],
     }
@@ -907,9 +1122,9 @@ def chat(message: str) -> dict:
         try:
             refreshed = plan_service.refresh_active_plan()
             if refreshed:
-                rebuild_info = {"vdot": refreshed["vdot"], "source": refreshed["vdot_source"]}
-        except Exception as e:  # 重建失败不阻断聊天
-            log.warning("聊天触发课表重建失败: %s", e)
+                rebuild_info = {"vdot": refreshed["target_vdot"], "source": "ability"}
+        except Exception as e:  # 同步失败不阻断聊天
+            log.warning("聊天触发课表配速同步失败: %s", e)
 
     reply = output.reply
     if web:

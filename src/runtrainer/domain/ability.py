@@ -18,15 +18,25 @@ from __future__ import annotations
 import math
 from datetime import date, timedelta
 
-from . import vdot as vd
+from . import evidence, personal, vdot as vd
 
 # 标准比赛距离带 ± 容差
 RACE_BANDS = ((5000, 0.10), (10000, 0.10), (21097, 0.05), (42195, 0.05))
+DISTANCE_LABELS = {5000: "5K", 10000: "10K", 21097: "半马", 42195: "全马"}
 RACE_NAME_HINTS = ("比赛", "race", "5k", "10k", "半马", "全马", "marathon", "test")
 # 「全力/比赛强度」的平均心率下限（对个体最大心率）：比赛冲刺平均可达
 # 90–95% HRmax；阈值巡航整场约 84–88%——用 88% 会把配速心率都很稳的
 # 强度巡航课误判成比赛（曾把 10.4km 阈值课当 10K 比赛锚点压死水平预估）
 RACE_HR_MIN_REF = 0.90
+# 「对照当场峰值」比赛通道（第十九批）：真·全力测试跑（操场计时/测验，名称
+# 常不带比赛字样）场均心率可达当场峰值的 94%+（5K 计时 173/182≈0.95、10K
+# 计时 159/180≈0.88 都能过）。此通道必须叠加平均心率 ≥75% 档案/估算最大
+# 心率的下限——轻松跑的心率漂移（127/135≈0.94 的 60 分钟慢跑）比值同样
+# 好看，不设下限会把它当比赛锚点（实验阶段真实踩过这个坑：漂移假比赛把
+# 半马预测从 56.2 VDOT 拖到 43.6）。阈值巡航 avg/当场峰值 0.84–0.93，与
+# 0.94 线基本不重叠——原 88% 线把巡航误认比赛的教训不受影响。
+OWN_RACE_MIN_REF = 0.94
+OWN_RACE_EST_MAX_MIN = 0.75
 # 心率-配速趋势样本要求
 TREND_MIN_RUNS = 5
 TREND_MIN_DURATION_S = 15 * 60
@@ -124,6 +134,24 @@ RACE_WEIGHT_FLOOR = 0.12
 RACE_CAP_BASE = 2.0
 RACE_CAP_GROW = 1.5
 RACE_CAP_GROW_DAYS = 120
+
+# ---- 「一键评估」权重档案（最近三周）----
+# 与默认口径的取舍不同：默认权重问「当前整体水平」（阈值趋势/专项课为主体，
+# 180 天窗口）；这里问「这三周练出来的速度能力」，按用户指定让间歇/速度能力
+# 占大头。interval 与 efforts 是同一能力的两个来源——前者只在带 work/rest
+# 分段的间歇课上有样本（真实库近三周仅 1 课），后者（滑窗最快 1/3/5km 分段）
+# 每次跑都有；_weighted 按在场分量归一化，interval 缺席时其权重自然落到
+# efforts 上，即「work 段优先、最快分段兜底」。
+QUICK_WINDOW_DAYS = 21       # 三周：够看出一段训练营的效果，又不被旧状态拖平
+QUICK_WEIGHTS = {
+    "race": 0.30,        # 三周内跑了比赛 = 最硬的证据，与速度能力同量级
+    "interval": 0.34,    # 间歇能力（work 段配速 + 休息/快跑比修正）
+    "efforts": 0.22,     # 最快分段（速度能力的直接测量，也是间歇的兜底）
+    "threshold": 0.16,   # 阈值/巡航配速
+    "hrr": 0.12,         # 配速 ↔ 储备心率区间（Karvonen）
+    "quality": 0.10,     # 专项强度课完成度
+    "vo2max": 0.06,      # 手表读数：只在没有训练分量时兜底（有训练分量则不参与加权）
+}
 
 
 def _theil_sen(xs: list[float], ys: list[float]) -> tuple[float, float] | None:
@@ -307,7 +335,7 @@ def threshold_pace_from_trend(activities: list[dict], max_hr: float,
 
 
 def best_recent_race(activities: list[dict], max_hr: float | None = None) -> dict | None:
-    """近 180 天内的最佳比赛成绩（标准距离带内，名称/心率双判定）。
+    """近 180 天内的最佳比赛成绩（标准距离带内，名称/心率/全力测试跑三判定）。
 
     max_hr：已知的个体最大心率（档案设置 > 活动样本 95 分位，由调用方算出）。
     判定心率用它对冲「单场跑自己的纪录」的偏差：阈值巡航的平均心率通常在
@@ -315,6 +343,12 @@ def best_recent_race(activities: list[dict], max_hr: float | None = None) -> dic
     用单场 max_hr 比值（avg/max≈0.94+）或 88% 线会把配速心率都很稳的强度课
     误判成比赛（曾把 10.4km 阈值课当 10K 比赛锚点，把水平预估压到 51 封顶）。
     无 max_hr 时退回单场比值。
+    第三通道（第十九批）「对照当场峰值 ≥94%」认真·全力测试跑（操场计时/
+    测验，名称常不带比赛字样——真实库 18:31 的 5K 计时 173/182≈0.95 此前
+    被 0.90 线拒掉，半马预测整体虚高 166s）：必须叠加平均心率 ≥75% max_hr
+    下限并排除带休息段的间歇结构——轻松跑的心率漂移（127/135≈0.94 的慢跑）
+    比值同样好看，不设下限会把它当比赛锚点。阈值巡航 avg/当场峰值 0.84–0.93
+    过不了 0.94 线，原「巡航误认比赛」的教训不受影响。
     """
     best = None
     for a in activities:
@@ -330,7 +364,13 @@ def best_recent_race(activities: list[dict], max_hr: float | None = None) -> dic
         else:
             hr_ok = False
         name_ok = any(h in name for h in RACE_NAME_HINTS)
-        if not (hr_ok or name_ok):
+        own_ok = False
+        if max_hr and avg_hr and a.get("max_hr") and not name_ok:
+            struct = a.get("structure") or []
+            own_ok = (not any(s.get("type") == "rest" for s in struct)
+                      and avg_hr / a["max_hr"] >= OWN_RACE_MIN_REF
+                      and avg_hr / max_hr >= OWN_RACE_EST_MAX_MIN)
+        if not (hr_ok or name_ok or own_ok):
             continue
         for std, tol in RACE_BANDS:
             if abs(dist - std) / std > tol:
@@ -342,6 +382,58 @@ def best_recent_race(activities: list[dict], max_hr: float | None = None) -> dic
                         "vdot": round(v, 1), "raw_distance_m": dist,
                         "avg_hr": a.get("avg_hr"), "max_hr": a.get("max_hr")}
     return best
+
+
+def detect_races(activities: list[dict], est_max: float | None = None) -> list[dict]:
+    """检测「真实比赛」活动（个人误差学习的地面真值口径，第十九批）。
+
+    判据与回测工具一致——回测怎么量，线上就怎么学：
+      - 距离在标准距离带内（含容差），3km–43km；
+      - 排除带休息段的间歇结构；
+      - 名称提示，或（平均心率 ≥75% 档案/估算最大心率 且 对照当场峰值
+        ≥88%）——后者把轻松跑心率漂移冒充的「比赛」滤掉，同时留住操场
+        计时/测验跑（5K 计时 173/182≈0.95）。
+    返回按日期升序的 [{day(iso), label, actual_vdot, distance_m,
+    duration_s, name}]。est_max 缺省时退回各场当场峰值判定。
+    """
+    from ..utils import dates
+    out = []
+    for a in sorted(activities, key=lambda x: x.get("start_ts") or 0):
+        dist = a.get("distance_m")
+        dur = a.get("duration_s")
+        if not dist or not dur or dist < 3000 or dist > 43000:
+            continue
+        struct = a.get("structure") or []
+        if (sum(1 for s in struct if s.get("type") == "work") >= 2
+                and any(s.get("type") == "rest" for s in struct)):
+            continue
+        name = (a.get("name") or "").lower()
+        avg_hr = a.get("avg_hr")
+        own_max = a.get("max_hr")
+        genuine = any(h in name for h in RACE_NAME_HINTS) or (
+            avg_hr and est_max and avg_hr / est_max >= OWN_RACE_EST_MAX_MIN
+            and own_max and avg_hr / own_max >= YEAR_WHOLE_OWN_MIN)
+        if not genuine:
+            continue
+        for std, tol in RACE_BANDS:
+            if abs(dist - std) / std <= tol:
+                day = a.get("date")
+                if not day and a.get("start_ts"):
+                    day = dates.ts_to_date(a["start_ts"]).isoformat()
+                out.append({
+                    "day": day,
+                    "label": DISTANCE_LABELS[std],
+                    "actual_vdot": round(vd.estimate_vdot(dist, dur), 1),
+                    "distance_m": dist, "duration_s": round(dur),
+                    "name": a.get("name"), "id": a.get("id"),
+                    # 比赛分级参照：对照估算最大心率的相对努力（见 evidence.grade_race）
+                    "hr_ref": (round(avg_hr / est_max, 2)
+                               if avg_hr and est_max else None),
+                    # 主观用力（佳明 Connect feel/rpe 或手动补录）：分级时优先于心率
+                    "feel": a.get("feel"), "rpe": a.get("rpe"),
+                })
+                break
+    return out
 
 
 # ---- 近一年各距离最佳成绩 + 训练保持度（第十四批）----
@@ -819,22 +911,25 @@ def quality_workout_evidence(activities: list[dict], max_hr: float | None,
 
 
 def _recent_efforts_evidence(year_bests: list[dict] | None,
-                             as_of: date | None = None) -> dict | None:
+                             as_of: date | None = None,
+                             window_days: int | None = None) -> dict | None:
     """近一月长跑最快分段（Best Effort）分量（第十八批）。
 
     year_bests（distance_bests 输出）中 source=="effort" 且距今 ≤
     EFFORT_WINDOW_DAYS 的分段是「当下」能力证据——比旧比赛/手表读数更贴
     现状，滑窗心率门（≥82% 最大心率）已防散步/漂移段。取加权中位
     （半衰期 14 天）抗单次失真段；无近期分段返回 None。
+    window_days 可覆盖默认窗口（一键评估用 21 天，与三周口径对齐）。
     """
     if not year_bests:
         return None
+    span = window_days if window_days else EFFORT_WINDOW_DAYS
     recs = []
     for r in year_bests:
         if r.get("source") != "effort" or not r.get("vdot"):
             continue
         age = _rec_age_days(r, as_of)
-        if age > EFFORT_WINDOW_DAYS:
+        if age > span:
             continue
         recs.append((r, age))
     if not recs:
@@ -860,7 +955,11 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                     profile_max_hr=None, rest_hr: float | None = None,
                     as_of: date | None = None,
                     year_bests: list[dict] | None = None,
-                    plan_exec: dict | None = None) -> dict:
+                    plan_exec: dict | None = None,
+                    weight_profile: dict | None = None,
+                    effort_window_days: int | None = None,
+                    personal_history: list[dict] | None = None,
+                    samples_fn=None) -> dict:
     """综合各数据源输出水平预估。
 
     activities: 近 180 天活动（含 avg_pace_s_km/avg_hr/max_hr/distance_m/
@@ -876,16 +975,43 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     比赛权重与上限容差随距今时间衰减（60 天内 +2，180 天放宽到 +3.5），
     year_bests 中近一月 fastest segments 作为独立分量参与——预估随每次
     训练即时灵敏更新，旧数据只兜底。
-    返回 {"vdot", "predictions", "zones", "evidence", "max_hr", "as_of"}；
-    无任何依据时 vdot=None。
+    weight_profile: 分量权重覆盖表（kind → weight），覆盖默认权重与「无比赛
+                重排」；给 QUICK_WEIGHTS 即「一键评估」口径（间歇/速度能力占
+                大头）。None 时行为与历史完全一致。缺失分量不报错——按在场
+                分量归一化（见 _weighted）；且此口径下手表读数只作兜底，有
+                训练分量在场时不参与加权（否则稀疏分量一缺席就被读数带跑）。
+    effort_window_days: 「近期最快分段」分量的年龄上限，默认 EFFORT_WINDOW_DAYS；
+                一键评估传 21，让该分量名副其实地只看最近三周。
+    personal_history: 个人误差历史（domain.personal 记录格式；服务层持久化）。
+                None = 不启用个人学习（回测基线、旧口径）。
+                第十九批：启用后 (1) 手表 VO2max 只在无其它分量时兜底——
+                回测实证读数 68 vs 比赛等效 ~54、单用它偏差 −637s，是默认
+                加权里最差的单分量；(2) 分量权重按历史误差逆误差加权
+                （weight_profile 在场时跳过——一键评估口径不混用主口径权重）；
+                (3) 各距离等效成绩按个人历史偏差校准（EWMA 慢学习 + 样本
+                收缩 + 封顶），并给出真实误差口径的预测区间。
+                批33：启用后走证据管线 _compute_with_evidence——训练表现
+                证据层（间歇/专项强度课/最快分段，每节课一份证据不重复计）、
+                训练→比赛个人转换、比赛分级（次全力不参与学习与锚定）、
+                证据密度驱动的预测区间。None（含一键评估 weight_profile
+                口径）仍走旧加权链路，行为与历史一致。
+    samples_fn: 样本点读取函数（activity_id → 样本列表）；证据层的
+                最快分段滑窗需要。缺省时该证据缺失（旧口径行为不变）。
+    返回 {"vdot", "predictions", "zones", "evidence", "max_hr", "as_of",
+         "components", "prediction_intervals", "personal_races"}；
+    无任何依据时 vdot=None。证据管线另附 "ev_fitness"/"race_grades"。
     """
+    if personal_history is not None and not weight_profile:
+        return _compute_with_evidence(
+            activities, vo2max, profile_max_hr, rest_hr, as_of, year_bests,
+            plan_exec, personal_history, samples_fn)
     max_hr = estimate_max_hr(profile_max_hr, activities)
     race = best_recent_race(activities, max_hr)
     threshold = threshold_pace_from_trend(activities, max_hr, as_of) if max_hr else None
     intervals = interval_ability(activities, max_hr, as_of)
     hrr = hrr_ability(activities, max_hr, rest_hr, as_of) if max_hr and rest_hr else None
     quality = quality_workout_evidence(activities, max_hr, as_of) if max_hr else None
-    efforts = _recent_efforts_evidence(year_bests, as_of)
+    efforts = _recent_efforts_evidence(year_bests, as_of, effort_window_days)
     # 阈值分量三来源按可靠性递补：心率-配速回归（整场稳定样本，最全）→
     # 节奏/巡航跑中位配速（连续匀速课）→ 乳酸阈值型间歇（短休长段）。
     # 后者即便存在也仅作替代——混入会让单一阈值槽被多次加权。
@@ -996,6 +1122,38 @@ def compute_ability(activities: list[dict], vo2max: float | None,
                    "hrr": 0.14, "interval": 0.16, "efforts": 0.15, "race": 0.40}
         for c in components:
             c["weight"] = weights[c["kind"]]
+    # 手表 VO2max 只作「底数」（第十九批起默认口径也生效）：只要有其它
+    # 分量在场就不参与加权。回测实证：真实库读数 68 vs 比赛等效 ~54，单独
+    # 用它预测 16 场真实比赛偏差 −637s（系统性高估用时），是默认加权里
+    # 最差的单分量；去掉它时序回测 MAE 6.11 → 4.02 VDOT。只剩读数时仍
+    # 保留，新手也有个数。间歇/最快分段这类分量本就稀疏（真实库三周窗口
+    # 只有 1 节课带 work/rest 分段且心率失真被剔除），一旦缺席，归一化
+    # 会把大头让给最不可信的读数——实测 21 天窗口算出 VDOT 58.7，而同年
+    # 比赛/PB 硬证据只有 ~54。
+    if any(c["kind"] != "vo2max" for c in components):
+        components = [c for c in components if c["kind"] != "vo2max"]
+        evidence = [e for e in evidence if e["source"] != "garmin_vo2max"]
+    if weight_profile:
+        # 一键评估口径：整表覆盖（含 race），让「间歇/速度能力占大头」不被
+        # 默认重排冲淡；profile 未列的 kind 保留原权重，缺失分量交给
+        # _weighted 归一化——没有间歇课时分量权重自然落到最快分段上
+        # （vo2max 兜底规则已在上方统一处理，这里只覆盖权重）
+        for c in components:
+            if c["kind"] in weight_profile:
+                c["weight"] = weight_profile[c["kind"]]
+    # 个人误差学习（第十九批）：分量权重按该运动员自己的历史比赛误差做
+    # 逆误差加权——哪个分量在他身上系统性跑偏就自动降权（慢学习：样本
+    # 不足时只是轻微调整）。一键评估口径跳过（三周窗口是另一种问题设定，
+    # 不混用主口径的学习历史）。
+    if personal_history and not weight_profile and components:
+        reweighted = personal.reweight(components, personal_history)
+        if reweighted != components:
+            components = reweighted
+            evidence.append({
+                "source": "personal_weights",
+                "detail": (f"分量权重按个人历史误差调整：近 {len(personal_history)} 场"
+                           f"真实比赛里误差大的分量降权（逆误差加权）"),
+            })
     vdot_val = _weighted(components)
     # 同配速心率趋势调整：心率下降 = 有氧能力进步（软证据，保守幅度）。
     # 放在加权之后、比赛上限钳制之前——比赛成绩仍是最终硬上限。
@@ -1094,15 +1252,425 @@ def compute_ability(activities: list[dict], vo2max: float | None,
     if cap_note:
         evidence.append({"source": "cap_check", "vdot": vdot_val,
                          "detail": "上限校验：" + cap_note})
+    # 个人偏差校准（第十九批）：各距离等效成绩按该运动员自己的历史预测
+    # 误差修正（EWMA 慢学习 + 样本收缩 + 封顶），并从同一历史给出预测区间
+    # （真实误差口径，不是拍出来的 ±10 秒）。zones 不动——训练区带是生理
+    # 模型输出，「比赛执行/距离转换的个人偏差」不该改变训练配速依据。
+    predictions = vd.equivalent_times(vdot_val) if vdot_val else None
+    intervals = None
+    if predictions and personal_history:
+        bias_by_label = {}
+        for label in predictions:
+            bias = personal.bias_applied(personal_history, label)
+            if bias:
+                bias_by_label[label] = bias
+                adj_vdot = round(vdot_val + bias, 1)
+                predictions[label] = vd.predict_time(vd.DISTANCES[label], adj_vdot)
+        if bias_by_label:
+            evidence.append({
+                "source": "personal_bias",
+                "vdot": vdot_val,
+                "detail": ("个人偏差校准："
+                           + "、".join(f"{lab} {b:+.1f} VDOT"
+                                       for lab, b in bias_by_label.items())
+                           + f"（按近 {len(personal_history)} 场真实比赛的预测误差学习）"),
+            })
+        intervals = {label: personal.interval(personal_history, label)
+                     for label in predictions}
+        intervals = {k: v for k, v in intervals.items() if v}
     result = {
         "vdot": vdot_val,
-        "predictions": vd.equivalent_times(vdot_val) if vdot_val else None,
+        "predictions": predictions,
         "zones": vd.intensity_zones(vdot_val) if vdot_val else None,
         "evidence": evidence,
+        "components": [{"kind": c["kind"], "vdot": c["vdot"],
+                        "weight": c["weight"]} for c in components],
+        "prediction_intervals": intervals,
+        "personal_races": len(personal_history or []),
         "max_hr": round(max_hr) if max_hr else None,
         "as_of": (as_of or date.today()).isoformat(),
     }
     return result
+
+
+# ---- 批33 证据管线：训练表现证据 → 当前能力 → 各距离预测 ----
+# 通道按距离的专项性混合（5K 重间歇/短分段，全马重长分段/长距离课/比赛）
+SPEC_WEIGHTS = {
+    "5K": {"interval": 0.40, "best_effort": 0.30, "steady": 0.10, "race": 0.20},
+    "10K": {"interval": 0.30, "best_effort": 0.25, "steady": 0.15, "race": 0.30},
+    "半马": {"best_effort": 0.22, "steady": 0.20, "race": 0.50, "interval": 0.08},
+    "全马": {"steady": 0.25, "race": 0.55, "best_effort": 0.15, "interval": 0.05},
+}
+# 有同距离全开比赛时的通道混合：比赛权重上调——同距离比赛是该距离最直接的
+# 证据，训练证据与目标距离的转换在个人层面可能系统性偏乐观（真实库 10K：
+# 训练通道 52–59 vs 比赛 46–51 的持续背离，比赛稀少时训练证据才作主）
+SPEC_WEIGHTS_RACED = {
+    "5K": {"interval": 0.30, "best_effort": 0.20, "steady": 0.10, "race": 0.40},
+    "10K": {"interval": 0.25, "best_effort": 0.15, "steady": 0.10, "race": 0.50},
+    # 半马同距离比赛在场时比赛通道接近全权：真实库 6/21 与 7/19 两场半马
+    # 重复跑 53.5，比赛通道 53.5 就是真相，而同期日常最快分段（夏天轻松跑）
+    # 只有 47.5——训练通道对半马的转换差系统性偏乐观/失真
+    "半马": {"best_effort": 0.10, "steady": 0.12, "race": 0.70, "interval": 0.08},
+    "全马": {"steady": 0.20, "race": 0.60, "best_effort": 0.15, "interval": 0.05},
+}
+# 各距离预测用哪几档最快分段（短=速度、中=速度耐力、长=耐力）
+SPEC_BUCKETS = {"5K": ("short", "mid"), "10K": ("mid",),
+                "半马": ("mid", "long"), "全马": ("long",)}
+# 通道矛盾加权（E3）：训练与比赛通道差 ≥CONTRADICT_GAP 时向比赛通道倾斜，
+# 差到 GAP+SPAN 时比赛权重拉满（见 _label_vdot）
+# SPAN 收窄到 1.0（原 4.0）：训练通道是「证据 → 比赛」的换算，本身带着不确定
+# 的转换差；同距离全开比赛不需要换算，是直读。两边差过噪声量级后，再按 4 VDOT
+# 的坡度慢慢把错的一方混进来没有意义——两个互相矛盾的测量取加权平均不等于更
+# 准。逐场对照（18 场真实比赛，err=预测−实际）：SPAN 4→3→2→1 时 MAE
+# 83→81→76→73，到 2 以下饱和（GAP 再降到 1.5/1.0 只再动 1 s，不值得多改一个
+# 常量）；受益集中在四场大误差：半马 6/21 +102→+50、7/19 +81→+38、
+# 10-07 5K −93→−38、10-04 10K −53→−19；劣化最大的一场 +11 s。
+CONTRADICT_GAP = 2.0
+CONTRADICT_SPAN = 1.0
+RACE_HALF_LIFE_DAYS = 60        # 比赛通道按距今半衰期加权
+RACE_CAP_WINDOW_DAYS = 90       # 能力锚只认近 90 天比赛（再旧的不作当下能力证据）
+RACE_CAP_DECAY_PER_DAY = 0.02   # 能力锚按距今折扣（每过一天 −0.02 VDOT）
+
+
+def _race_channel(races_graded: list[dict], as_of: date,
+                  label: str | None = None) -> tuple[float | None, list[str]]:
+    """全开比赛通道：近期加权中位（60 天半衰期）+ 能力锚取高。
+
+    label 给定时只取该距离的全开比赛——同距离比赛是预测该距离最直接的
+    证据（批33 回测：运动员 5K 54.9 与 10K 49.5 并存时，混合通道会把
+    10K 预测抬高 4+ VDOT）；该距离没有全开比赛时调用方退回混合通道。
+    加权中位抗离群慢场，但提升期会被更早的慢比赛拖低——全力比赛是
+    「跑出过」的能力下限：近 90 天内最佳成绩按距今折扣后作为能力锚，
+    通道取两者较高者（真实库 6/21 半马：中位 49.5 vs 4/12 的 54.9 峰值，
+    只取中位会让预测比真实慢 4 分钟）。
+    次全力比赛（训练计时/状态差）不参与——它们锚住的「水平」远低于真实
+    能力，会把中心值往下拖（真实库 8 月 10K 计时 48.6–48.9 vs 真实 54–55）。
+    """
+    def _age(r: dict) -> float:
+        try:
+            return float(max((as_of - date.fromisoformat(str(r["day"])[:10])).days, 0))
+        except (ValueError, KeyError):
+            return 0.0
+    recs = [(r["actual_vdot"], _age(r), r)
+            for r in races_graded if r.get("quality") != "submax"
+            and (label is None or r.get("label") == label)]
+    if not recs:
+        return None, []
+    vals = [v for v, _, _ in recs]
+    weights = [_recency(a, RACE_HALF_LIFE_DAYS) for _, a, _ in recs]
+    med = round(_weighted_median(vals, weights), 1)
+    cap = max((v - RACE_CAP_DECAY_PER_DAY * a for v, a, _ in recs
+               if a <= RACE_CAP_WINDOW_DAYS), default=None)
+    channel = round(max(med, cap), 1) if cap is not None else med
+    detail = [f"{r['day']} {r['label']} {r['actual_vdot']:.1f}" for _, _, r in recs]
+    if cap is not None and cap > med + 0.05:
+        detail.append("能力锚取近 90 天最佳")
+    return channel, detail
+
+
+def _race_channel_fresh(races_graded: list[dict], as_of: date,
+                        label: str | None = None) -> bool:
+    """通道里有没有近 RACE_CAP_WINDOW_DAYS 天的全开比赛（label 缺省=混合）。
+
+    矛盾加权（E3）只信「近期」比赛：过期比赛与当前训练的背离不是矛盾信号
+    而是隐性 PB（训练大幅超越旧比赛，预测应贴训练走——test_pipeline_
+    hidden_pb_from_training_beats_old_race 的 120 天旧赛 vs 当前训练）。
+    """
+    for r in races_graded:
+        if r.get("quality") == "submax":
+            continue
+        if label is not None and r.get("label") != label:
+            continue
+        try:
+            age = (as_of - date.fromisoformat(str(r["day"])[:10])).days
+        except (ValueError, KeyError):
+            continue
+        if age <= RACE_CAP_WINDOW_DAYS:
+            return True
+    return False
+
+
+def _be_bucket_vdot(fitness: dict, buckets: tuple[str, ...]) -> float | None:
+    """各距离预测用的最快分段档：档内记录按条数加权合并（n 大者主导）。"""
+    b = fitness.get("best_effort_buckets") or {}
+    found = [(b[bk]["vdot"], b[bk]["n"]) for bk in buckets if bk in b]
+    if not found:
+        return None
+    return round(sum(v * n for v, n in found) / sum(n for _, n in found), 1)
+
+
+def _compute_with_evidence(activities: list[dict], vo2max, profile_max_hr,
+                           rest_hr, as_of, year_bests, plan_exec,
+                           personal_history: list[dict], samples_fn) -> dict:
+    """批33 证据管线（生产路径：personal_history 在场且非一键评估口径）。
+
+    流程：训练证据提取（每节课至多一类）→ 个人训练→比赛转换差（EWMA+收缩）
+    → 当前能力（近期加权中位）→ 比赛分级（次全力剔除）→ 通道混合 →
+    按距离偏差校准 → 预测区间（执行噪声 + 证据密度，不重复叠加）。
+
+    - 不做「训练配速 = 比赛配速」：先加个人/群体转换差，再按距离专项混合。
+    - 比赛少≠信息少：训练证据（503 次活动 / 620k 样本点）决定中心与密度。
+    - 无比赛上限锚定：次全力比赛不进通道，中心值由当前训练证据主导。
+    - 隐性 PB：训练证据显示的水平高于官方 PB 时，预测就取证据水平。
+    """
+    as_of = as_of or date.today()
+    max_hr = estimate_max_hr(profile_max_hr, activities)
+    races = detect_races(activities, max_hr)
+    race_ids = {r["id"] for r in races if r.get("id") is not None}
+    # 训练证据覆盖整个 180 天窗口（比赛分级需要赛前 60 天的证据；旧比赛
+    # 的分级也要有据可依）；「当前能力」只用近 90 天切片
+    ev = evidence.extract_workout_evidence(activities, samples_fn, max_hr,
+                                           as_of, window_days=180,
+                                           race_ids=race_ids)
+    ev90 = [r for r in ev
+            if r["day"] >= (as_of - timedelta(days=evidence.EVIDENCE_WINDOW_DAYS)).isoformat()]
+    deltas = evidence.conversion_deltas(personal_history or [])
+    fitness = evidence.current_fitness(ev90, deltas, as_of)
+    # 比赛分级：历史已判定的比赛沿用（旧记录迁移时按分量判定、新比赛按训练
+    # 证据判定，同一概念）；窗口内未判定的比赛按同期训练证据分级
+    q_by_day = {(e.get("day"), e.get("label")): e.get("quality")
+                for e in (personal_history or []) if e.get("quality")}
+    # 同距离历史比赛成绩（分级参照：连续比赛水平即该距离真实水平）
+    prior_by_label: dict[str, list[float]] = {}
+    for e in (personal_history or []):
+        if e.get("actual_vdot") is not None and e.get("label"):
+            prior_by_label.setdefault(e["label"], []).append(e["actual_vdot"])
+    races_graded = []
+    for r in races:
+        q = q_by_day.get((r["day"], r["label"]))
+        if not q:
+            q = evidence.grade_race(r, ev, deltas, max_hr,
+                                    prior_races=prior_by_label.get(r.get("label")))
+        races_graded.append({**r, "quality": q})
+    race_vdot, race_detail = _race_channel(races_graded, as_of)
+    # 各距离自己的全开比赛通道（同距离比赛是该距离最直接的证据；该距离
+    # 没有全开比赛时退回混合通道）。只认窗口内的比赛——单场旧比赛的加权
+    # 中位就是那场比赛本身，60 天半衰期对 n=1 形同虚设，会让「近 90 天
+    # 不作当下能力证据」的规则失效（真实库 10-07 5K 预测：仅剩的 4/12 5K
+    # 已过 178 天，仍以 0.40 权重锚住该距离，再被矛盾加权抬到 0.76，
+    # 预测比实际快 93 s；同距离无近期比赛时退回混合通道后降到 67 s）。
+    # 只有旧比赛的距离仍能通过混合通道与「近一年最佳」退回路径拿到比赛证据。
+    race_vdot_by_label = {}
+    for _lbl in SPEC_WEIGHTS:
+        _v = _race_channel(races_graded, as_of, _lbl)[0]
+        if _v is not None and _race_channel_fresh(races_graded, as_of, _lbl):
+            race_vdot_by_label[_lbl] = _v
+    # 窗口内没有全开比赛：退回近一年最佳比赛（历史能力参考，权重同比赛通道；
+    # 全马等长距离经常半年才跑一次，不能因为「近 180 天没比赛」就丢掉证据）
+    if race_vdot is None and year_bests:
+        pbs = [r for r in year_bests if r.get("vdot") and r.get("source") == "race"]
+        if pbs:
+            pb = max(pbs, key=lambda r: r["vdot"])
+            race_vdot = round(float(pb["vdot"]), 1)
+            race_detail = [f"近一年最佳 {pb.get('distance', '比赛')} VDOT {race_vdot}（窗口内无全开比赛）"]
+
+    # 各通道在场值（训练证据一律经个人转换差修正）
+    channels: dict[str, float] = {}
+    for kind in ("interval", "steady"):
+        f = fitness.get(kind)
+        if f:
+            channels[kind] = f["vdot"]
+    be = fitness.get("best_effort")
+    if be:
+        channels["best_effort"] = be["vdot"]
+    if race_vdot is not None:
+        channels["race"] = race_vdot
+
+    def _label_vdot(label: str) -> float | None:
+        # 有同距离全开比赛：比赛权重上调 + 用该距离自己的比赛通道
+        has_label_race = label in race_vdot_by_label
+        wmap = (SPEC_WEIGHTS_RACED[label] if has_label_race
+                else SPEC_WEIGHTS[label])
+        race_v = race_vdot_by_label.get(label, channels.get("race"))
+        # 长距离（半马/全马）比赛稀少，同距离通道样本不足：允许被混合通道的
+        # 近期能力锚抬升（跨距离上限信息——真实库 3 场半马与同期 5K 峰值差
+        # 仅 1.4–1.9 VDOT，而 10K 系列差 4–6，故 10K/5K 不池化）
+        if label in ("半马", "全马") and channels.get("race") is not None:
+            pooled = channels["race"]
+            if race_v is None or pooled > race_v:
+                race_v = pooled
+        pairs = []
+        for kind, w in wmap.items():
+            v = (_be_bucket_vdot(fitness, SPEC_BUCKETS[label])
+                 if kind == "best_effort"
+                 else (race_v if kind == "race" else channels.get(kind)))
+            if v is not None:
+                pairs.append((kind, v, w))
+        if not pairs:
+            return None
+        blend = sum(v * w for _, v, w in pairs) / sum(w for _, _, w in pairs)
+        # 通道矛盾时向比赛通道倾斜：训练与比赛差 ≥2 VDOT 说明其中一方失真，
+        # 比赛是更硬的证据（回测：10K 冬季间歇 56 vs 比赛系列 48，真相贴着
+        # 比赛走；半马 7 月轻松跑 47 vs 比赛 53.5，真相也贴着比赛走）。
+        # 只对「真有同距离比赛」的距离生效——退回混合通道时比赛通道可能
+        # 本身被其他距离污染，不能再给它加码（11-21 5K 首场：混合通道 48.9
+        # 来自 10K 系列，训练 53.7 才是真相）。
+        # 且只对「近期有全开比赛」生效——过期比赛与当前训练的背离是隐性
+        # PB（训练超越旧比赛），方向相反，不能按矛盾处理。has_label_race
+        # 本身就要求同距离有窗口内比赛（见 race_vdot_by_label 的构造），
+        # 所以这里不再单独判 freshness：先前那句 `or _race_channel_fresh(
+        # races_graded, as_of)` 会因「别的距离有近期比赛」而放行过期比赛。
+        if has_label_race and race_v is not None:
+            train_pairs = [(v, w) for k, v, w in pairs if k != "race"]
+            if train_pairs:
+                train_blend = sum(v * w for v, w in train_pairs) \
+                    / sum(w for _, w in train_pairs)
+                gap = abs(race_v - train_blend)
+                boost = min(1.0, max(0.0, gap - CONTRADICT_GAP)
+                            / CONTRADICT_SPAN)
+                if boost > 0:
+                    # 比赛权重上调、训练权重同步下调（总权重恒为 1）——
+                    # 差到 GAP+SPAN 时训练通道完全让位，预测贴住比赛通道。
+                    # 只加比赛权重不加满混合比例的旧写法在 boost=1 时仍保留
+                    # 四成训练权重，与「比赛权重拉满」的注释意图不符
+                    base_r = wmap["race"]
+                    w_race = base_r + (1.0 - base_r) * boost
+                    w_train = sum(w for _, w in train_pairs) * (1.0 - boost)
+                    blend = (race_v * w_race + train_blend * w_train) \
+                        / (w_race + w_train)
+        return round(blend, 1)
+
+    # 课表完成度调整（与旧口径同款公式：完成率 0.7 为中性点，钳制 ±上下限）
+    plan_adj = 0.0
+    if plan_exec and plan_exec.get("total"):
+        ratio = plan_exec.get("ratio")
+        if ratio is None:
+            ratio = plan_exec["done"] / plan_exec["total"]
+        plan_adj = max(QUALITY_ADJ_MIN, min(QUALITY_ADJ_MAX,
+                                            (ratio - 0.7) * QUALITY_K))
+    if abs(plan_adj) < 0.1:
+        plan_adj = 0.0
+    # 同配速心率趋势调整（与旧口径同款：心率下降 = 有氧能力进步，软证据）
+    trend = hr_trend_ability(activities, as_of)
+    trend_adj = round(trend["adj_vdot"], 1) if trend else 0.0
+
+    base_vo2 = round(float(vo2max), 1) if vo2max else None
+    predictions = {}
+    vdot_labels = {}
+    for label, dist in vd.DISTANCES.items():
+        v_at = _label_vdot(label)
+        if v_at is None:
+            # 该距离没有任何训练/比赛通道：手表 VO2max 兜底（新用户唯一依据）
+            if base_vo2 is None:
+                continue
+            v_at = base_vo2
+        # 近期执行度（课表完成）+ 心率趋势 + 按距离偏差校准
+        # （偏差：全开比赛学习，收缩后应用）
+        v_at = round(v_at + plan_adj + trend_adj
+                     + personal.bias_applied(personal_history or [], label), 1)
+        vdot_labels[label] = v_at
+        predictions[label] = vd.predict_time(dist, v_at)
+
+    # 主 VDOT（看板大字）= 各距离预测的平均——大字与四行成绩口径一致，
+    # 不会再出现「VDOT 52.5 但 5K 预测 18:48」的分裂
+    vdot_val = (round(sum(vdot_labels.values()) / len(vdot_labels), 1)
+                if vdot_labels else None)
+    if vdot_val is None:
+        # 没有任何通道在场：手表 VO2max 兜底（新用户唯一依据）
+        vdot_val = round(float(vo2max), 1) if vo2max else None
+
+    # 预测区间：执行噪声（跨距离池化去偏残差）⊕ 证据密度标准误
+    se = evidence.center_se(ev90, as_of)
+    prediction_intervals = {}
+    for label, v_at in vdot_labels.items():
+        iv = personal.interval(personal_history or [], label, center_se=se)
+        if iv:
+            prediction_intervals[label] = iv
+
+    # 证据明细（看板「依据」逐条展示；source 用中文直给——dashboard.js 的
+    # 映射表查不到时原样显示，UI 文案保持全中文）
+    details = []
+    if not channels and base_vo2 is not None:
+        details.append({"source": "手表 VO2max 兜底", "vdot": base_vo2,
+                        "detail": "无训练与比赛证据，各距离预测按手表 VO2max 读数兜底"})
+    if fitness.get("interval"):
+        f = fitness["interval"]
+        d = deltas["interval"]
+        src = "个人转换" if d["n"] else "群体先验"
+        details.append({"source": "间歇训练证据", "vdot": f["vdot"],
+                        "detail": (f"间歇/重复课 {f['n']} 节（近 90 天）当前能力 "
+                                   f"VDOT {f['vdot']:.1f}（训练→比赛转换 {d['delta']:+.1f}，"
+                                   f"{src}）")})
+    if fitness.get("steady"):
+        f = fitness["steady"]
+        d = deltas["steady"]
+        src = "个人转换" if d["n"] else "群体先验"
+        details.append({"source": "匀速强度课证据", "vdot": f["vdot"],
+                        "detail": (f"连续匀速强度课 {f['n']} 节当前能力 VDOT "
+                                   f"{f['vdot']:.1f}（转换 {d['delta']:+.1f}，{src}）")})
+    if be:
+        b = fitness.get("best_effort_buckets") or {}
+        d = deltas["best_effort"]
+        src = "个人转换" if d["n"] else "群体先验"
+        seg = "、".join(f"{k} 档 {v['n']} 条" for k, v in b.items())
+        details.append({"source": "日常跑步最快分段", "vdot": be["vdot"],
+                        "detail": (f"每次跑步样本滑窗切出的最快分段 {be['n']} 条"
+                                   f"（{seg}）当前能力 VDOT {be['vdot']:.1f}"
+                                   f"（转换 {d['delta']:+.1f}，{src}）")})
+    if race_vdot is not None:
+        n_sub = sum(1 for r in races_graded if r.get("quality") == "submax")
+        sub_txt = f"；另有 {n_sub} 场次全力已剔除（训练计时不作锚定）" if n_sub else ""
+        lbl_txt = ""
+        if len(race_vdot_by_label) > 1:
+            lbl_txt = "；各距离分别锚定：" + "、".join(
+                f"{l} {v:.1f}" for l, v in race_vdot_by_label.items())
+        details.append({"source": "比赛通道", "vdot": race_vdot,
+                        "detail": f"全开比赛 {len(race_detail)} 场（{'; '.join(race_detail)}），"
+                                  f"近期加权水平 VDOT {race_vdot:.1f}{lbl_txt}{sub_txt}"})
+    learned = [k for k in evidence.KINDS if (deltas.get(k) or {}).get("n")]
+    if learned:
+        details.append({"source": "训练-比赛个人转换",
+                        "detail": "已按全开比赛学习训练表现到比赛水平的个人转换："
+                                  + "、".join(f"{k} {deltas[k]['delta']:+.1f}"
+                                              f"（{deltas[k]['n']} 场）" for k in learned)})
+    if trend:
+        up_down = "下降" if trend["drop_bpm"] < 0 else "上升"
+        details.append({"source": "配速-心率趋势", "vdot": vdot_val,
+                        "detail": (f"同配速（{trend['pace_label']}/km）平均心率较早期"
+                                   f"{up_down} {abs(trend['drop_bpm']):.0f} bpm → 调整 "
+                                   f"{'+' if trend['adj_vdot'] >= 0 else ''}"
+                                   f"{trend['adj_vdot']} VDOT")})
+    if plan_adj:
+        ratio_shown = plan_exec.get("ratio")
+        if ratio_shown is None:
+            ratio_shown = plan_exec["done"] / plan_exec["total"]
+        details.append({"source": "课表完成度", "vdot": vdot_val,
+                        "detail": (f"近 {QUALITY_WINDOW_DAYS // 7} 周课表质量课完成 "
+                                   f"{plan_exec['done']}/{plan_exec['total']}"
+                                   f"（{int(round(ratio_shown * 100))}%）→ 执行校验 "
+                                   f"{'+' if plan_adj >= 0 else ''}{plan_adj:.1f} VDOT")})
+    applied_bias = {l: personal.bias_applied(personal_history or [], l)
+                    for l in vdot_labels}
+    applied_bias = {l: b for l, b in applied_bias.items() if b}
+    if applied_bias:
+        details.append({"source": "个人偏差校准",
+                        "detail": "、".join(f"{l} {b:+.1f} VDOT"
+                                            for l, b in applied_bias.items())
+                                  + f"（按近 {len(personal_history or [])} 场真实比赛"
+                                    f"的预测误差学习）"})
+    if se > 0:
+        details.append({"source": "预测区间依据",
+                        "detail": (f"执行噪声与证据密度标准误 {se:.2f} 合成"
+                                   f"（近 90 天训练证据决定中心估计精度），约 80% 置信")})
+
+    return {
+        "vdot": vdot_val,
+        "predictions": predictions,
+        "zones": vd.intensity_zones(vdot_val) if vdot_val else None,
+        "evidence": details,
+        "components": [{"kind": k, "vdot": channels[k], "weight": 1.0}
+                       for k in channels],
+        "prediction_intervals": prediction_intervals,
+        "personal_races": len(personal_history or []),
+        "max_hr": round(max_hr) if max_hr else None,
+        "as_of": as_of.isoformat(),
+        "ev_fitness": fitness,
+        "ev_list": ev,
+        "race_grades": races_graded,
+        "race_vdot": race_vdot,
+        "window_days": 180,
+        "model": "evidence",
+    }
 
 
 def quality_execution(workouts: list[dict], today: date | None = None,

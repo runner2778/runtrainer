@@ -68,7 +68,7 @@ class CoachOutput(BaseModel):
 
 # 聊天模式允许 AI 更新的档案键（服务端还要做取值范围钳制）
 PROFILE_UPDATE_KEYS = ("max_hr", "rest_hr", "weight_kg", "height_cm",
-                       "birth_year", "sex", "run_experience")
+                       "birth_year", "sex", "run_experience", "schedule_note")
 PROFILE_UPDATE_RANGES = {
     "max_hr": (140, 230),
     "rest_hr": (30, 100),
@@ -77,6 +77,7 @@ PROFILE_UPDATE_RANGES = {
     "birth_year": (1920, 2020),  # 整型年份（_apply_profile_updates 特殊处理去小数）
     "sex": None,  # 枚举 {male, female}，_apply_profile_updates 特殊校验
     "run_experience": None,  # 自由文本，仅限长度
+    "schedule_note": None,  # 生活约束自由文本（仅限长度）
 }
 
 
@@ -94,6 +95,6 @@ class ChatOutput(BaseModel):
                     "未来课表——日期范围从今天到比赛日（含后面几周），每改动一节课"
                     "列一条（可多条）。改课建议落库后由训练者批准才生效")
     profile_updates: dict = Field(default_factory=dict,
-                                  description="仅当用户明确提供新档案信息或健康数据与档案明显矛盾时给出，键限 max_hr/rest_hr/weight_kg/run_experience")
+                                  description="仅当用户明确提供新档案信息或健康数据与档案明显矛盾时给出，键限 max_hr/rest_hr/weight_kg/run_experience/schedule_note（生活约束备注）")
     rebuild_plan: bool = Field(default=False,
                                description="档案更新影响水平预估时置 true，服务端会按最新水平重建课表")

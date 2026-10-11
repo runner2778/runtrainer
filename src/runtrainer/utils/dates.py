@@ -21,6 +21,11 @@ def today_str() -> str:
     return today().isoformat()
 
 
+def now_iso() -> str:
+    """本地时区的当前时刻（秒精度）——给「X 分钟前评估的」这类展示用。"""
+    return datetime.now(_LOCAL_TZ).isoformat(timespec="seconds")
+
+
 def date_to_ts(d: date) -> int:
     """本地日期的 0 点对应的 epoch 秒（UTC）。"""
     return int(datetime(d.year, d.month, d.day, tzinfo=_LOCAL_TZ).timestamp())

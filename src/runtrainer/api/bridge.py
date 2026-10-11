@@ -146,6 +146,52 @@ class Api:
             kv_repo.set_setting(key, value)
         return {"saved": True}
 
+    # ---- 手机伴侣屏 ----
+    def _companion_view(self) -> dict:
+        """合并「设置里开着」与「服务真的在跑」：手机能不能连上只看 running。
+
+        两者会不一致——绑定失败（端口被占）时开关是开的但服务没起来，
+        这时必须把 error 透出去，否则用户看着开关开着却连不上。
+        """
+        from .. import companion
+        st = companion.status()
+        enabled = settings_service.get_companion_enabled()
+        pin = (settings_service.get_or_create_companion_pin() if enabled
+               else settings_service.get_companion_pin())
+        port = st["port"] or companion.DEFAULT_PORT
+        return {
+            "enabled": enabled,
+            "running": st["running"],
+            "port": port,
+            "error": st["error"],
+            "pin": pin or "",
+            "urls": [f"http://{ip}:{port}/" for ip in companion.lan_ips()],
+        }
+
+    @envelope
+    def get_companion_status(self):
+        return self._companion_view()
+
+    @envelope
+    def set_companion_enabled(self, enabled: bool):
+        from .. import companion
+        if enabled:
+            settings_service.get_or_create_companion_pin()  # 没有 PIN 先生成
+            if not companion.ensure_started():
+                raise RuntimeError(
+                    "启动失败：" + (companion.status()["error"] or "端口被占用"))
+            settings_service.set_companion_enabled(True)
+        else:
+            companion.stop()
+            settings_service.set_companion_enabled(False)
+        return self._companion_view()
+
+    @envelope
+    def reset_companion_pin(self):
+        # handler 每请求读最新 PIN，无需重启服务；重置即刻生效
+        pin = settings_service.reset_companion_pin()
+        return {**self._companion_view(), "pin": pin}
+
     # ---- 目标 ----
     @envelope
     def get_active_goal(self):
@@ -263,6 +309,14 @@ class Api:
         cov = load_metrics.plan_coverage(win_rows, runs_day)
         weeks_total = int(plan["total_weeks"])
         weeks_elapsed = max(0.0, min(float(weeks_total), (today - start).days / 7.0))
+        # 今日决策徽章（与 AI 教练页同一份本地计算；画像模型有 app_state
+        # 缓存，数据未变时开销很小。构建失败不拖垮日历）
+        try:
+            from ..services import coach_service
+            ds = coach_service.decision_snapshot(today)
+            decision = ds.get("decision") if ds else None
+        except Exception:
+            decision = None
         return {
             "today": today_s, "start_date": plan["start_date"], "race_date": plan["race_date"],
             "total_weeks": weeks_total, "weeks_elapsed": round(weeks_elapsed, 1),
@@ -272,6 +326,7 @@ class Api:
             "covered_km_4w": cov["covered_km"],
             "planned_days_4w": cov["planned_days"], "covered_days_4w": cov["covered_days"],
             "compliance_4w": cov["ratio"],
+            "today_decision": decision,
         }
 
     # ---- 目标向导与计划生成 ----
@@ -300,6 +355,51 @@ class Api:
     def get_dashboard(self):
         from ..services import dashboard_service
         return dashboard_service.get_dashboard()
+
+    @envelope
+    def run_quick_assessment(self):
+        """一键评估：按最近三周训练（间歇/速度能力占大头）重估成绩并落库。
+
+        落库后仪表盘卡片就显示这次评估；有新活动（含比赛）进库会自动重估。
+        评估完顺手把课表配速对齐到新 VDOT（只改配速列、不重排课表）。
+        前端拿到结果后仍应广播 sync-done，让其余页面与这张卡一致刷新。
+        """
+        from ..services import plan_service
+        res = plan_service.quick_assessment()
+        try:
+            if plan_repo.get_active_plan() and res.get("vdot"):
+                res["pace_sync"] = plan_service.sync_plan_paces(
+                    target_vdot=float(res["vdot"]))
+        except Exception:  # noqa: BLE001
+            log.exception("评估后配速同步失败（不影响评估结果）")
+        return res
+
+    # ---- 课表配速同步 ----
+    @envelope
+    def get_pace_sync_status(self):
+        """课表配速 vs 当前预估 VDOT 的差距（供课表/仪表盘显示徽标）。"""
+        from ..services import plan_service
+        return plan_service.pace_sync_status()
+
+    @envelope
+    def sync_plan_paces(self, force: bool = False, include_past: bool = False):
+        """把课表里未执行课的配速列对齐到当前预估 VDOT。
+
+        只动 pace_zone 对应的慢/快两端配速，不重排日期、不改距离/分段/状态。
+        force=True 时连「手动指定 VDOT」的目标也一并覆盖。
+        """
+        from ..services import plan_service
+        return plan_service.sync_plan_paces(force=bool(force),
+                                            include_past=bool(include_past))
+
+    @envelope
+    def get_vdot_table(self, vdot: float | None = None):
+        """丹尼尔斯 VDOT 训练表：指定档位（不传则用默认档）的区间明细 + 完整矩阵。"""
+        from ..domain import training_table as tt
+        from ..services import plan_service
+        ctx = plan_service.vdot_table_context(vdot)
+        return {**ctx, **tt.daniels_table(ctx["vdot"], ctx.get("rest_hr"),
+                                          ctx.get("max_hr"))}
 
     # ---- AI 教练 ----
     @envelope
@@ -366,13 +466,13 @@ class Api:
         res = import_service.import_files(paths)
         out = dict(res or {})
         # 手动导入同样走「同步/导入 → 读取数据 → 成绩估计 → 各强度速度区间
-        # → 调整计划配速」联动链：新水平与现计划 VDOT 差 ≥0.2 时自动重建课表
-        # （与 Garmin 同步路径同入口，保留过去日期的完成状态与关联活动）
+        # → 调整计划配速」联动链：新水平与现计划 VDOT 差 ≥0.2 时原地同步配速
+        # （与 Garmin 同步路径同入口；不重排课表）
         if out.get("imported", 0) > 0 and plan_repo.get_active_plan():
-            rebuilt = plan_service.refresh_active_plan()
-            if rebuilt:
+            synced = plan_service.refresh_active_plan()
+            if synced:
                 out["plan_rebuilt"] = True
-                out["plan_vdot"] = rebuilt.get("vdot")
+                out["plan_vdot"] = synced.get("target_vdot")
         return out
 
     @envelope
@@ -385,6 +485,73 @@ class Api:
             file_types=("FIT 文件 (*.fit)", "CSV 文件 (*.csv)", "所有文件 (*.*)"),
         )
         return list(result) if result else []
+
+    # ---- 手动补录活动 ----
+    @envelope
+    def add_manual_activity(self, payload: dict):
+        """手动新增一条活动（距离/用时/心率/步频/步幅/主观感受/用力程度）。
+
+        入库后与手表同步的活动完全同权，并沿联动链重估水平、同步课表配速。
+        """
+        from ..services import manual_service
+        from ..services import plan_service
+        res = manual_service.add_activity(payload or {})
+        # 与同步/导入同一条联动链：新证据 → 重估水平 → 课表配速同步
+        try:
+            if plan_repo.get_active_plan():
+                sync = plan_service.sync_plan_paces()
+                res["pace_sync"] = sync
+        except Exception:  # noqa: BLE001
+            log.exception("补录后配速同步失败（不影响录入本身）")
+        return res
+
+    @envelope
+    def update_activity_fields(self, activity_id: int, fields: dict):
+        """改活动字段（含主观感受）：距离/用时改了自动重算配速与步幅。"""
+        from ..services import manual_service
+        return manual_service.edit_activity(int(activity_id), fields or {})
+
+    @envelope
+    def delete_activity_record(self, activity_id: int):
+        from ..services import manual_service
+        ok = manual_service.delete_activity(int(activity_id))
+        return {"deleted": bool(ok)}
+
+    @envelope
+    def recognize_activity_screenshot(self, path: str | None = None):
+        """截图识别：不传 path 则弹文件选择框，用系统 OCR 读出字段供用户确认。
+
+        只做「读」不做「写」——识别结果回填到表单，用户核对后再走
+        add_manual_activity 落库（OCR 必然有误差，不该直接入库）。
+        """
+        import base64
+        from pathlib import Path
+        from ..services import ocr_service
+
+        if not path:
+            import webview
+            if not webview.windows:
+                raise RuntimeError("窗口未就绪")
+            picked = webview.windows[0].create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=False,
+                file_types=("图片 (*.png;*.jpg;*.jpeg;*.bmp;*.webp)", "所有文件 (*.*)"),
+            )
+            if not picked:
+                return {"cancelled": True}
+            path = picked[0] if isinstance(picked, (list, tuple)) else picked
+
+        res = ocr_service.recognize_activity(str(path))
+        out = dict(res)
+        # 预览缩略：超过 8MB 不回传（base64 会膨胀 1/3，大图会卡住 UI）
+        try:
+            p = Path(str(path))
+            if p.is_file() and p.stat().st_size <= 8 * 1024 * 1024:
+                out["preview_data_url"] = (
+                    "data:image/*;base64,"
+                    + base64.b64encode(p.read_bytes()).decode("ascii"))
+        except Exception:  # noqa: BLE001
+            pass
+        return out
 
     # ---- 健康 ----
     @envelope
@@ -403,6 +570,17 @@ class Api:
         # 轻量投影行：分析只消费五列，不走 SELECT * 拖全行大 JSON 字段
         acts = activity_repo.list_pace_hr_rows(start.isoformat(), end.isoformat())
         return weekly_pace_hr(acts, start, end)
+
+    @envelope
+    def list_weekly_subjective(self, days: int = 180):
+        """各周平均主观感受/用力程度（ISO 周聚合），供健康页「主观负荷」曲线。"""
+        from datetime import date, timedelta
+        from ..db.repos import activity_repo
+        from ..domain.workout_analysis import weekly_subjective
+        end = date.today()
+        start = end - timedelta(days=int(days))
+        rows = activity_repo.list_subjective_rows(start.isoformat(), end.isoformat())
+        return weekly_subjective(rows, start, end)
 
     @envelope
     def list_pace_bin_hr(self, days: int = 120):

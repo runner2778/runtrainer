@@ -21,6 +21,7 @@
       <a href="#/coach" :class="{active: $store.app.page==='coach'}">AI 教练</a>
       <a href="#/activities" :class="{active: $store.app.page==='activities'}">活动</a>
       <a href="#/health" :class="{active: $store.app.page==='health'}">健康</a>
+      <a href="#/vdot" :class="{active: $store.app.page==='vdot'}">VDOT 训练表</a>
       <a href="#/settings" :class="{active: $store.app.page==='settings'}">设置</a>
     </nav>
     <div class="sidebar-footer">
@@ -35,6 +36,7 @@
     <section id="page-coach" x-show="$store.app.page==='coach'" x-data="coachPage"></section>
     <section id="page-activities" x-show="$store.app.page==='activities'" x-data="activitiesPage"></section>
     <section id="page-health" x-show="$store.app.page==='health'" x-data="healthPage"></section>
+    <section id="page-vdot" x-show="$store.app.page==='vdot'" x-data="vdotPage"></section>
     <section id="page-settings" x-show="$store.app.page==='settings'" x-data="settingsPage"></section>
   </main>
   <div id="toast" class="toast" x-data="{}" x-show="$store.app.toast.show" x-text="$store.app.toast.text"></div>

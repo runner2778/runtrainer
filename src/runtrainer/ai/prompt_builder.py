@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+from ..domain import athlete_model, stimulus
 from ..utils import dates, jsonutil
 
 ZONE_NAMES = {"E": "轻松跑", "M": "马拉松配速", "T1": "LT1 巡航阈", "T": "乳酸阈 LT2",
@@ -17,7 +18,7 @@ SYSTEM_PROMPT = """你是跑步教练，用简体中文工作。训练哲学：�
 原则：
 1. 强度分布遵循实证边界：80/20 是挪威精英训练的描述性证据；业余跑者（尤其周跑量小）金字塔式分布（强度占比可至 20–40%）有同级甚至更优证据（2025 网络荟萃）——不硬套 80/20；共同底线是恢复/E 日必须真轻松（强度课之间至少隔 2 天，恢复日别补强度）。
 2. 恢复是训练的一部分：睡眠差、HRV 低、静息心率升高时优先降强度或休息。
-3. 伤病指征（静息心率连续 3 天升 >5 或 HRV 连续 3 天降）必须建议休息。
+3. 伤病指征（静息心率连续 3 天升 >5）必须建议休息；HRV 连续 3 天降 ≥15ms 是黄色信号——建议当天降档观察，不强制休息（手表 HRV 噪声大，真实库无幅度门槛时 15% 天数会「连降」，多为噪声）。
 4. 赛前 14 天不引入新刺激，只允许 keep/rest/decrease 或轻松课。
 5. 配速只能用给定配速表（E/M/T1/T/I/R；T1=LT1 巡航阈=双阈值日上午段、T=LT2 乳酸阈≈88% VDOT），不许编造其他配速区间。
 6. 数据缺失时保守：不确定就不加量、不加练。
@@ -26,6 +27,10 @@ SYSTEM_PROMPT = """你是跑步教练，用简体中文工作。训练哲学：�
 9. 周跑量总变化不超过 ±10%；单次 modify 距离变化不超过 ±30%。
 10. 输出严格 JSON（json_object），不要输出任何解释性文字。
 11. 每条调整的 reason、key_signals、weekly_notes、add_extra_advice 的理由都必须引用具体数据做依据：【数据参考】块里的心率 bpm 区间 / HRV 基线 / 步频步幅、配速表区间、睡眠时长、静息心率、近几周跑量等。示例：不要写「状态一般，注意恢复」这种没有数据支撑的话，要写「昨夜 HRV 41ms 低于 14 天基线 55ms、静息心率 52 升了 6，明天 E 跑 60 分钟建议降为 40 分钟恢复跑」。字数不足、只有形容词没有数字的理由不合格。
+12. 「今天执行原计划 / 降强度 / 减量 / 改恢复跑 / 休息」的判断必须先对照【今日决策支持（本地计算）】块——那是系统按真实健康与负荷数据算出的本地倾向。你可以解释它、结合【运动员长期画像】补充细节；若给出与它相反的结论，必须在 reason 里引用具体数据说明为什么（例如「本地裁决建议降量，但昨夜睡眠 8.2h、HRV 高于基线，我判断可执行原计划」）。
+13. 判断心率是否异常、漂移是否过大、恢复是否到位，用【运动员长期画像】里这个人的个人基线（配速-心率基线±σ、漂移中位、疲劳效应），不要套群体均值；画像里 n 小的特征只作参考，没有的特征明说「你的数据还不够判断」。
+14. 调课时考虑刺激-恢复（【训练刺激与恢复剖面】）：强度课的疲劳按指数衰减影响未来 24/48/72 小时（半衰期约 3 天）；质量课前残留疲劳超过上限时，把课前一天的课减量或改轻松，而不是在两个强度课之间硬塞。
+15. 漏训/少跑/多跑（【漏训与偏差事件】）一律先按当前状态重新判断，禁止「昨天漏了今天必须补回来」的机械补偿：状态好可部分补偿（量不超原计划 30%），状态一般就放弃补偿、回到课表节奏；用户主动休息（skipped）不是漏训，不补偿。
 
 理论应用（只体现在 reason/summary/weekly_notes 的文字与 modify 的内容上，不改变配速表和动作契约）：
 - 双乳酸阈值日（挪威模式；课表中 T1=上午段、T=下午段）：一天两练——上午段 LT1 巡航阈（≈84% VDOT、比 T 慢 5–10 秒/公里、体感「稳定而克制」、能说短句）立「量」，下午段 LT2 乳酸阈（≈88% VDOT、与文献群体 VT2 速度均值 87.6% 同档、「舒适地费力」、只能蹦单词）磨「强度」。操作义：T1 是「低于 LT2 的阈下巡航带」，不是 VT1/有氧阈（文献 VT1 速度群体均值仅 ≈74%，别混用术语）。双阈值日形态由菜单轮换：上午段始终是长段巡航（5–10 分钟×3–5 组，主段 ≤35 分钟）；下午段按双练日两种形态隔次轮换——T 短段（8×800m/6×1000m 等距离重复，仍是 LT2 档）或 I 短间歇（10×400m/8×600m 短组、短慢跑恢复，kind/标签=I——这天下午磨的是 VO2max，不是 LT2，措辞别把它叫「阈值下午段」）。描述具体某一天时以课表里那节课的 kind/标题为准，不要再写「4×8′+5×5′」之类固定模板或自创形态。实践规则：两练间隔 ≥6 小时并补碳水补水；业余先每周 1 个双阈值日、4–6 周稳定后再上 2 个；双阈值日前后一天安排真正轻松的课；心率高/恢复差时降为单段或 M/E；女性与 50 岁以上取每周 1 天的保守档。证据边界：双阈值 vs 经典训练无 RCT 头对头，证据是精英案例与急性拆场实验——措辞不要说「已被科学证实更优」。
@@ -59,6 +64,7 @@ CHAT_SYSTEM_PROMPT = """你是训练者的私人跑步教练（丹尼尔斯训�
 3b. 调整范围：日期可以是今天到比赛日（race_date）之间的任何未来课——包括后面几周、整个赛程的批量调整（大范围改课时可一次给出多条 adjustments，每改动一节课列一条，不要合并；date/planned_workout_id 必须对准课表里列出的行）。注意：你给出的调整只是「建议方案」，落地前系统会先征求训练者同意——reply 末尾用一句「请确认后点批准生效」即可，不要说「已改到课表」。
 4. 训练者明确提供了新档案信息（最大心率/静息心率/体重/跑步经验），或健康数据与档案明显矛盾时，才在 profile_updates 里给出对应键的新值；rebuild_plan 在档案更新会改变水平预估、或配速-心率对照显示明显进步/退步（同配速心率变化 ≥5 bpm）时置 true（系统会用最新数据重估 VDOT 并更新课表配速）。
 5. 配速只能用给定配速表（E/M/T1/T/I/R；T1=LT1 巡航阈=双阈值日上午段、T=LT2 乳酸阈≈88% VDOT），不许编造配速区间；数据缺失时保守。
+5b. 训练者问「今天该不该跑/要不要降量/状态行不行」时，先对照【今日决策支持（本地计算）】块的本地裁决与信号解释它；结论与它相反时要给具体数据理由。训练者提及生活约束（上课/上班/出差/没时间/熬夜/场地/周末时间安排）时：调整课表建议按约束落地，并把这些约束用一句话写进 profile_updates.schedule_note（≤100 字），供以后每次教练对话使用。
 6. 判断和建议必须引用具体数据：给定的健康/活动数据、【数据参考】块里的心率 bpm 区间 / HRV 基线 ms / 步频步幅。训练者问健康或营养问题（睡多久合适、某次训练前后碳水/蛋白质吃多少克、伤病/酸痛怎么办、体重变化的影响等）也要用数据认真回答：营养按档案体重换算成具体克数、康复给具体时长与做法；档案缺某数据（如体重）时直接说明缺什么、并告诉他可在设置→个人档案里补，不要不懂装懂、不要只给模糊口号。
 7. 输出严格 JSON（json_object），不要输出任何解释性文字。
 训练科学速查（2026 年经同行评审文献复核；③知识问答直接引用本块数值，跑圈自媒体/网红说法与本块冲突时以本块为准）：
@@ -174,6 +180,8 @@ def _context_blocks(ctx: dict) -> list[str]:
         )
     else:
         lines.append("（未填写档案）")
+    if ath.get("schedule_note"):
+        lines.append(f"生活约束备注（训练者自己说过的时间/场地等现实约束）：{ath['schedule_note']}")
 
     goal = ctx.get("goal") or {}
     lines.append("【目标】")
@@ -315,6 +323,59 @@ def _context_blocks(ctx: dict) -> list[str]:
     if cs:
         lines.append(f"近 7 天平均步频 {cs['cadence']} spm"
                      + (f"、平均步幅 {cs['stride']} m（{cs['n']} 次跑步）" if cs.get("stride") else ""))
+
+    lines.append("【运动员长期画像（系统从训练者自己的历史数据学出的个人规律，n 为样本量）】")
+    am_lines = ctx.get("athlete_model_lines") or []
+    lines.extend(am_lines if am_lines else ["（画像数据不足）"])
+    lines.append("判读规则：判断心率是否异常/漂移是否过大/恢复是否到位，对照上面这个人"
+                 "自己的基线，不要套群体均值；n 小的特征只作参考。")
+
+    lines.append("【今日决策支持（本地计算）】")
+    td = ctx.get("today_decision") or {}
+    if td.get("verdict"):
+        lines.append(f"本地裁决：{td.get('verdict_label')}（评分 {td.get('score')}）。"
+                     f"{td.get('note') or ''}")
+        for s in td.get("signals") or []:
+            tag = f"罚分 {s['penalty']}" if s.get("penalty") else "提示"
+            lines.append(f"- {s['name']}（{tag}）：{s['evidence']}")
+        lines.append("这是系统按真实数据算出的本地倾向：你的结论与它相反时，"
+                     "必须在 reason 里引用具体数据说明为什么。")
+    else:
+        lines.append("（今日决策数据不足）")
+
+    lines.append("【训练刺激与恢复剖面】")
+    st = ctx.get("stimulus") or {}
+    if ctx.get("today_workout"):
+        lines.append("今日课刺激：" + stimulus.describe_stimulus(ctx["today_workout"]))
+    fat = st.get("fatigue") or {}
+    if fat.get("n"):
+        top = "；".join(f"{c['date']} {c['kind']} 残留 {c['residual']:.0f} AU"
+                        for c in fat.get("top", []))
+        lines.append(f"当前残留疲劳 {fat['residual_au']:.0f} AU（主要来源：{top or '无'}）"
+                     "——AU 是群体先验标尺（1 AU ≈ 1km 轻松跑恢复量），半衰期 3 天，"
+                     "作推理锚点，不作硬裁决")
+    for f in st.get("quality_flags") or []:
+        lines.append(f"- {f['date']} {f['kind']}（{f['label']}）：{f['note']}")
+    wb = st.get("week_balance") or {}
+    if wb.get("missing"):
+        lines.append("本周刺激平衡缺口：" + "；".join(wb["missing"]))
+    else:
+        lines.append(f"本周刺激平衡正常（周负荷 {wb.get('week_au')} AU）")
+
+    lines.append("【漏训与偏差事件（近 7 天，本地判定）】")
+    me = ctx.get("miss_events") or []
+    if me:
+        ev_names = {"missed": "漏训", "short": "少跑", "over": "多跑",
+                    "skipped": "主动休息"}
+        for e in me:
+            detail = f"，实际 {e['actual_km']}km" if e.get("actual_km") else ""
+            lines.append(f"- {e['date']} {e['kind']} {ev_names.get(e['event'], e['event'])}"
+                         f"（计划 {e['planned_km']}km{detail}）")
+        lines.append("处理规则：不机械补课——按当前状态重新判断：状态好可部分补偿"
+                     "（量不超原计划 30%），状态一般放弃补偿、回到课表节奏；"
+                     "主动休息不是漏训，无需补偿。")
+    else:
+        lines.append("（近 7 天无漏训/少跑/多跑事件）")
     return lines
 
 
@@ -391,12 +452,38 @@ def _data(ctx: dict) -> dict:
 
 
 def build_sync_analysis(ctx: dict, new_acts: list[dict]) -> dict:
-    """同步后自动分析上下文：共用块 + 本次新增活动精确详情。返回 {system, user, data}。"""
+    """同步后自动分析上下文：共用块 + 本次新增活动精确详情 + 个人模型预期对照。返回 {system, user, data}。"""
     lines = _context_blocks(ctx)
     lines.append("【本次同步新增的训练数据（重点分析对象）】")
     lines.extend(_activity_lines(new_acts, ctx))
+    # 预测-反馈闭环：新训练实际反应 vs 个人模型预期（同一配速这个人该有的心率）
+    lines.append("【本次训练反应 vs 个人模型预期（预测-反馈闭环，本地计算）】")
+    model = ctx.get("athlete_model") or {}
+    resp_lines = []
+    for a in new_acts:
+        if not a.get("avg_hr") or not a.get("avg_pace_s_km"):
+            continue
+        exp = athlete_model.expected_hr(model, a.get("avg_pace_s_km"))
+        if not exp:
+            continue
+        dev = a["avg_hr"] - exp["hr"]
+        verdict = ("明显偏高" if dev > 15 else "偏高" if dev > 10
+                   else "符合预期" if dev >= -10 else "偏低（同配速进步信号）")
+        d = dates.ts_to_date(a["start_ts"])
+        resp_lines.append(
+            f"- {d} {a.get('name') or '训练'}：配速 {dates.fmt_pace(a['avg_pace_s_km'])}/km "
+            f"实际心率 {a['avg_hr']:g} vs 个人基线 {exp['hr']:.0f}±{exp['std']:.0f} bpm "
+            f"→ {verdict}（{dev:+.0f} bpm）")
+    if resp_lines:
+        lines.extend(resp_lines)
+        lines.append("判读：偏离 ≤10 bpm 属正常波动（个人档 σ≈8–9 bpm）；偏高说明疲劳/状态差"
+                     "（对照健康数据与负荷找原因）；持续偏低是适应进步的积极信号。"
+                     "点评时用这些对照校准对这个人的理解。")
+    else:
+        lines.append("（本次新活动无配速-心率对照数据）")
     lines.append("")
-    lines.append("请输出自动分析：先逐条点评新训练的执行质量，再结合负荷与健康数据总结，"
+    lines.append("请输出自动分析：先逐条点评新训练的执行质量（对照个人基线与预期说明心率/强度"
+                 "是否符合这个人的正常水平），再结合负荷与健康数据总结，"
                  "最后给出接下来几天的建议（训练者没有要求改课，不要凭空安排调整）。")
     user = "\n".join(lines)
     return {"system": SYNC_ANALYSIS_SYSTEM_PROMPT, "user": user, "data": _data(ctx)}

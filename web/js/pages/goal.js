@@ -46,9 +46,11 @@ function parseTarget(str) {
   return null;
 }
 function addDays(iso, n) {
-  const d = new Date(iso + 'T00:00:00');
-  d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
+  // 用本地年月日构造并回读本地年月日：toISOString 取的是 UTC 日期，
+  // 在 UTC+8 下会整体差一天（选 12 周备赛却落到 11 周零 6 天）。
+  const [y, m, d] = iso.split('-').map(Number);
+  const dt = new Date(y, m - 1, d + n);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
 }
 function localToday() {
   // toISOString 是 UTC 日期，北京时间凌晨会差一天，本地日期必须手工拼
@@ -69,16 +71,16 @@ const HTML = `
          template x-for 会被多次求值且每次追加一份克隆（4 张卡片变 12 张）。
          动态列表请以空数组起步再异步填充，或置于 x-if 惰性子树内。 -->
     <div class="grid cols-2">
-      <button class="btn big dist-card" :class="form.distance_m === 5000 ? 'primary' : ''" @click="form.distance_m = 5000">
+      <button class="btn big dist-card" :class="form.distance_m === 5000 ? 'primary' : ''" @click="pickDistance(5000)">
         <b>5K</b><span class="muted">5 公里</span>
       </button>
-      <button class="btn big dist-card" :class="form.distance_m === 10000 ? 'primary' : ''" @click="form.distance_m = 10000">
+      <button class="btn big dist-card" :class="form.distance_m === 10000 ? 'primary' : ''" @click="pickDistance(10000)">
         <b>10K</b><span class="muted">10 公里</span>
       </button>
-      <button class="btn big dist-card" :class="form.distance_m === 21097 ? 'primary' : ''" @click="form.distance_m = 21097">
+      <button class="btn big dist-card" :class="form.distance_m === 21097 ? 'primary' : ''" @click="pickDistance(21097)">
         <b>半马</b><span class="muted">半程马拉松 21.0975km</span>
       </button>
-      <button class="btn big dist-card" :class="form.distance_m === 42195 ? 'primary' : ''" @click="form.distance_m = 42195">
+      <button class="btn big dist-card" :class="form.distance_m === 42195 ? 'primary' : ''" @click="pickDistance(42195)">
         <b>全马</b><span class="muted">全程马拉松 42.195km</span>
       </button>
     </div>
@@ -97,7 +99,7 @@ const HTML = `
     <div class="grid cols-2">
       <div>
         <div class="form-row"><label>比赛日期（该距离建议至少 <b x-text="minWeeks"></b> 周备赛）</label>
-          <input type="date" x-model="form.race_date" :min="today"></div>
+          <input type="date" x-model="form.race_date" :min="today" @input="raceDateTouched = true"></div>
         <div class="form-row"><label>目标成绩（如 1:45:00；留空 = 完赛）</label>
           <input x-model="form.targetStr" placeholder="1:45:00"></div>
         <div class="form-row"><label>基础周跑量 (km)</label>
@@ -326,6 +328,8 @@ export function initGoal() {
     today: localToday(),
     ctx: { recent_vdot: null, recent_race: null, avg_weekly_km_4w: null, min_weeks: {} },
     hasPlan: false,
+    // 用户是否亲手改过比赛日期：改过之后选距离不再覆盖他的选择
+    raceDateTouched: false,
     form: {
       distance_m: 5000, race_date: '', targetStr: '', base_weekly_km: 30,
       run_days: 5, long_run_weekday: 6, vdotMode: 'auto', manualVdot: 40,
@@ -340,13 +344,22 @@ export function initGoal() {
       return this.ctx.min_weeks[this.form.distance_m] || 8;
     },
 
+    // 选距离：默认比赛日按该距离的最少备赛周数重算（用户手动改过日期就不动）
+    pickDistance(d) {
+      this.form.distance_m = d;
+      if (!this.raceDateTouched) this.resetRaceDate();
+    },
+    resetRaceDate() {
+      this.form.race_date = addDays(this.ctx.today || this.today, this.minWeeks * 7);
+    },
+
     async init() {
       const { ok, data, error } = await tryCall('get_goal_wizard_context');
       if (!ok) { this.$dispatch('toast', { text: '读取向导数据失败: ' + error }); return; }
       this.ctx = data;
       this.form.base_weekly_km = data.avg_weekly_km_4w || 30;
       this.form.manualVdot = data.recent_vdot || 40;
-      if (!this.form.race_date) this.form.race_date = addDays(data.today, this.minWeeks * 7);
+      if (!this.form.race_date) this.resetRaceDate();
       const plan = await tryCall('get_active_plan');
       this.hasPlan = !!plan.data;
     },
@@ -367,7 +380,7 @@ export function initGoal() {
     },
 
     next1() {
-      if (!this.form.race_date) this.form.race_date = addDays(this.today, this.minWeeks * 7);
+      if (!this.form.race_date) this.resetRaceDate();
       this.step = 2;
     },
     async next2() {

@@ -192,6 +192,48 @@ const HTML = `
         </label>
       </div>
     </div>
+
+    <div class="card">
+      <h2>手机伴侣屏</h2>
+      <p class="muted mt8" style="margin-top:0">
+        开启后，与之连同一个 Wi-Fi 的手机浏览器可打开另一半界面：今日概览、AI 教练裁决与对话。
+        服务只在本机运行，需用 6 位配对码连接，连续输错会临时锁定。
+      </p>
+      <div class="form-row">
+        <label class="flex">
+          <input type="checkbox" style="width:auto" x-model="companionEnabled" @change="saveCompanion()">
+          <span>开启手机伴侣屏（局域网 8088 端口）</span>
+        </label>
+      </div>
+      <template x-if="companionEnabled">
+        <div>
+          <p class="muted" x-show="!companionRunning">
+            服务未在运行<span x-show="companionError" x-text="'：' + companionError"></span>
+          </p>
+          <div x-show="companionRunning">
+            <p>手机浏览器打开（手机需连同一个 Wi-Fi）：</p>
+            <ul>
+              <template x-for="u in companionUrls" :key="u">
+                <li><b x-text="u"></b></li>
+              </template>
+            </ul>
+            <p class="muted" x-show="!companionUrls.length">
+              未检测到局域网地址，请确认电脑已连上 Wi-Fi 或网线。
+            </p>
+            <div class="form-row">
+              <label>配对码</label>
+              <div class="flex">
+                <input readonly :value="companionPin" style="flex:1; letter-spacing:3px; font-size:18px">
+                <button class="btn small" @click="resetCompanionPin()">重置</button>
+              </div>
+            </div>
+            <p class="muted mt8">
+              在手机页面输入这 6 位数字即可连接。重置后已配对的手机需重新输入，重启应用不必重新配对。
+            </p>
+          </div>
+        </div>
+      </template>
+    </div>
   </div>
 </div>`;
 
@@ -217,6 +259,11 @@ export function initSettings() {
     syncStates: [],
     syncing: false,
     aiLocked: true,  // AI 选择确定后锁定；更改需手动解锁（任务：确定/锁定流）
+    companionEnabled: false,
+    companionRunning: false,
+    companionUrls: [],
+    companionPin: '',
+    companionError: '',
 
     async init() {
       const { ok, data, error } = await tryCall('get_settings');
@@ -235,6 +282,7 @@ export function initSettings() {
       this.aiWebSearch = data.ai_web_search;
       this.syncStates = data.sync_states || [];
       this.aiLocked = true;
+      this.loadCompanion();
     },
     // 切到设置页时刷新（同步状态/档案可能已变化；也兜底启动时 init 未跑成的情况）。
     // 编辑中（已解锁）不重跑 init：sync-done 会刷新所有页，重跑会把草稿静默
@@ -407,6 +455,41 @@ export function initSettings() {
     async saveAutoSync() {
       await tryCall('set_setting', 'auto_sync_enabled', this.autoSyncEnabled ? '1' : '0');
       this.$dispatch('toast', { text: this.autoSyncEnabled ? '已开启自动同步（每 5 分钟）' : '已关闭自动同步' });
+    },
+
+    // ---- 手机伴侣屏 ----
+    applyCompanion(data) {
+      if (!data) return;
+      this.companionEnabled = !!data.enabled;
+      this.companionRunning = !!data.running;
+      this.companionUrls = data.urls || [];
+      this.companionPin = data.pin || '';
+      this.companionError = data.error || '';
+    },
+    // 挂在 init() 末尾：失败只静默（老版本后端没有这几个接口时不能让整页读设置失败）
+    async loadCompanion() {
+      const { ok, data } = await tryCall('get_companion_status');
+      if (ok) this.applyCompanion(data);
+    },
+    async saveCompanion() {
+      const want = this.companionEnabled;
+      const { ok, data, error } = await tryCall('set_companion_enabled', want);
+      if (!ok) {
+        this.companionEnabled = !want;  // 起不来就把勾拨回去，别让界面显示已开启
+        this.$dispatch('toast', { text: '启动失败: ' + error, ms: 5000 });
+        return;
+      }
+      this.applyCompanion(data);
+      this.$dispatch('toast', {
+        text: want ? '手机伴侣屏已开启，用手机浏览器打开上面的地址' : '手机伴侣屏已关闭',
+        ms: 4000,
+      });
+    },
+    async resetCompanionPin() {
+      const { ok, data, error } = await tryCall('reset_companion_pin');
+      if (!ok) { this.$dispatch('toast', { text: '重置失败: ' + error }); return; }
+      this.applyCompanion(data);
+      this.$dispatch('toast', { text: '配对码已重置，手机需重新输入' });
     },
   }));
 }

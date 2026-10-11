@@ -26,6 +26,19 @@ const HTML = `
   <div class="card"><h3>静息心率（bpm）</h3><div class="chart" id="health-rhr-chart"></div></div>
   <div class="card"><h3>睡眠结构（小时）</h3><div class="chart" id="health-sleep-chart"></div></div>
   <div class="card"><h3>压力（0-100）</h3><div class="chart" id="health-stress-chart"></div></div>
+  <!-- 主观用力程度：手动录入、截图识别、佳明 app 标签三处同权汇总到这一张周曲线。
+       与配速-心率卡配合看——同心率下 RPE 抬升通常意味着疲劳累积或高温。 -->
+  <div class="card"><h3>主观用力程度（周均 RPE）</h3>
+    <p class="muted">1 极轻松 → 10 拼尽全力。同一配速下周均 RPE 抬升，常见于疲劳累积或高温；
+      只有标过标签的周才有线（断点即没标），柱高是该周跑步次数（右轴）。</p>
+    <template x-if="subjHasData()">
+      <div>
+        <div class="chart" id="health-subj-chart"></div>
+        <p class="muted">虚线 = 同期主观感受（1-5），已按 ×2 映射到同一纵轴便于与 RPE 对照，鼠标悬停看原值。</p>
+      </div>
+    </template>
+    <p class="muted" x-show="!subjHasData()" x-text="subjEmptyNote()"></p>
+  </div>
   <div class="card"><h3>同配速平均心率 · 近 16 周</h3>
     <div class="flex mb8">
       <label class="muted">配速档</label>
@@ -115,6 +128,8 @@ export function initHealth() {
     paceHr: [],
     paceWeekly: { bins: [], weeks: [] },
     paceBinSel: null,
+    // 周均 RPE/主观感受：[{week_start, runs, rpe_n, rpe_avg, feel_n, feel_avg}]
+    subjWeekly: [],
 
     async init() {
       await this.load();
@@ -157,6 +172,9 @@ export function initHealth() {
       const pb = await tryCall('list_pace_bin_weekly', 16);
       this.paceWeekly = pb.ok ? (pb.data || { bins: [], weeks: [] })
         : { bins: [], weeks: [] };
+      // 主观用力程度周曲线：跟着上方时间范围走（标签密度低，给足窗口）
+      const sw = await tryCall('list_weekly_subjective', days);
+      this.subjWeekly = sw.ok ? (sw.data || []) : [];
       const starts = (this.paceWeekly.bins || []).map((b) => b.start_s);
       // 保留用户已选的档；档位消失（跑量变化）或首次加载才回落到默认档
       if (!starts.includes(this.paceBinSel)) {
@@ -279,14 +297,76 @@ export function initHealth() {
       // 同配速心率：选定一个配速档 → 该档近 16 个自然周的心率折线
       // （档宽 15s，比旧的多时期 30s 对照更细、刻度更密）
       const paceBinOpt = this.paceBinOption(colors);
+      const subjOpt = this.subjOption(colors);
       const els = ['health-hrv-chart', 'health-rhr-chart', 'health-sleep-chart',
-                   'health-stress-chart', 'health-pacehr-chart'];
+                   'health-stress-chart', 'health-pacehr-chart', 'health-subj-chart'];
       els.forEach((id, i) => {
         const el = document.getElementById(id);
         if (!el) return;
         disposeChart(el);
-        initChart(el, [hrvChart, rhrChart, sleepChart, stressChart, paceBinOpt][i]);
+        initChart(el, [hrvChart, rhrChart, sleepChart, stressChart, paceBinOpt,
+                       subjOpt][i]);
       });
+    },
+
+    // ---- 主观用力程度（周均）----
+    subjHasData() {
+      return (this.subjWeekly || []).some((w) => w.rpe_avg != null
+        || w.feel_avg != null);
+    },
+    subjEmptyNote() {
+      return '⚠️ 还没有主观标签：在「活动」页录入时填「主观感受 / 用力程度」，'
+        + '或先在设置页同步佳明——佳明 app 里标过的感受会被一并读回。';
+    },
+    /** 周均 RPE 折线 + 周均感受（折半映射到 RPE 轴）+ 跑步次数浅柱（右轴）。
+        三条叠一张图是为了直接读「这次是不是比上次更费劲」——分开画就得来回对。 */
+    subjOption(colors) {
+      // 后端按周降序返回，图表要自左向右 → 反转成时间正序
+      const wks = (this.subjWeekly || []).slice().reverse();
+      const ax = { type: 'category', data: wks.map((w) => w.week_start.slice(5)),
+                   ...baseAxis(colors) };
+      const maxRuns = Math.max(2, ...wks.map((w) => w.runs || 0));
+      return {
+        grid: { left: 40, right: 20, top: 24, bottom: 24 },
+        xAxis: ax,
+        yAxis: [
+          { ...baseAxis(colors), type: 'value', min: 1, max: 10, name: 'RPE',
+            nameTextStyle: { color: colors.muted, fontSize: 11 } },
+          { ...baseAxis(colors), type: 'value', min: 0, max: maxRuns,
+            splitLine: { show: false }, axisLabel: { show: false } },
+        ],
+        tooltip: tooltip(colors, {
+          formatter: (params) => {
+            const ps = Array.isArray(params) ? params : [params];
+            const first = ps[0] || {};
+            const w = wks[first.dataIndex] || {};
+            const lines = [`<b>${w.week_start || ''}</b>`];
+            if (w.rpe_avg != null) {
+              lines.push(`平均 RPE ${w.rpe_avg} / 10（${w.rpe_n} 次标注）`);
+            } else lines.push('平均 RPE —（该周没标）');
+            if (w.feel_avg != null) {
+              lines.push(`平均感受 ${w.feel_avg} / 5（${w.feel_n} 次标注）`);
+            }
+            lines.push(`本周跑步 ${w.runs || 0} 次`);
+            return lines.join('<br/>');
+          },
+        }),
+        series: [
+          { name: '跑步次数', type: 'bar', yAxisIndex: 1, barMaxWidth: 18,
+            data: wks.map((w) => w.runs || 0),
+            itemStyle: { color: colors.ramp[1], opacity: 0.45 } },
+          { name: '平均 RPE', type: 'line', yAxisIndex: 0, connectNulls: false,
+            data: wks.map((w) => w.rpe_avg),
+            lineStyle: { color: colors.accent, width: 2 },
+            itemStyle: { color: colors.accent }, symbolSize: 6 },
+          { name: '平均感受', type: 'line', yAxisIndex: 0, connectNulls: false,
+            // 感受 1-5 乘 2 落到 1-10 轴：同图对照，悬停提示里给原始值
+            data: wks.map((w) => (w.feel_avg == null ? null
+              : +(w.feel_avg * 2).toFixed(1))),
+            lineStyle: { color: colors.kindM, width: 1.5, type: 'dashed' },
+            itemStyle: { color: colors.kindM }, symbolSize: 5 },
+        ],
+      };
     },
     // 选定配速档的近 16 周心率趋势。三层信息叠加，解决「图不直观、有断点、
     // 有跨度没数据」：

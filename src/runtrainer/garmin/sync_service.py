@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 
 from ..db.repos import activity_repo, health_repo, profile_repo, sync_repo
+from ..domain import activity_edit
 from ..domain.workout_analysis import infer_max_hr
 from ..services import settings_service
 from ..utils import dates
@@ -114,6 +115,9 @@ def _activity_to_row(a: RawActivity) -> dict:
         "exercise_load": a.exercise_load,
         "elevation_gain_m": a.elevation_gain_m,
         "elevation_loss_m": a.elevation_loss_m, "calories": a.calories,
+        # 主观数据只在详情接口有（列表概要为 None → upsert 会保留已存值）
+        "feel": activity_edit.norm_feel(a.feel),
+        "rpe": activity_edit.norm_rpe(a.rpe),
         "laps_json": json.dumps(a.laps, ensure_ascii=False) if a.laps else None,
         "has_samples": 0,
     }
@@ -234,7 +238,7 @@ def sync_all() -> dict:
                     stats["max_hr_inferred"] = \
                         f"最大心率按 {inf['n']} 次活动推断 {cur or '—'} → {inf['value']}"
 
-        # 4) 真实同步成功后：清掉 mock/demo 演示活动，并按最新水平重建课表
+        # 4) 真实同步成功后：清掉 mock/demo 演示活动，并按最新水平同步课表配速
         if not settings_service.is_mock_mode():
             removed = activity_repo.delete_demo_activities()
             if removed:
@@ -243,11 +247,13 @@ def sync_all() -> dict:
                 from ..services import plan_service
                 refreshed = plan_service.refresh_active_plan()
                 if refreshed:
+                    # 键名沿用 plan_rebuilt（界面按它报「课表已更新」）；动作已
+                    # 改为原地同步配速，不再整表重建
                     stats["plan_rebuilt"] = True
-                    stats["plan_vdot"] = refreshed["vdot"]
-                    stats["plan_vdot_source"] = refreshed["vdot_source"]
+                    stats["plan_vdot"] = refreshed["target_vdot"]
+                    stats["plan_vdot_source"] = "ability"
             except Exception as e:
-                log.warning("课表重建失败（非致命）: %s", e)
+                log.warning("课表配速同步失败（非致命）: %s", e)
 
         # 4.5) 同步后 → AI 教练自动分析（新训练点评 + 未来几天建议，消息
         #      kind=sync_analysis）。自 4.6 起在后台 daemon 线程执行：分析要

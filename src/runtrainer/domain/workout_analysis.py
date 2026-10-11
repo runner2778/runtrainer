@@ -329,6 +329,43 @@ def weekly_pace_hr(activities: list[dict], start: date, end: date) -> list[dict]
     return out
 
 
+def weekly_subjective(activities: list[dict], start: date, end: date) -> list[dict]:
+    """各周平均主观感受 / 用力程度（ISO 周聚合），供健康页的「主观负荷」曲线。
+
+    activities: 含 start_ts/feel/rpe/distance_m 的活动。
+    返回按周降序：[{week_start, runs, rpe_avg, rpe_n, feel_avg, feel_n}]。
+
+    用简单平均而不是像配速那样按距离加权：RPE 是「这一趟的主观用力」，
+    10km 跑的一次不是 3km 跑的 3 倍信息量——加权会把周均值变成「长跑怎么说」。
+    没标标签的周仍然输出（rpe_avg=None），否则曲线会在没跑步的周断开。
+    """
+    from ..utils import dates as dutil
+    buckets: dict[str, list[dict]] = {}
+    for a in activities:
+        ts = a.get("start_ts")
+        if not ts:
+            continue
+        day = dutil.ts_to_date(ts)
+        if day < start or day > end:
+            continue
+        week_start = day - timedelta(days=day.weekday())
+        buckets.setdefault(week_start.isoformat(), []).append(a)
+    out = []
+    for week in sorted(buckets, reverse=True):
+        rows = buckets[week]
+        rpes = [a["rpe"] for a in rows if a.get("rpe")]
+        feels = [a["feel"] for a in rows if a.get("feel")]
+        out.append({
+            "week_start": week,
+            "runs": len(rows),
+            "rpe_n": len(rpes),
+            "rpe_avg": round(sum(rpes) / len(rpes), 1) if rpes else None,
+            "feel_n": len(feels),
+            "feel_avg": round(sum(feels) / len(feels), 1) if feels else None,
+        })
+    return out
+
+
 PACE_BIN_S = 30          # 配速梯度档宽（s/km）
 PACE_BIN_MIN_S = 180     # 3:00/km：更快的是坏数据/短冲刺测试，不参与对照
 PACE_BIN_MAX_S = 900     # 15:00/km：更慢的不是跑步（走路/通勤），不参与对照

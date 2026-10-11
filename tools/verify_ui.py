@@ -271,6 +271,111 @@ def loaded():
             "  return c ? {n: c.getOption().series.length,"
             "  w: c.getOption().series[0].lineStyle.width} : null; })()})"))
 
+        # 5.6) 一键评估：按钮渲染 → 点击 → 卡片切到「最近三周」口径（落库）
+        out["assess_before"] = json.loads(js(r"""JSON.stringify((() => {
+  const card = [...document.querySelectorAll('#page-dashboard .card')]
+    .find(c => c.textContent.includes('成绩水平预估'));
+  const btn = card && [...card.querySelectorAll('button')]
+    .find(b => b.textContent.includes('评估'));
+  const txt = card ? card.textContent : '';
+  return {hasBtn: !!btn, label: btn ? btn.textContent.trim() : '',
+          quick: txt.includes('一键评估'),
+          win: (txt.match(/近 \d+ 天/) || [''])[0],
+          vdot: (txt.match(/([\d.]+)\s*VDOT/) || [])[1] || ''};
+})())"""))
+        js("[...document.querySelectorAll('#page-dashboard button')]"
+           ".find(b => b.textContent.includes('评估'))"
+           " && [...document.querySelectorAll('#page-dashboard button')]"
+           ".find(b => b.textContent.includes('评估')).click()")
+        for _ in range(12):
+            settle(1.5)
+            if js("(document.querySelector('#page-dashboard').textContent||'')"
+                  ".includes('重新评估')"):
+                break
+        out["assess_after"] = json.loads(js(r"""JSON.stringify((() => {
+  const card = [...document.querySelectorAll('#page-dashboard .card')]
+    .find(c => c.textContent.includes('成绩水平预估'));
+  const btn = card && [...card.querySelectorAll('button')]
+    .find(b => b.textContent.includes('评估'));
+  const txt = card ? card.textContent : '';
+  return {label: btn ? btn.textContent.trim() : '',
+          disabled: btn ? !!btn.disabled : null,
+          win: (txt.match(/近 \d+ 天/) || [''])[0],
+          quick: txt.includes('一键评估'),
+          ago: (txt.match(/一键评估（([^）]*)）/) || [])[1] || '',
+          vdot: (txt.match(/([\d.]+)\s*VDOT/) || [])[1] || '',
+          hasInterval: txt.includes('间歇能力'),
+          hasVo2max: txt.includes('手表 VO2max'),
+          toast: (document.getElementById('toast') || {textContent: ''}).textContent};
+})())"""))
+
+        # 5.7) 丹尼尔斯 VDOT 训练表：区间明细 + 完整矩阵 + 点行切档 + 同步后保住手选档
+        js("location.hash = '#/vdot'")
+        settle(3)
+        out["vdot_page"] = json.loads(js(r"""JSON.stringify((() => {
+  const sec = document.getElementById('page-vdot');
+  const txt = sec ? sec.textContent.replace(/\s+/g, ' ').trim() : '';
+  const zrows = [...sec.querySelectorAll('.vdt-zr')]
+    .filter(r => [...r.querySelectorAll('.rail')].some(s => / zn-/.test(' ' + s.className)));
+  const mx = [...sec.querySelectorAll('.vdt-mx tbody tr')];
+  const cur = mx.filter(r => r.classList.contains('cur'));
+  const hero = sec.querySelector('.hero .big');
+  const badges = [...sec.querySelectorAll('.badge.soft')].map(b => b.textContent.trim());
+  return {
+    navLink: !!document.querySelector('nav a[href="#/vdot"]'),
+    hero: hero ? hero.textContent.trim() : '',
+    srcBadge: badges.find(t => t.startsWith('档位：')) || '',
+    zoneRows: zrows.length,
+    rail0: zrows.length ? zrows[0].querySelector('.rail').className : '',
+    chips: sec.querySelectorAll('.vdt-chip').length,
+    anchors: sec.querySelectorAll('.vdt-anchor').length,
+    hrLast: zrows.length ? zrows[zrows.length - 1].querySelector('.vdt-hr').textContent.trim() : '',
+    paceFirst: zrows.length ? zrows[0].querySelector('.num').textContent.trim() : '',
+    matrixRows: mx.length,
+    mxHead: [...sec.querySelectorAll('.vdt-mx thead th')].map(t => t.textContent.trim()),
+    raceCells: mx.length ? mx[0].querySelectorAll('td.num.muted').length : 0,
+    curVdot: cur.length ? cur[0].querySelector('b').textContent.trim() : '',
+    eq5k: badges.find(t => t.startsWith('5K ')) || '',
+    eqHm: badges.find(t => t.startsWith('半马 ')) || '',
+    noUndef: !/undefined|NaN/.test(txt),
+    txt: txt.slice(0, 150),
+  };
+})())"""))
+        # 点矩阵里 VDOT 60 那一行 → 上方区间明细与高亮跟着切
+        out["vdot_click"] = json.loads(js(r"""JSON.stringify((() => {
+  const rows = [...document.querySelectorAll('#page-vdot .vdt-mx tbody tr')];
+  const t = rows.find(r => r.querySelector('b').textContent.trim() === '60');
+  if (!t) return { found: false, n: rows.length };
+  t.click();
+  return { found: true };
+})())"""))
+        settle(2)
+        out["vdot_after_click"] = json.loads(js(r"""JSON.stringify((() => {
+  const sec = document.getElementById('page-vdot');
+  const cur = [...sec.querySelectorAll('.vdt-mx tbody tr')].filter(r => r.classList.contains('cur'));
+  const zrows = [...sec.querySelectorAll('.vdt-zr')]
+    .filter(r => [...r.querySelectorAll('.rail')].some(s => / zn-/.test(' ' + s.className)));
+  return {
+    hero: (sec.querySelector('.hero .big') || { textContent: '' }).textContent.trim(),
+    srcBadge: ([...sec.querySelectorAll('.badge.soft')].map(b => b.textContent.trim())
+      .find(t => t.startsWith('档位：')) || ''),
+    curVdot: cur.length ? cur[0].querySelector('b').textContent.trim() : '',
+    ezPace: zrows.length ? zrows[1].querySelector('.pace').textContent.trim() : '',
+    inputVal: (sec.querySelector('input[type=number]') || { value: '' }).value,
+  };
+})())"""))
+        # 同步广播：用户手选的档必须保住（不被拉回「当前预估」）
+        js("window.dispatchEvent(new Event('sync-done'))")
+        settle(3)
+        out["vdot_after_sync"] = json.loads(js(r"""JSON.stringify((() => {
+  const sec = document.getElementById('page-vdot');
+  const cur = [...sec.querySelectorAll('.vdt-mx tbody tr')].filter(r => r.classList.contains('cur'));
+  return {
+    hero: (sec.querySelector('.hero .big') || { textContent: '' }).textContent.trim(),
+    curVdot: cur.length ? cur[0].querySelector('b').textContent.trim() : '',
+  };
+})())"""))
+
         # 6) 目标向导第 2 步：能力预估卡片（综合依据列表）
         js("location.hash = '#/goal'")
         settle(3)
@@ -333,10 +438,103 @@ def loaded():
             "JSON.stringify({twoStep: [...document.querySelectorAll('#page-coach button')]"
             "  .some(b => b.textContent.includes('再点一次确认清空'))})"))
 
+        # 8b) 运动员画像卡 + 今日决策（本地计算，无 AI 成本）+ 日历决策徽章
+        out["coach_profile"] = json.loads(js(
+            "JSON.stringify((() => { const c = [...document.querySelectorAll('#page-coach .card')]"
+            "  .find(x => x.textContent.includes('运动员画像')); if (!c) return {card: false};"
+            " return {card: true,"
+            "  verdict: (c.querySelector('.badge')||{textContent:''}).textContent.trim().slice(0,20),"
+            "  lines: c.querySelectorAll('details li').length,"
+            "  hasNote: c.textContent.includes('生活约束')}; })())"))
+        js("location.hash = '#/calendar'")
+        settle(3)
+        out["calendar_decision"] = json.loads(js(
+            "JSON.stringify({badge: !!document.querySelector('#page-calendar .dec-badge'),"
+            " txt: (document.querySelector('#page-calendar .dec-badge')||{textContent:''})"
+            "  .textContent.trim().slice(0,20),"
+            " inToday: !!document.querySelector('#page-calendar .day.today .dec-badge')})"))
+
         # 9) 同步横幅（启动自动同步结果）
         out["banner"] = json.loads(js(
             "JSON.stringify({txt: (document.querySelector('#sync-banner')||{textContent:''})"
             "  .textContent.trim().slice(0,80)})"))
+
+        # 10) 主观数据接入：配速同步横幅 + 主观卡片（活动/仪表盘/健康/日历四处）
+        js("location.hash = '#/dashboard'")
+        settle(3)
+        out["dash_subjective"] = json.loads(js(r"""JSON.stringify((() => {
+  const cards = [...document.querySelectorAll('#page-dashboard .card')];
+  const sub = cards.find(c => c.querySelector('h2')
+            && c.querySelector('h2').textContent.includes('主观状态'));
+  const ps = document.querySelector('#page-dashboard .psync');
+  return {
+    subjCard: !!sub,
+    subjShown: !!sub && getComputedStyle(sub).display !== 'none',
+    subjText: sub ? sub.textContent.replace(/\s+/g, ' ').trim().slice(0, 90) : '',
+    psync: !!ps,
+    psyncText: ps ? ps.textContent.replace(/\s+/g, ' ').trim().slice(0, 70) : '',
+    psyncBtn: ps && ps.querySelector('button')
+              ? ps.querySelector('button').textContent.trim() : '',
+  };})())"""))
+
+        js("location.hash = '#/health'")
+        settle(3.5)
+        out["health_subjective"] = json.loads(js(r"""JSON.stringify((() => {
+  const card = [...document.querySelectorAll('#page-health .card')]
+    .find(c => c.textContent.includes('主观用力程度（周均 RPE）'));
+  const chart = document.getElementById('health-subj-chart');
+  const note = card ? card.querySelector('p.muted') : null;
+  return {
+    card: !!card,
+    chart: !!chart,
+    canvas: chart ? chart.querySelectorAll('canvas').length : 0,
+    emptyNote: note ? note.textContent.replace(/\s+/g, ' ').trim().slice(0, 80) : '',
+  };})())"""))
+
+        js("location.hash = '#/activities'")
+        settle(3)
+        out["act_subjective"] = json.loads(js(r"""JSON.stringify((() => {
+  const page = document.querySelector('#page-activities');
+  const heads = [...page.querySelectorAll('thead th')].map(t => t.textContent.trim());
+  const btns = [...page.querySelectorAll('button')].map(b => b.textContent.trim());
+  return {subjCol: heads.includes('感受/用力'), heads: heads.length,
+          hasManualBtn: btns.some(t => t.includes('手动录入')),
+          hasShotBtn: btns.some(t => t.includes('截图识别')),
+          rows: page.querySelectorAll('tbody tr').length};
+})())"""))
+
+        # 10b) 手动录入表单：开→字段齐→关→无遮罩残留（WebView2 暗屏回归）
+        js("(() => { const b = [...document.querySelectorAll('#page-activities button')]"
+           ".find(x => x.textContent.includes('手动录入')); b && b.click(); })()")
+        settle(1.5)
+        out["act_form_open"] = json.loads(js(r"""JSON.stringify((() => {
+  const m = document.querySelector('.modal.wide');
+  if (!m) return {open: false};
+  const fields = [...m.querySelectorAll('.form-grid input, .form-grid select')];
+  const labels = [...m.querySelectorAll('.form-grid label')].map(l => l.textContent.trim());
+  const sel = [...m.querySelectorAll('select')];
+  return {
+    open: true,
+    fields: fields.length,
+    labels: labels,
+    rpeOptions: sel.length > 1 ? sel[1].options.length : 0,
+    hasOcrBtn: [...m.querySelectorAll('button')].some(b => b.textContent.includes('截图识别')),
+    hasNote: !!m.querySelector('textarea'),
+  };})())"""))
+        js("(() => { const m = document.querySelector('.modal.wide');"
+           " const b = m && [...m.querySelectorAll('button')]"
+           ".find(x => x.textContent.trim() === '取消'); b && b.click(); })()")
+        settle(1.5)
+        out["act_form_closed"] = json.loads(js(
+            "JSON.stringify({masks: document.querySelectorAll('.modal-mask').length,"
+            " wide: document.querySelectorAll('.modal.wide').length})"))
+
+        js("location.hash = '#/calendar'")
+        settle(3)
+        out["cal_psync"] = json.loads(js(
+            "JSON.stringify((() => { const ps = document.querySelector('#page-calendar .psync');"
+            " return {psync: !!ps,"
+            "  txt: ps ? ps.textContent.replace(/\\s+/g,' ').trim().slice(0,70) : ''}; })())"))
     except Exception as e:  # noqa: BLE001
         out["fatal"] = repr(e)
     finally:

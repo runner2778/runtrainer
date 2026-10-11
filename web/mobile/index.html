@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>SuperTrainer 手机版</title>
+<!--
+  手机伴侣屏（web/mobile）——由 companion/handler.py 在 0.0.0.0:8088 提供给同 Wi-Fi 手机。
+  刻意不引 web/vendor/*：伴侣服务只把本目录设为静态根，`../vendor` 会被 translate_path
+  归一化掉，引不到外面。所以这里全部自包含，无框架。
+  鉴权：先 POST /api/pair 换取配对，之后每个业务请求带 X-Companion-PIN 头。
+-->
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  :root {
+    --bg: #0f1115; --card: #181b22; --card2: #1f232c; --line: #2a2f3a;
+    --ink: #e8eaef; --muted: #8b93a3; --accent: #4f9cf9;
+    --good: #3ecf8e; --warn: #f5a623; --bad: #f2564d;
+  }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+  body {
+    font: 15px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    padding-bottom: calc(58px + env(safe-area-inset-bottom));
+  }
+  .wrap { padding: 14px 14px 4px; max-width: 620px; margin: 0 auto; }
+  h1 { font-size: 17px; margin: 4px 0 12px; font-weight: 600; }
+  h1 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; margin: 0 0 9px; color: var(--muted); font-weight: 600; letter-spacing: .3px; }
+  .big { font-size: 26px; font-weight: 650; line-height: 1.15; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row .k { color: var(--muted); font-size: 13px; flex: none; }
+  .row .v { text-align: right; font-variant-numeric: tabular-nums; }
+  .pills { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .pill { background: var(--card2); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--muted); }
+  .pill.g { color: var(--good); } .pill.w { color: var(--warn); } .pill.b { color: var(--bad); }
+  .bar { height: 6px; background: var(--card2); border-radius: 3px; overflow: hidden; margin-top: 10px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .sig { border-top: 1px solid var(--line); padding: 8px 0; }
+  .sig:first-of-type { border-top: 0; }
+  .sig b { font-weight: 600; font-size: 13.5px; }
+  .sig p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+  .btn { display: inline-block; border: 1px solid var(--line); background: var(--card2); color: var(--ink);
+         border-radius: 9px; padding: 9px 14px; font-size: 14px; font-family: inherit; cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #07131f; font-weight: 600; }
+  .btn:disabled { opacity: .5; }
+  .btn.sm { padding: 6px 11px; font-size: 12.5px; }
+  input[type=text] { background: var(--card2); border: 1px solid var(--line); color: var(--ink);
+                     border-radius: 9px; padding: 10px 12px; font-size: 16px; width: 100%; font-family: inherit; }
+  .msg { border-radius: 11px; padding: 9px 12px; margin-bottom: 9px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { background: var(--accent); color: #07131f; margin-left: 34px; }
+  .msg.coach { background: var(--card2); margin-right: 20px; }
+  .msg .who { font-size: 11px; opacity: .65; margin-bottom: 3px; }
+  .chatbar { position: fixed; left: 0; right: 0; bottom: calc(58px + env(safe-area-inset-bottom));
+             background: var(--bg); border-top: 1px solid var(--line);
+             padding: 9px 12px; display: flex; gap: 8px; max-width: 620px; margin: 0 auto; }
+  .tabs { position: fixed; left: 0; right: 0; bottom: 0; display: flex; background: #14171d;
+          border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); z-index: 5; }
+  .tabs button { flex: 1; background: none; border: 0; color: var(--muted); font: inherit;
+                 padding: 16px 0; cursor: pointer; }
+  .tabs button.on { color: var(--accent); font-weight: 600; }
+  .toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 96px; background: #2b3140;
+           color: var(--ink); padding: 9px 16px; border-radius: 9px; font-size: 13px; z-index: 20;
+           max-width: 88vw; text-align: center; }
+  .center { text-align: center; padding: 44px 8px; }
+  .center p { color: var(--muted); font-size: 13.5px; }
+  .spin { display: inline-block; width: 15px; height: 15px; border: 2px solid var(--line);
+          border-top-color: var(--accent); border-radius: 50%; animation: sp .8s linear infinite; }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<!-- 配对 -->
+<section id="pair" class="wrap" hidden>
+  <div class="center">
+    <h1>SuperTrainer 手机版</h1>
+    <p>输入电脑上「设置 → 手机伴侣屏」显示的 6 位配对码。<br>手机需与电脑连同一个 Wi-Fi。</p>
+  </div>
+  <div class="card">
+    <input id="pinInput" type="text" inputmode="numeric" autocomplete="one-time-code"
+           maxlength="6" placeholder="6 位配对码">
+    <p id="pairErr" class="sub" style="color:var(--bad); min-height:20px; margin:8px 0 0;"></p>
+    <button id="pairBtn" class="btn primary" style="width:100%; margin-top:6px;">连接</button>
+  </div>
+</section>
+
+<!-- 主界面 -->
+<section id="app" hidden>
+  <div class="wrap">
+    <div id="loading" class="center"><span class="spin"></span><p>读取数据…</p></div>
+
+    <div id="view-overview" hidden>
+      <h1>今日概览 <small id="todayDate"></small></h1>
+      <div class="card" id="cardReadiness"></div>
+      <div class="card" id="cardRace"></div>
+      <div class="card" id="cardToday"></div>
+      <div class="card" id="cardWeek"></div>
+      <div class="card" id="cardAbility"></div>
+    </div>
+
+    <div id="view-coach" hidden>
+      <h1>AI 教练</h1>
+      <div class="card" id="cardVerdict"></div>
+      <div class="card" id="cardAdvice"></div>
+      <div class="card" id="cardModel"></div>
+    </div>
+
+    <div id="view-chat" hidden>
+      <h1>对话</h1>
+      <div id="chatList"></div>
+    </div>
+  </div>
+
+  <div class="chatbar" id="chatbar" hidden>
+    <input id="chatInput" type="text" placeholder="问教练…" style="flex:1">
+    <button id="chatSend" class="btn primary">发送</button>
+  </div>
+
+  <nav class="tabs">
+    <button data-tab="overview" class="on">概览</button>
+    <button data-tab="coach">教练</button>
+    <button data-tab="chat">对话</button>
+  </nav>
+</section>
+
+<div id="toast" class="toast" hidden></div>
+
+<script>
+"use strict";
+var PIN_KEY = "st_companion_pin";
+
+var $ = function (id) { return document.getElementById(id); };
+
+function toast(text, ms) {
+  var t = $("toast");
+  t.textContent = text;
+  t.hidden = false;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(function () { t.hidden = true; }, ms || 2600);
+}
+
+function pin() { return localStorage.getItem(PIN_KEY) || ""; }
+
+function unwrap(env) {
+  if (!env || !env.ok) throw new Error((env && env.error) || "调用失败");
+  return env.data;
+}
+
+/** POST /api/<method>；返回 {status, json}。401/429 交给调用方决定是否回配对页。 */
+function api(method, body) {
+  return fetch("/api/" + method, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Companion-PIN": pin() },
+    body: JSON.stringify(body || {})
+  }).then(function (r) {
+    return r.json().catch(function () { return null; }).then(function (j) {
+      return { status: r.status, json: j };
+    });
+  });
+}
+
+/** 鉴权类错误统一处理：清 PIN 回配对页。返回 true 表示已处理。 */
+function authFailed(res) {
+  if (res.status === 401 || res.status === 429) {
+    localStorage.removeItem(PIN_KEY);
+    if (res.status === 429) {
+      var wait = (res.json && res.json.retry_after) || 0;
+      toast("尝试次数过多，请 " + wait + " 秒后重试");
+    }
+    showPair();
+    return true;
+  }
+  return false;
+}
+
+function call(method, body) {
+  return api(method, body).then(function (res) {
+    if (authFailed(res)) throw new Error("需要重新配对");
+    return unwrap(res.json);
+  });
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+  });
+}
+
+function fmtSec(s) {
+  if (!s && s !== 0) return "—";
+  s = Math.round(s);
+  var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  var p = function (n) { return (n < 10 ? "0" : "") + n; };
+  return (h ? h + ":" + p(m) : m) + ":" + p(x);
+}
+
+function km(v) { return (v == null) ? "—" : (Math.round(v * 10) / 10) + " km"; }
+
+function row(k, v) {
+  return '<div class="row"><span class="k">' + esc(k) + '</span><span class="v">' + v + "</span></div>";
+}
+
+function cardWith(title, inner) {
+  return "<h2>" + esc(title) + "</h2>" + inner;
+}
+
+var ST_CLS = { good: "g", ok: "w", low: "b", unknown: "" };
+
+// ---------- 概览 ----------
+function renderOverview(d) {
+  $("todayDate").textContent = d.today || "";
+
+  var r = d.readiness || {};
+  var items = (r.items || []).map(function (i) {
+    return '<span class="pill ' + (ST_CLS[i.status] || "") + '">' +
+           esc(i.label) + " " + esc(i.value) + "</span>";
+  }).join("");
+  $("cardReadiness").innerHTML = cardWith("今日恢复度",
+    '<div class="big">' + esc(r.label || "数据不足") + "</div>" +
+    '<p class="sub" style="margin:6px 0 0">' + esc(r.note || "") + "</p>" +
+    (items ? '<div class="pills">' + items + "</div>" : ""));
+
+  if (d.race) {
+    var rc = d.race;
+    $("cardRace").innerHTML = cardWith("目标比赛",
+      '<div class="big">' + rc.days_left + " 天</div>" +
+      '<p class="sub" style="margin:6px 0 0">' + esc(rc.name) + " · " + esc(rc.race_date) + "</p>" +
+      row("当前周次", rc.current_week + " / " + rc.total_weeks + " 周") +
+      row("课表 VDOT", esc(rc.vdot)) +
+      '<div class="bar"><i style="width:' + Math.max(0, Math.min(100, rc.progress_pct || 0)) + '%"></i></div>');
+    $("cardRace").hidden = false;
+  } else {
+    $("cardRace").hidden = true;
+  }
+
+  var tw = d.today_workouts || [];
+  $("cardToday").innerHTML = cardWith("今日训练",
+    tw.length ? tw.map(function (w) {
+      var done = w.status === "completed" || w.auto_done;
+      return row((w.slot > 1 ? "第" + w.slot + "练 · " : "") + w.title,
+        (w.distance_km ? km(w.distance_km) + " · " : "") +
+        (w.pace_zone ? esc(w.pace_zone) + " · " : "") +
+        (done ? '<span style="color:var(--good)">已完成</span>' : "未执行"));
+    }).join("") : '<p class="sub" style="margin:0">今天没有安排训练</p>');
+
+  var w = d.week_load, k = d.kpis || {};
+  if (w) {
+    $("cardWeek").innerHTML = cardWith("本周负荷",
+      row("已跑 / 计划", km(w.done_km) + " / " + km(w.planned_km)) +
+      row("课表执行", (w.done_plan || 0) + " / " + (w.planned_n || 0) + " 节") +
+      (w.pct == null ? "" : '<div class="bar"><i style="width:' + Math.max(0, Math.min(100, w.pct)) + '%"></i></div>') +
+      row("上周跑量", km(k.last_week_km)) +
+      row("ACWR（急慢性负荷比）",
+        k.acwr == null ? "—" :
+        esc(k.acwr.toFixed ? k.acwr.toFixed(2) : k.acwr) +
+        ' <span class="pill ' + (k.acwr_status === "ok" ? "g" : "w") + '">' +
+        (k.acwr_status === "ok" ? "0.8–1.3 健康区间" : "超出健康区间") + "</span>") +
+      (k.monotony == null ? "" :
+        row("训练单调性（7 天）",
+          esc(k.monotony.toFixed ? k.monotony.toFixed(2) : k.monotony) +
+          ' <span class="pill ' + (k.monotony > 2 ? "w" : "g") + '">' +
+          (k.monotony > 2 ? "偏高：起伏过小" : "正常") + "</span>")));
+    $("cardWeek").hidden = false;
+  } else {
+    $("cardWeek").hidden = true;
+  }
+
+  var a = d.ability_30d || {};
+  var preds = a.predictions || {};
+  var order = ["5000", "10000", "21097", "42195"];
+  var labels = { "5000": "5K", "10000": "10K", "21097": "半马", "42195": "全马" };
+  var predHtml = order.filter(function (k2) { return preds[k2]; }).map(function (k2) {
+    return row(labels[k2], fmtSec(preds[k2]));
+  }).join("");
+  $("cardAbility").innerHTML = cardWith("成绩水平预估",
+    '<div class="big">VDOT ' + esc(a.vdot == null ? "—" : a.vdot) + "</div>" +
+    '<p class="sub" style="margin:6px 0 0">基于近 ' + esc(a.window_days) + " 天训练数据</p>" +
+    predHtml +
+    (a.note ? '<p class="sub" style="margin:8px 0 0">' + esc(a.note) + "</p>" : ""));
+}
+
+// ---------- 教练 ----------
+function renderCoach(s) {
+  var dec = s.today_decision;
+  if (dec) {
+    var sigs = (dec.signals || []).map(function (g) {
+      return '<div class="sig"><b>' + esc(g.name) + "</b><p>" + esc(g.evidence) + "</p></div>";
+    }).join("");
+    $("cardVerdict").innerHTML = cardWith("今日裁决",
+      '<div class="big">' + esc(dec.verdict_label) + "</div>" +
+      (dec.note ? '<p class="sub" style="margin:6px 0 0">' + esc(dec.note) + "</p>" : "") +
+      (sigs ? '<div style="margin-top:10px">' + sigs + "</div>" : ""));
+    $("cardVerdict").hidden = false;
+  } else {
+    $("cardVerdict").hidden = true;
+  }
+
+  var adv = s.advice;
+  if (adv && adv.summary) {
+    var ks = (adv.key_signals || []).map(function (x) { return '<span class="pill">' + esc(x) + "</span>"; }).join("");
+    $("cardAdvice").innerHTML = cardWith("AI 今日建议",
+      "<p style='margin:0'>" + esc(adv.summary) + "</p>" +
+      (ks ? '<div class="pills">' + ks + "</div>" : "") +
+      '<p class="sub" style="margin:10px 0 0">调整方案请在电脑端点批准或拒绝（手机端不提供改课表操作）。</p>');
+  } else {
+    $("cardAdvice").innerHTML = cardWith("AI 今日建议",
+      '<p class="sub" style="margin:0">今天还没有生成建议。在电脑上打开 AI 教练页生成，或直接在「对话」里问。</p>');
+  }
+
+  var lines = s.athlete_model_lines || [];
+  $("cardModel").innerHTML = cardWith("运动员画像",
+    lines.length ? lines.map(function (t) { return row("", esc(t)); }).join("")
+                 : '<p class="sub" style="margin:0">数据还不足以建立画像</p>');
+}
+
+// ---------- 对话 ----------
+function msgHtml(m) {
+  var role = m.role === "user" ? "user" : "coach";
+  var adj = (m.adjustments || []).length
+    ? '<p class="sub" style="margin:6px 0 0">含 ' + m.adjustments.length + " 条课表调整（请在电脑端批准）</p>" : "";
+  return '<div class="msg ' + role + '"><div class="who">' +
+         (role === "user" ? "我" : "AI 教练") + "</div>" + esc(m.content) + adj + "</div>";
+}
+
+var chatting = false;
+
+function appendMsg(html) {
+  var box = $("chatList");
+  var empty = box.querySelector(".center");
+  if (empty) empty.remove();
+  var d = document.createElement("div");
+  d.innerHTML = html;
+  box.appendChild(d.firstChild);
+  window.scrollTo(0, document.body.scrollHeight);
+}
+
+function loadChat() {
+  return call("get_chat_history", { limit: 30 }).then(function (list) {
+    $("chatList").innerHTML = list.length
+      ? list.map(msgHtml).join("")
+      : '<div class="center"><p>还没有对话。问点什么试试，比如「这周的训练安排合理吗」。</p></div>';
+    window.scrollTo(0, document.body.scrollHeight);
+  });
+}
+
+function send() {
+  var text = $("chatInput").value.trim();
+  if (!text || chatting) return;
+  chatting = true;
+  $("chatInput").value = "";
+  $("chatSend").disabled = true;
+  appendMsg(msgHtml({ role: "user", content: text }));
+  appendMsg('<div class="msg coach" id="pending"><div class="who">AI 教练</div><span class="spin"></span> 思考中…</div>');
+
+  // request_id 先落 localStorage：手机切后台重发时后端命中缓存，不重复计费
+  var rid = (localStorage.getItem("st_rid") || "") + "";
+  if (!rid) {
+    rid = (Date.now().toString(36) + Math.random().toString(36).slice(2));
+    localStorage.setItem("st_rid", rid);
+  }
+
+  api("coach_chat", { message: text, request_id: rid }).then(function (res) {
+    if (authFailed(res)) return null;
+    if (res.status === 202 && res.json && res.json.task_id) {
+      return pollTask(res.json.task_id, 0);
+    }
+    if (res.status === 200 && res.json && res.json.data && res.json.data.result) {
+      return res.json.data.result;
+    }
+    return res.json;
+  }).then(function (env) {
+    localStorage.removeItem("st_rid");
+    var p = $("pending");
+    if (p) p.remove();
+    if (env === null) return;
+    var data = unwrap(env);
+    appendMsg(msgHtml({ role: "coach", content: data.reply.content,
+                        adjustments: data.reply.adjustments }));
+  }).catch(function (e) {
+    var p = $("pending");
+    if (p) p.remove();
+    appendMsg('<div class="msg coach" style="color:var(--bad)">发送失败：' + esc(e.message) + "</div>");
+  }).then(function () {
+    chatting = false;
+    $("chatSend").disabled = false;
+  });
+}
+
+function pollTask(tid, n) {
+  if (n > 160) throw new Error("等待超时，请重试");
+  return new Promise(function (r) { setTimeout(r, 1500); }).then(function () {
+    return fetch("/api/task/" + tid).then(function (r) { return r.json(); });
+  }).then(function (t) {
+    if (!t) throw new Error("任务丢失");
+    if (t.status === "done") return t.result;
+    if (t.status === "error") return t.result || { ok: false, error: "AI 调用失败" };
+    return pollTask(tid, n + 1);
+  });
+}
+
+// ---------- 页面切换 ----------
+function showPair() {
+  $("pair").hidden = false;
+  $("app").hidden = true;
+}
+
+function setTab(name) {
+  ["overview", "coach", "chat"].forEach(function (t) {
+    $("view-" + t).hidden = t !== name;
+  });
+  $("chatbar").hidden = name !== "chat";
+  document.querySelectorAll(".tabs button").forEach(function (b) {
+    b.classList.toggle("on", b.dataset.tab === name);
+  });
+  if (name === "chat") loadChat().catch(function (e) { toast(e.message); });
+  if (name === "coach") loadCoach();
+}
+
+function loadOverview() {
+  return call("get_dashboard", {}).then(function (d) {
+    $("loading").hidden = true;
+    renderOverview(d);
+  });
+}
+
+function loadCoach() {
+  return call("get_coach_snapshot", {}).then(renderCoach);
+}
+
+function refresh() {
+  $("loading").hidden = false;
+  return loadOverview().catch(function (e) {
+    $("loading").hidden = true;
+    toast("读取失败：" + e.message);
+  }).then(loadCoach).catch(function () {});
+}
+
+// ---------- 配对 ----------
+function tryPair(code) {
+  $("pairBtn").disabled = true;
+  $("pairErr").textContent = "";
+  return fetch("/api/pair", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ pin: code })
+  }).then(function (r) {
+    return r.json().catch(function () { return null; }).then(function (j) {
+      return { status: r.status, json: j };
+    });
+  }).then(function (res) {
+    $("pairBtn").disabled = false;
+    if (res.status === 200 && res.json && res.json.ok) {
+      localStorage.setItem(PIN_KEY, code);
+      $("pair").hidden = true;
+      $("app").hidden = false;
+      setTab("overview");
+      refresh();
+      toast("已连接");
+      return;
+    }
+    if (res.status === 429) {
+      toast("尝试次数过多，请稍后再试");
+      $("pairErr").textContent = "锁定中，请等待 " +
+        ((res.json && res.json.retry_after) || 0) + " 秒";
+      return;
+    }
+    $("pairErr").textContent = "配对码不对，请对照电脑上显示的 6 位数字";
+  }).catch(function (e) {
+    $("pairBtn").disabled = false;
+    $("pairErr").textContent = "连不上电脑：" + e.message + "（确认在同一个 Wi-Fi）";
+  });
+}
+
+$("pairBtn").addEventListener("click", function () { tryPair($("pinInput").value.trim()); });
+$("pinInput").addEventListener("keydown", function (e) {
+  if (e.key === "Enter") tryPair($("pinInput").value.trim());
+});
+$("chatSend").addEventListener("click", send);
+$("chatInput").addEventListener("keydown", function (e) { if (e.key === "Enter") send(); });
+document.querySelectorAll(".tabs button").forEach(function (b) {
+  b.addEventListener("click", function () { setTab(b.dataset.tab); });
+});
+
+// 冷启动：已配对就直接进主界面（PIN 错由 authFailed 打回配对页）
+if (pin()) {
+  $("app").hidden = false;
+  setTab("overview");
+  refresh();
+} else {
+  showPair();
+}
+</script>
+</body>
+</html>

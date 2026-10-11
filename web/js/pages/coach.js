@@ -46,6 +46,34 @@ const HTML = `
   <div>
     <div class="card">
       <div class="flex between">
+        <h2>运动员画像 <span class="muted">系统从你的历史数据学出的个人规律</span></h2>
+        <span class="badge" :class="'st-' + decisionCls" x-show="decision"
+              x-text="decision.verdict_label"></span>
+      </div>
+      <template x-if="decision">
+        <div class="mt8">
+          <p class="banner warn" x-show="decision.score >= 1" x-text="decision.note"></p>
+          <p class="muted" x-show="decision.score === 0" x-text="decision.note"></p>
+          <ul class="signals" x-show="decision.signals && decision.signals.length">
+            <template x-for="s in decision.signals" :key="s.name">
+              <li><b x-text="s.name"></b>：<span class="muted" x-text="s.evidence"></span></li>
+            </template>
+          </ul>
+        </div>
+      </template>
+      <details class="mt8" x-show="athleteModelLines.length">
+        <summary class="muted">长期画像详情（本地计算、随数据更新；n 为样本量）</summary>
+        <ul class="signals mt8">
+          <template x-for="l in athleteModelLines" :key="l"><li x-text="l"></li></template>
+        </ul>
+      </details>
+      <p class="mt8" x-show="scheduleNote">
+        📅 生活约束（教练已知）：<span x-text="scheduleNote"></span>
+      </p>
+    </div>
+
+    <div class="card">
+      <div class="flex between">
         <h2>今日 AI 教练建议 <span class="muted" x-text="fmtDate(today)"></span></h2>
         <button class="btn ghost" @click="refresh()">↻ 刷新</button>
       </div>
@@ -262,6 +290,9 @@ export function initCoach() {
     today: localToday(),
     hasActivePlan: false,
     advice: null,
+    athleteModelLines: [],   // 运动员长期画像（本地计算，get_coach_snapshot 随附）
+    decision: null,          // 今日决策（本地规则引擎）
+    scheduleNote: '',        // 生活约束备注（教练从聊天学到的现实约束）
     history: [],
     messages: [],
     chatHasMore: false,
@@ -284,6 +315,12 @@ export function initCoach() {
     get allPending() {
       return this.advice && this.advice.adjustments.some(a => a.status === 'pending');
     },
+    // 裁决 → 徽章颜色（st-ok 绿 / st-warn 黄 / st-bad 红 / st-pending 蓝）
+    get decisionCls() {
+      const v = this.decision && this.decision.verdict;
+      return { execute: 'ok', execute_caution: 'warn', reduce: 'warn',
+               easy_or_rest: 'bad', rest: 'bad', rest_day: 'pending' }[v] || 'pending';
+    },
     hasPending(m) {
       return (m.adjustments || []).some(a => a.status === 'pending');
     },
@@ -304,6 +341,9 @@ export function initCoach() {
       this.error = '';
       this.hasActivePlan = data.has_active_plan;
       this.advice = data.advice;
+      this.athleteModelLines = data.athlete_model_lines || [];
+      this.decision = data.today_decision;
+      this.scheduleNote = data.schedule_note || '';
       this.history = data.history || [];
       await this.refreshModelInfo();
       await this.loadMessages();
@@ -387,7 +427,7 @@ export function initCoach() {
         return;
       }
       if (data.rebuild) {
-        this.$dispatch('toast', { text: `课表已按最新水平重建（VDOT ${data.rebuild.vdot}）` });
+        this.$dispatch('toast', { text: `课表配速已按最新水平同步（VDOT ${data.rebuild.vdot}）` });
       }
       await this.loadMessages();
       this.scrollChat();

@@ -381,6 +381,50 @@ tbody tr:hover { background: var(--bg-hover); }
   overflow-y: auto;
 }
 .modal h3 { font-size: 16px; margin-bottom: 14px; }
+.modal.wide { width: 720px; }
+
+/* 录入表单：两列字段网格（比内容网格更紧，表单字段之间不该有大空隙） */
+.form-grid { display: grid; grid-template-columns: repeat(2, 1fr); column-gap: 14px; }
+.form-grid .form-row { margin-bottom: 10px; }
+.modal textarea { resize: vertical; }
+
+/* 截图识别面板：原文必须原样回显（识别只做预填，用户得能核对） */
+.ocr-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-hover);
+}
+.ocr-raw {
+  font-family: Consolas, "Courier New", monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 120px;
+  overflow-y: auto;
+  margin: 8px 0;
+  color: var(--text-muted);
+}
+.ocr-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  border-radius: 6px;
+  margin-bottom: 6px;
+}
+.ocr-warn { font-size: 12px; color: var(--st-warning); margin-top: 4px; }
+
+/* 课表配速待同步提示条（仪表盘 / 日历） */
+.psync {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--st-warning) 12%, transparent);
+}
+.psync .muted { font-size: 12px; }
 
 /* 向导步骤 */
 .steps { display: flex; gap: 6px; margin-bottom: 18px; }
@@ -648,3 +692,46 @@ table th { border-bottom: 1.5px solid var(--border-strong); }
 }
 .z-row .num.muted { white-space: nowrap; }
 .z-row .pace { font-weight: 700; white-space: nowrap; }
+
+/* ---------- 丹尼尔斯 VDOT 训练表页（#page-vdot）：区间明细 + 完整矩阵 ---------- */
+.vdt-ctl { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.vdt-ctl input[type=number] { width: 82px; }
+/* 区间明细行：轨道 + 区间名 + %VDOT + 储备心率 + 配速 + 用途 + 典型课 */
+.vdt-z {
+  display: flex; flex-direction: column;
+  border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+  background: var(--bg-card);
+}
+.vdt-zr {
+  display: grid;
+  grid-template-columns: 4px minmax(96px, auto) 86px minmax(150px, auto)
+                         minmax(126px, auto) 1fr minmax(190px, auto);
+  column-gap: 10px; align-items: center;
+  padding: 6px 10px 6px 0; font-size: 12px;
+  border-top: 1px solid var(--gridline);
+}
+.vdt-zr:first-child { border-top: none; }
+.vdt-zr:hover { background: var(--bg-hover); }
+.vdt-zr .rail { align-self: stretch; background: var(--border); }
+.vdt-zr .pace { font-weight: 700; white-space: nowrap; }
+.vdt-hr { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.vdt-hr b { color: var(--accent); font-weight: 700; }
+.vdt-anchor { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+.vdt-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.vdt-chip {
+  border: 1px solid var(--border); background: var(--bg-hover);
+  border-radius: 3px; padding: 1px 6px; font-size: 11px; color: var(--text-muted);
+}
+/* 完整矩阵：固定表头 + 可滚，当前档整行高亮，点行即切档 */
+.vdt-scroll { max-height: 520px; overflow: auto; border: 1px solid var(--border); border-radius: 3px; }
+.vdt-mx { width: 100%; border-collapse: collapse; font-size: 12px; }
+.vdt-mx th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--bg-card); border-bottom: 1.5px solid var(--border-strong);
+  padding: 5px 8px; white-space: nowrap;
+}
+.vdt-mx td { padding: 3px 8px; white-space: nowrap; border-top: 1px solid var(--gridline); }
+.vdt-mx tbody tr { cursor: pointer; }
+.vdt-mx tbody tr:hover { background: var(--bg-hover); }
+.vdt-mx tbody tr.cur { background: color-mix(in srgb, var(--accent) 15%, transparent); font-weight: 700; }
+.vdt-mx tbody tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }

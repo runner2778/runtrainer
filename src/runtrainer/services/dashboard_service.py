@@ -9,7 +9,7 @@ from datetime import date, timedelta
 
 from ..db.repos import (activity_repo, chat_repo, goal_repo, health_repo, kv_repo,
                         plan_repo, profile_repo, sync_repo)
-from ..domain import load_metrics
+from ..domain import load_metrics, vdot as vd
 from ..utils import dates, jsonutil
 
 CACHE_PREFIX = "coach:"  # 与 coach_service 共用今日建议缓存键
@@ -32,6 +32,40 @@ READINESS_NOTES = {
 
 def _status_order(st: str) -> int:
     return {"good": 3, "ok": 2, "low": 1, "unknown": 0}.get(st, 0)
+
+
+SUBJECTIVE_DAYS = 7
+
+
+def _subjective_summary(acts: list[dict], today: date) -> dict:
+    """近 7 天的主观感受 / 用力程度汇总（手动录入、截图识别、佳明标签三处同权）。
+
+    与配速是两套信息：同心率下 RPE 偏高常见于疲劳累积或高温。这里只做展示，
+    不折算成负荷数值——标签样本还太少，算出来的「主观负荷」会装得像真的一样。
+    """
+    start = (today - timedelta(days=SUBJECTIVE_DAYS - 1)).isoformat()
+
+    def _in_window(a: dict) -> bool:
+        ts = a.get("start_ts")
+        return bool(ts) and dates.ts_to_date(ts).isoformat() >= start
+
+    rows = [a for a in acts if _in_window(a)]
+    feels = [a["feel"] for a in rows if a.get("feel")]
+    rpes = [a["rpe"] for a in rows if a.get("rpe")]
+    notes = [{"date": dates.ts_to_date(a["start_ts"]).isoformat(),
+              "name": a.get("name"), "note": a["note"]}
+             for a in sorted(rows, key=lambda r: r["start_ts"], reverse=True)
+             if a.get("note")][:5]
+    return {
+        "days": SUBJECTIVE_DAYS,
+        "runs": len(rows),
+        "feel_n": len(feels),
+        "feel_avg": round(sum(feels) / len(feels), 1) if feels else None,
+        "rpe_n": len(rpes),
+        "rpe_avg": round(sum(rpes) / len(rpes), 1) if rpes else None,
+        "rpe_max": max(rpes) if rpes else None,
+        "notes": notes,
+    }
 
 
 def _readiness(h: dict, profile: dict, baseline_hr: float | None) -> dict:
@@ -142,22 +176,45 @@ def _decode_activity(a: dict) -> dict:
 
 
 def _ability_30d(profile: dict, today: date, plan_vdot=None) -> dict:
-    """成绩水平预估（仪表盘卡）——与目标页/AI 教练走 plan_service 的
-    ability_assessment() 统一入口：180 天同源同口径（含近一年 PB/保持度、
-    课表完成度自动判定、比赛心率对照档案最大心率）。每次 get_dashboard /
-    同步完成后端重算，天然随每一次同步即时刷新；不再有第二套 30 天口径
-    造成仪表盘与向导/AI 数字不一致（曾出现 50.6 vs 55.0 的分裂）。
+    """成绩水平预估（仪表盘卡）——走 plan_service 的 ability_assessment()
+    统一入口（含近一年 PB/保持度、课表完成度自动判定、比赛心率对照档案
+    最大心率），全站同源同口径，不再有第二套 30 天口径造成仪表盘与向导/AI
+    数字不一致（曾出现 50.6 vs 55.0 的分裂）。
+
+    用户点过「一键评估」后优先显示那次结果（最近三周、间歇能力占大头）；
+    它是**同一函数**换了窗口与权重，且新活动进库会自动重估（见
+    plan_service.quick_assessment_cached），所以不会变成停在过去的死数字。
     """
-    from .plan_service import ability_assessment
-    a = ability_assessment(today)
+    from .plan_service import ability_assessment, quick_assessment_cached
+    quick = quick_assessment_cached(today)
+    a = quick or ability_assessment(today)
+    n = a.get("window_days", 180)
+    # 预测区间（第十九批）：个人误差学习给出的半宽（VDOT）→ 换算成该距离
+    # 的秒数，前端徽章直接显示 ±；只给有该距离比赛误差记录的距离，
+    # 没有就是没有——不装一个拍出来的 ±。
+    prediction_bands = {}
+    for label, sec in (a.get("predictions") or {}).items():
+        iv = (a.get("prediction_intervals") or {}).get(label)
+        dist = vd.DISTANCES.get(label)
+        if iv and dist:
+            v_at = vd.estimate_vdot(dist, sec)
+            half_s = int(round(sec - vd.predict_time(dist, v_at + iv["half_vdot"])))
+            # 前端提示词「近 n 场该距离比赛」：该距离没有比赛误差记录时用
+            # 跨距离池化的全开比赛数（执行噪声的真实来源，批33 口径）
+            prediction_bands[label] = {"half_s": max(half_s, 0),
+                                       "n": iv["n"] if iv["n"] else iv["n_pooled"]}
     return {
-        "window_days": a.get("window_days", 180),
+        "window_days": n,
+        "mode": a.get("mode") or "long",
+        "assessed_at": a.get("assessed_at"),
         "plan_vdot": plan_vdot,  # 对照用：课表训练按目标页定的 VDOT 配速
         **{k: a.get(k) for k in ("vdot", "predictions", "zones", "evidence",
                                  "max_hr", "as_of")},
+        "prediction_bands": prediction_bands,
+        "personal_races": a.get("personal_races"),
         "year_bests": a.get("year_bests") or [],
         "consistency": a.get("consistency"),
-        "note": ("近 180 天跑步数据不足，无法综合预估；跑几次后会自动更新。"
+        "note": (f"近 {n} 天跑步数据不足，无法综合预估；跑几次后会自动更新。"
                  if not a.get("vdot") else None),
     }
 
@@ -294,8 +351,12 @@ def get_dashboard() -> dict:
         "last_stats": jsonutil.loads(st["meta_json"]).get("last_stats") if st.get("meta_json") else None,
     }
 
-    # 成绩水平预估（近 30 天）：与目标页 180 天能力卡同源算法，窗口不同
-    # 且每次同步自动重算（syncRefresh → get_dashboard）
+    # 主观感受/用力程度（近 7 天）：复用上面已取的活动行，不再多查一次库
+    out["subjective"] = _subjective_summary(acts, today)
+
+    # 成绩水平预估：与目标页 180 天能力卡同源算法（默认窗口 180 天），
+    # 每次同步自动重算（syncRefresh → get_dashboard）；用户点过一键评估后
+    # 显示那次最近三周的结果
     out["ability_30d"] = _ability_30d(profile, today,
                                       plan["vdot"] if plan else None)
     return out

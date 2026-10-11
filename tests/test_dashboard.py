@@ -216,6 +216,32 @@ def test_ability_30d_insufficient_data(monkeypatch):
     assert ab["note"] and "不足" in ab["note"]
 
 
+def test_ability_card_switches_to_quick_after_assessment():
+    """点过一键评估后，卡片显示那次最近三周的结果（mode=quick/窗口 21 天）；
+    没点过则仍是 180 天长期口径（用户不该凭空看到另一套数字）。"""
+    from runtrainer.db.repos import profile_repo
+    profile_repo.upsert_profile({"vo2max": 50.0, "max_hr": 185})
+    assert dashboard_service.get_dashboard()["ability_30d"]["mode"] == "long"
+    assert dashboard_service.get_dashboard()["ability_30d"]["window_days"] == 180
+
+    plan_service.quick_assessment()
+    ab = dashboard_service.get_dashboard()["ability_30d"]
+    assert ab["mode"] == "quick"
+    assert ab["window_days"] == 21
+    assert ab["assessed_at"]
+    assert ab["vdot"] is not None
+
+
+def test_bridge_run_quick_assessment(monkeypatch):
+    """bridge 一键评估：返回落库结果，且仪表盘随即显示它。"""
+    from runtrainer.db.repos import profile_repo
+    profile_repo.upsert_profile({"vo2max": 50.0, "max_hr": 185})
+    res = Api().run_quick_assessment()
+    assert res["ok"] is True and res["data"]["mode"] == "quick"
+    assert dashboard_service.get_dashboard()["ability_30d"]["mode"] == "quick"
+
+
+
 def test_ability_30d_plan_vdot_ref(monkeypatch, plan):
     """有课表时带出对照用 plan_vdot（课表 VDOT 45），供前端做水平差提示。"""
     p, _ = plan
@@ -274,12 +300,15 @@ def test_new_race_input_reflects_on_next_dashboard_call(monkeypatch, plan):
     assert ab1["vdot"] and ab1["vdot"] > 0
     assert ab1["predictions"] and ab1["predictions"]["5K"] > 0
 
-    # 跑得更快（~40:30）→ 下一次读取即用新成绩，水平再升
+    # 跑得更快（~40:30）→ 下一次读取即用新成绩，水平再升。
+    # 第二场能被回放进个人历史（回放需要此前已有可预测证据）→ 走批33 证据
+    # 管线，比赛证据来源叫「比赛通道」（个人校准也同步生效）；recent_race
+    # 是第一场、个人历史为空时的旧路径来源名。
     _insert_race(today - timedelta(days=2), 40.5, "race-2")
     d2 = dashboard_service.get_dashboard()
     ab2 = d2["ability_30d"]
     assert ab2["vdot"] > ab1["vdot"]
-    race_ev = next(e for e in ab2["evidence"] if e["source"] == "recent_race")
+    race_ev = next(e for e in ab2["evidence"] if e["source"] == "比赛通道")
     assert race_ev["detail"]                 # 标注带出新成绩说明
 
 
